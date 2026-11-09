@@ -19,7 +19,7 @@ wasmtime = { version = "49", default-features = false, features = ["cranelift", 
 wit-component = "0.263"
 jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 base64 = "0.22"
-ed25519-dalek = "2"
+ed25519-dalek = "3"
 getrandom = "0.2"
 sha2 = "0.10"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
