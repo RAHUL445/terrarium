@@ -1,0 +1,49 @@
+{
+  "id": "limits",
+  "name": "Limits fixture",
+  "version": "0.1.0",
+  "api": "terrarium:plugin@0.1.0",
+  "storage": {
+    "version": 1,
+    "tables": [
+      {
+        "name": "notes",
+        "columns": [
+          {
+            "name": "note",
+            "type": "text"
+          }
+        ]
+      }
+    ]
+  },
+  "operations": {
+    "ok": {},
+    "spin": {},
+    "grow": {},
+    "insert_then_fail": {},
+    "insert_then_trap": {},
+    "spam": {},
+    "write_sql": {},
+    "make_task": {},
+    "undeclared": {},
+    "forbidden_op": {},
+    "make_then_fail": {},
+    "oversized_reply": {},
+    "oversized_writes": {}
+  },
+  "queries": {
+    "all": {
+      "sql": "SELECT id, note FROM notes",
+      "params": []
+    }
+  },
+  "limits": {
+    "fuel": 50000000,
+    "memory_mb": 16,
+    "timeout_ms": 5000
+  },
+  "uses": [
+    "tasks"
+  ]
+}

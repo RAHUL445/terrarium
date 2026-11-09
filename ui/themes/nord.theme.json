@@ -1,0 +1,38 @@
+{
+  "id": "nord",
+  "name": "Nord",
+  "version": "1.0.0",
+  "description": "Arctic blues and frost greys.",
+  "author": "Terrarium",
+  "font": "system",
+  "light": {
+    "bg": "#eceff4",
+    "surface": "#ffffff",
+    "border": "#d8dee9",
+    "ink": "#2e3440",
+    "muted": "#4c566a",
+    "accent": "#3b6ea5",
+    "accent-soft": "#e1e9f3",
+    "accent-ink": "#264a73",
+    "accent-strong": "#3b6ea5",
+    "ok": "#4a7a3a",
+    "warn-bg": "#f7eedb",
+    "warn-ink": "#6e4a12",
+    "danger": "#a53b44"
+  },
+  "dark": {
+    "bg": "#242933",
+    "surface": "#2e3440",
+    "border": "#3b4252",
+    "ink": "#eceff4",
+    "muted": "#b3bccc",
+    "accent": "#88c0d0",
+    "accent-soft": "#33435a",
+    "accent-ink": "#c9e4ec",
+    "accent-strong": "#3b6ea5",
+    "ok": "#a3be8c",
+    "warn-bg": "#4a3b22",
+    "warn-ink": "#ebcb8b",
+    "danger": "#e48b93"
+  }
+}

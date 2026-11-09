@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "tables": [
+    {
+      "name": "items",
+      "delete_policy": "trash",
+      "columns": [
+        { "name": "title", "type": "text" },
+        { "name": "done", "type": "boolean", "default": false },
+        { "name": "points", "type": "integer", "rule": "counter" }
+      ]
+    }
+  ]
+}

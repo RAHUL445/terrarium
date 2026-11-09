@@ -1,0 +1,38 @@
+{
+  "id": "paper",
+  "name": "Paper",
+  "version": "1.0.0",
+  "description": "Warm sepia pages and a serif face, for reading.",
+  "author": "Terrarium",
+  "font": "serif",
+  "light": {
+    "bg": "#f6f1e7",
+    "surface": "#fffcf5",
+    "border": "#e5dccb",
+    "ink": "#2b2418",
+    "muted": "#5f5443",
+    "accent": "#8a4b14",
+    "accent-soft": "#f3e6d3",
+    "accent-ink": "#5c300a",
+    "accent-strong": "#8a4b14",
+    "ok": "#4b6b22",
+    "warn-bg": "#fbefd9",
+    "warn-ink": "#6b3d0c",
+    "danger": "#a8321e"
+  },
+  "dark": {
+    "bg": "#1a1610",
+    "surface": "#231e16",
+    "border": "#3a3226",
+    "ink": "#efe6d6",
+    "muted": "#b5a790",
+    "accent": "#e0a466",
+    "accent-soft": "#3a2a17",
+    "accent-ink": "#f3d3ae",
+    "accent-strong": "#8a4b14",
+    "ok": "#a9c97a",
+    "warn-bg": "#3d2a10",
+    "warn-ink": "#f3d3ae",
+    "danger": "#f08d7a"
+  }
+}

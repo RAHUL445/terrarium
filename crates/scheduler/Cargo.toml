@@ -1,0 +1,18 @@
+[package]
+name = "terrarium-scheduler"
+description = "Scheduled plugin operations: due times, runs across devices, retries and history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+terrarium-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+
+[dev-dependencies]
+tempfile.workspace = true

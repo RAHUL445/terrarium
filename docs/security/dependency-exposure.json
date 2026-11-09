@@ -1,0 +1,71 @@
+{
+  "review_date": "2026-11-07",
+  "packages": [
+    {
+      "name": "loro",
+      "version": "1.17.1",
+      "checksum": "410c939fe3bee34b8ed61f7aea93201fb136629f685ffa557039c4d9952f9988",
+      "reviewed_source_sha256": "877d6abb7e4f575fc37d5b660b7813ae1e93716d12b8e27760b013c031d00788"
+    },
+    {
+      "name": "loro-internal",
+      "version": "1.17.1",
+      "source_path": "vendor/loro-internal",
+      "reviewed_source_sha256": "6b89d8eac7ad6bb27301c5632e544d725a7409f55f71815e041d6038513d36ee"
+    },
+    {
+      "name": "loro-common",
+      "version": "1.17.0",
+      "checksum": "bd3f7afbafc4db85aefe9620e7e99fa49c974477563904f226ae96fc9674eade",
+      "reviewed_source_sha256": "034d17a89e1607bfaacd7ace21991bc0dd034945163072228ae8270362082376"
+    },
+    {
+      "name": "imbl",
+      "version": "7.0.2",
+      "checksum": "46bad832b9b463ed9398b8506488cc2e3b897a9d44f13af115f382aac71f4fec",
+      "reviewed_source_sha256": "dd8f18913480cb25b65f2c19ad546f317f2a2dfd66f3bd24b48191e734403f5c"
+    },
+    {
+      "name": "imbl-sized-chunks",
+      "version": "0.2.0",
+      "checksum": "2a0813be332553f857953298749fa19549e8b61b80589757c29b4e2a804fa9c6",
+      "reviewed_source_sha256": "d59f964c158364aed712d97e8b555549509221e97bcbe25fba79e3f86f710180"
+    },
+    {
+      "name": "glib",
+      "version": "0.18.5",
+      "checksum": "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5"
+    }
+  ],
+  "exclusive_consumers": {
+    "im": [],
+    "sized-chunks": [],
+    "imbl": [
+      "loro-internal"
+    ],
+    "imbl-sized-chunks": [
+      "imbl"
+    ]
+  },
+  "targets": [
+    "aarch64-apple-darwin",
+    "aarch64-linux-android"
+  ],
+  "scope": "Drift guard for a source review; not an audit waiver or proof of general library soundness.",
+  "features_by_target": {
+    "aarch64-apple-darwin": {
+      "loro": "counter,default",
+      "loro-common": "counter,serde_json",
+      "loro-internal": "counter",
+      "imbl": "serde",
+      "imbl-sized-chunks": "default,std"
+    },
+    "aarch64-linux-android": {
+      "loro": "counter,default",
+      "loro-common": "counter,serde_json",
+      "loro-internal": "counter",
+      "imbl": "serde",
+      "imbl-sized-chunks": "default,std"
+    }
+  }
+}

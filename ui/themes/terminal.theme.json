@@ -1,0 +1,23 @@
+{
+  "id": "terminal",
+  "name": "Terminal",
+  "version": "1.0.0",
+  "description": "Green on black, monospaced. Dark only.",
+  "author": "Terrarium",
+  "font": "mono",
+  "dark": {
+    "bg": "#050805",
+    "surface": "#0b120b",
+    "border": "#1d3a1d",
+    "ink": "#c8f7c5",
+    "muted": "#7fbf7a",
+    "accent": "#4ce26a",
+    "accent-soft": "#0f2a14",
+    "accent-ink": "#a9f5b6",
+    "accent-strong": "#1d7a33",
+    "ok": "#4ce26a",
+    "warn-bg": "#2a2205",
+    "warn-ink": "#f1e05a",
+    "danger": "#ff6b6b"
+  }
+}

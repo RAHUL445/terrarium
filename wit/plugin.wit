@@ -1,0 +1,142 @@
+package terrarium:plugin@0.1.0;
+
+/// Shared types. Row values cross the boundary as JSON text because their
+/// shape comes from each plugin's own schema.
+interface types {
+  /// A JSON document (object, array or scalar), UTF-8.
+  type json = string;
+
+  record plugin-error {
+    /// Stable machine-readable code, e.g. `not-found`, `in-trash`, `invalid`.
+    code: string,
+    message: string,
+  }
+}
+
+/// The plugin's own SQLite database. Reads are read-only SQL; writes are
+/// host calls so every change lands in the change log. All calls made during
+/// one operation commit together or not at all.
+interface storage {
+  use types.{json, plugin-error};
+
+  /// Runs a read-only SELECT. `params` is a JSON array bound to ?1, ?2, ...
+  /// Returns a JSON array of row objects.
+  query: func(sql: string, params: json) -> result<json, plugin-error>;
+  /// Inserts a row; returns its new id (UUIDv7).
+  insert: func(table: string, values: json) -> result<string, plugin-error>;
+  update: func(table: string, row: string, values: json) -> result<_, plugin-error>;
+  increment: func(table: string, row: string, column: string, delta: json) -> result<_, plugin-error>;
+  delete: func(table: string, row: string) -> result<_, plugin-error>;
+  restore: func(table: string, row: string) -> result<_, plugin-error>;
+}
+
+/// Time. Calendar functions use the host's bundled time-zone database, so
+/// every device computes the same local dates. An empty `tz` means the
+/// user's timezone.
+interface clock {
+  use types.{plugin-error};
+
+  /// Wall-clock milliseconds since the Unix epoch.
+  now-ms: func() -> u64;
+  /// IANA timezone name of the user, e.g. `Asia/Kolkata`.
+  timezone: func() -> string;
+  /// Today's local date, `YYYY-MM-DD`.
+  today: func(tz: string) -> result<string, plugin-error>;
+  /// Local date of a UTC instant, `YYYY-MM-DD`.
+  local-date: func(at-ms: u64, tz: string) -> result<string, plugin-error>;
+  /// UTC milliseconds for a local date and `HH:MM` time. A time skipped by
+  /// a clock change moves forward; a repeated time uses the first instance.
+  local-to-utc: func(date: string, time: string, tz: string) -> result<u64, plugin-error>;
+  /// Weekday of a date, Monday = 0 through Sunday = 6.
+  weekday: func(date: string) -> result<u8, plugin-error>;
+  /// `date` plus `days` (may be negative), `YYYY-MM-DD`.
+  add-days: func(date: string, days: s32) -> result<string, plugin-error>;
+}
+
+/// Calls into other plugins through interfaces they provide. The caller
+/// must list the interface under `uses` in its manifest; the provider must
+/// list the operation under `provides`.
+interface interop {
+  use types.{json, plugin-error};
+
+  call: func(iface: string, operation: string, args: json) -> result<json, plugin-error>;
+  /// Whether some installed plugin provides `iface`.
+  available: func(iface: string) -> bool;
+}
+
+/// Speech to text with a local model. Only some devices have one (the
+/// desktop with Parakeet configured); elsewhere `available` is false and
+/// `transcribe` fails with code `unavailable`. Audio never leaves the device.
+interface speech {
+  use types.{plugin-error};
+
+  available: func() -> bool;
+  /// Base64 audio (WAV, M4A, WebM, Ogg or MP3), at most 8 MiB and 3 minutes.
+  transcribe: func(audio-base64: string) -> result<string, plugin-error>;
+}
+
+/// Text generation through the provider the user set up in Settings → AI.
+/// Needs the `ai` permission. A request runs on the host after the calling
+/// operation commits, never inside it; the host then calls the plugin's
+/// operation `on-done` with `{request, ok, text?, model?, error?, context}`
+/// (`error` is `{code, message, temporary}`). The plugin never sees the
+/// provider, the API key or the network.
+interface ai {
+  use types.{json, plugin-error};
+
+  /// Whether a request would be accepted now (set up, on, within limits).
+  available: func() -> bool;
+  /// Queues `{system?, prompt, model?, max_tokens?, temperature?, context?}`
+  /// and returns the request id. `context` (under 64 KB) comes back to
+  /// `on-done` unchanged. Fails with `unavailable` when AI is not set up.
+  submit: func(request: json, on-done: string) -> result<string, plugin-error>;
+}
+
+/// Runs the plugin's own operations on a schedule. The host owns timing:
+/// a due run calls the operation on whichever device is open, with
+/// `args.$run` = `{id, schedule, slot_ms, date, time, tz, previous_ms,
+/// attempt, manual}`. Making the same run id twice must be
+/// harmless. Return error code `retry` for a temporary failure (tried again
+/// after 15 min, then 1 h) or `skip` when the run should not happen; any
+/// other error fails the run (errors roll back the operation's changes; to
+/// keep them, return `{"$run": {"status": "failed" | "skipped" | "retry",
+/// "message"}}` instead). A run that submits an AI request ends when the
+/// reply has been delivered.
+interface schedule {
+  use types.{json, plugin-error};
+
+  /// Creates or replaces schedule `id` (1–60 of `a-z A-Z 0-9 - _ .`) with
+  /// `{name, repeat, tz?, run_on?, operation, args?, enabled?}`; `repeat` is
+  /// `{every: "minutes", minutes}`, `{every: "day", at}`,
+  /// `{every: "week", days, at}` or `{every: "month", day, at}`.
+  /// Changes apply when the calling operation commits.
+  set: func(id: string, schedule: json) -> result<_, plugin-error>;
+  remove: func(id: string) -> result<_, plugin-error>;
+  /// This plugin's schedules in this space, with `next_ms` and `last_run`.
+  %list: func() -> result<json, plugin-error>;
+  /// Runs of schedule `id`, newest first.
+  runs: func(id: string, limit: u32) -> result<json, plugin-error>;
+  /// Queues a run now; returns its id.
+  run-now: func(id: string) -> result<string, plugin-error>;
+  /// Runs a failed or skipped run again.
+  retry: func(run-id: string) -> result<_, plugin-error>;
+}
+
+interface log {
+  info: func(message: string);
+}
+
+world plugin {
+  import storage;
+  import clock;
+  import log;
+  import interop;
+  import speech;
+  import ai;
+  import schedule;
+
+  use types.{json, plugin-error};
+
+  /// Runs a declared operation with JSON object `args`; returns JSON.
+  export handle: func(operation: string, args: json) -> result<json, plugin-error>;
+}

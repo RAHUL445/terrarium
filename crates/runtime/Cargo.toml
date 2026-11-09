@@ -1,0 +1,66 @@
+[package]
+name = "terrarium-runtime"
+description = "Runs Terrarium plugins: Wasm components, manifests, limits"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+terrarium-core = { path = "../core" }
+terrarium-ai = { path = "../ai" }
+terrarium-scheduler = { path = "../scheduler" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "pulley", "component-model", "runtime", "std", "parallel-compilation", "cache"] }
+wit-component = "0.263"
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
+base64 = "0.22"
+ed25519-dalek = "2"
+getrandom = "0.2"
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+jiff = "0.2"
+base64 = "0.22"
+
+[features]
+plugin-integration = []
+
+[[test]]
+name = "runtime"
+path = "tests/runtime.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "spaces"
+path = "tests/spaces.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "packages"
+path = "tests/packages.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "plugins"
+path = "tests/plugins.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "assistant"
+path = "tests/assistant.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "security_payloads"
+path = "tests/security_payloads.rs"
+required-features = ["plugin-integration"]

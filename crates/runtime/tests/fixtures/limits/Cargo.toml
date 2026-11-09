@@ -1,0 +1,17 @@
+[package]
+name = "limits-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+terrarium-guest = { path = "../../../../guest" }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"

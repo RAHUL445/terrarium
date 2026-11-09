@@ -1,0 +1,42 @@
+[package]
+name = "terrarium-app"
+description = "Terrarium desktop and mobile app shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lib]
+name = "terrarium_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Local duration-only diagnostics; never enables WebView debugging or records data.
+startup-profiling = []
+
+[dependencies]
+terrarium-core = { path = "../../../crates/core" }
+terrarium-runtime = { path = "../../../crates/runtime" }
+terrarium-sync = { path = "../../../crates/sync" }
+base64 = "0.22"
+getrandom = "0.2"
+if-addrs = "0.13"
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
+tauri-plugin-opener = "2"
+time = "0.3"
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"

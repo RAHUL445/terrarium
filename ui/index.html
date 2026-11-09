@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Terrarium</title>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="viewport.css">
+  <script src="theme.js"></script>
+</head>
+<body>
+<header class="workspace-bar">
+      <button type="button" class="space-button" id="space-button" aria-haspopup="dialog" aria-expanded="false" aria-controls="space-sheet">
+      <span class="space-tile" id="space-tile">P</span>
+      <span class="space-text"><span class="space-name" id="space-name-label">Personal</span></span>
+      <svg class="icon" aria-hidden="true" data-icon="chevron-down"></svg>
+    </button>
+      <span id="workspace-context">Home</span>
+      <div class="workspace-tools"><button type="button" data-open-search title="Search (⌘K / Ctrl+K)" aria-label="Search"><svg class="icon" aria-hidden="true" data-icon="search"></svg></button><div id="workspace-actions"></div></div>
+    </header>
+<div class="shell">
+  <nav class="sidebar" id="main-sidebar" aria-label="Main">
+    <button type="button" class="nav-item" data-view="home" aria-label="Home" title="Home"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
+    <div id="page-nav" class="app-nav page-nav" aria-label="Pages"></div>
+    <button type="button" class="nav-item nav-quiet" id="page-new" aria-label="New page" title="New page"><svg class="icon" aria-hidden="true" data-icon="plus"></svg><span>New page</span></button>
+    <button type="button" class="nav-item" data-view="apps" aria-label="All apps" title="All apps"><svg class="icon" aria-hidden="true" data-icon="grid"></svg><span>All apps</span></button>
+    <p class="nav-label">Pinned apps</p>
+    <div id="app-nav" class="app-nav"></div>
+    <div class="nav-spacer"></div>
+    <button type="button" class="nav-item" data-settings="plugins" aria-label="Plugins" title="Plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span></button>
+    <button type="button" class="nav-item" data-view="settings" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg><span>Settings</span></button>
+    <button type="button" class="icon-button rail-collapse" id="sidebar-toggle" aria-controls="main-sidebar" aria-expanded="false" aria-label="Expand navigation" title="Expand navigation"><svg class="icon" aria-hidden="true" data-icon="panel-left"></svg><span class="rail-collapse-label">Collapse</span></button>
+  </nav>
+
+  <div class="main">
+    <header class="mobile-bar">
+      <button type="button" class="space-chip" id="space-chip" aria-haspopup="dialog" aria-expanded="false" aria-controls="space-sheet">
+        <span class="space-tile" id="space-chip-tile">P</span><span id="space-chip-name">Personal</span><svg class="icon" aria-hidden="true" data-icon="chevron-down"></svg>
+      </button>
+      <button type="button" class="sync-mobile" id="sync-mobile" data-settings="devices"><span class="sync-dot" id="sync-dot" aria-hidden="true"></span><span id="sync-mobile-text">Opening…</span></button>
+      <button type="button" class="icon-button" data-companion-toggle aria-controls="companion" aria-label="Open companion"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg></button>
+    </header>
+
+    <main class="content" id="content">
+      <section id="view-home" class="view" hidden>
+        <div class="home-head">
+          <div><p class="muted" id="home-date"></p><h1 id="home-greeting">Hello</h1><button type="button" id="page-focus-chip" class="page-focus-chip" hidden></button></div>
+          <div class="head-actions"><button type="button" id="page-edit"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg>Edit page</button><button type="button" class="primary" data-open-search="add" title="Quick add (⌘⇧K / Ctrl+Shift+K)" aria-keyshortcuts="Meta+Shift+K Control+Shift+K"><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Quick add</button></div>
+        </div>
+        
+        
+        <div id="load-errors"></div>
+        <div id="home-empty" class="card empty" hidden>
+          <h2>No plugins loaded</h2>
+          <p>Import a plugin bundle before building, or set <code>TERRA_PLUGINS</code> to built package directories. The app picks up rebuilt plugins automatically.</p>
+        </div>
+        <nav id="page-tabs" class="page-tabs" aria-label="Pages" hidden></nav>
+        <div id="page-editbar" class="page-editbar" role="toolbar" aria-label="Edit page" hidden>
+          <div class="page-editbar-name">
+            <button type="button" id="page-icon" class="page-icon-button" aria-label="Page icon" title="Choose an icon" aria-haspopup="listbox" aria-expanded="false"></button>
+            <div id="page-icon-menu" class="page-icon-menu" role="listbox" aria-label="Page icon" hidden></div>
+            <input id="page-title-input" class="page-title-input" maxlength="40" autocomplete="off" aria-label="Page name" placeholder="Page name">
+          </div>
+          <label class="page-focus-field" title="Widgets that support it show only items matching this project, tag or word"><svg class="icon" aria-hidden="true" data-icon="target"></svg><input id="page-focus-input" maxlength="40" autocomplete="off" aria-label="Page focus: a project, tag or word that widgets filter by" placeholder="Focus: project or tag (optional)"></label>
+          <div class="page-editbar-actions">
+            <div id="page-order" class="page-order" role="group" aria-label="Page order" hidden><button type="button" class="icon-button" id="page-move-left" aria-label="Move page earlier" title="Move page earlier"><svg class="icon" aria-hidden="true" data-icon="chevron-left"></svg></button><button type="button" class="icon-button" id="page-move-right" aria-label="Move page later" title="Move page later"><svg class="icon" aria-hidden="true" data-icon="chevron-right"></svg></button></div>
+            <button type="button" data-page-add><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Add widget</button>
+            <button type="button" id="page-duplicate"><svg class="icon" aria-hidden="true" data-icon="copy"></svg>Duplicate</button>
+            <button type="button" id="page-delete" class="page-delete"><svg class="icon" aria-hidden="true" data-icon="trash"></svg>Delete page</button>
+            <span class="page-editbar-spacer"></span>
+            <span class="page-editbar-end"><button type="button" id="page-cancel">Cancel</button><button type="button" class="primary" id="page-done">Done</button></span>
+          </div>
+        </div>
+        <p id="home-layout-hint" class="muted page-hint" hidden>Drag a widget by its header to move it and by its corner to resize it. On a focused handle, arrows move and Shift+arrows resize. <kbd>Esc</kbd> cancels, <kbd>Enter</kbd> in the name saves.</p><div id="home-layout-empty" class="card empty page-empty" hidden><svg class="icon page-empty-icon" aria-hidden="true" data-icon="grid"></svg><h2>This page is empty</h2><p class="muted">Add widgets from your apps, or a note, link or clock.</p><button type="button" class="primary" data-page-add><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Add widget</button></div><div id="widgets" class="page-grid"></div>
+        <dialog id="page-add-dialog" class="page-add-dialog" aria-labelledby="page-add-title"><div class="page-add-head"><h2 id="page-add-title">Add widget</h2><button type="button" class="icon-button" id="page-add-close" aria-label="Close">✕</button></div><input type="search" id="page-add-search" class="page-add-search" placeholder="Search widgets" aria-label="Search widgets" autocomplete="off"><div id="page-add-list" class="page-add-list"></div></dialog>
+        <dialog id="page-config-dialog" class="page-add-dialog" aria-labelledby="page-config-title"><form id="page-config-form" method="dialog"><h2 id="page-config-title">Widget settings</h2><div id="page-config-fields" class="page-config-fields"></div><div class="page-config-actions"><button type="button" id="page-config-cancel">Cancel</button><button type="submit" class="primary">Apply</button></div></form></dialog>
+      
+      </section>
+
+      <section id="view-plugin" class="view" hidden>
+        <header class="app-header">
+          <div class="app-title-row">
+            <button type="button" class="icon-button back-button" id="app-back" aria-label="Back to apps"><svg class="icon" aria-hidden="true" data-icon="chevron-left"></svg></button>
+            <span class="app-tile" id="app-tile"></span>
+            <h1 id="app-title"></h1>
+            <div class="app-actions" id="app-actions"></div>
+          </div>
+          <nav class="app-tabs" id="app-tabs" aria-label="Pages"></nav>
+        </header>
+        <button type="button" class="link-button search-return" id="search-return" hidden>Back to search results</button>
+        <div class="app-body" id="app-body"></div>
+      </section>
+
+      <section id="view-apps" class="view" hidden>
+        <div class="home-head"><h1>Apps</h1><div class="head-actions mobile-plugin-manager"><button type="button" data-settings="plugins">Manage</button></div></div>
+        <div class="app-grid" id="app-grid"></div>
+
+      </section>
+
+      <section id="view-settings" class="view settings" hidden>
+        <nav class="settings-nav" aria-label="Settings">
+          <h1>Settings</h1>
+          <p class="nav-label">Your data</p>
+          <button type="button" class="nav-item" data-settings="spaces"><svg class="icon" aria-hidden="true" data-icon="layers"></svg><span>Spaces</span></button>
+          <button type="button" class="nav-item" data-settings="devices"><svg class="icon" aria-hidden="true" data-icon="sync"></svg><span>Devices and sync</span></button>
+          <button type="button" class="nav-item" data-settings="backups"><svg class="icon" aria-hidden="true" data-icon="archive"></svg><span>Backups</span></button>
+          <p class="nav-label">App</p>
+          <button type="button" class="nav-item" data-settings="appearance"><svg class="icon" aria-hidden="true" data-icon="palette"></svg><span>Appearance</span></button>
+          <button type="button" class="nav-item" data-settings="ai"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg><span>AI</span></button>
+          <button type="button" class="nav-item" data-settings="scheduled"><svg class="icon" aria-hidden="true" data-icon="clock"></svg><span>Scheduled</span></button>
+          <button type="button" class="nav-item" data-settings="plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span></button>
+          <button type="button" class="nav-item" data-settings="developer"><svg class="icon" aria-hidden="true" data-icon="code"></svg><span>Developer</span></button>
+        </nav>
+        <div class="settings-body">
+          <p id="sync-error" class="error" role="alert" hidden></p>
+          <section class="settings-section" id="settings-spaces" hidden>
+            <div class="page-head"><h2 class="section-title">Spaces</h2><p class="muted">Each space keeps its own data. All spaces use the same plugins and are on all your devices.</p></div>
+            <div class="card" id="spaces-card">
+                    <ul class="pp-list" id="space-list"></ul>
+          <form id="space-form" class="inline-form">
+            <input class="pp-input" id="space-name" type="text" placeholder="New space name" maxlength="40" autocomplete="off" aria-label="New space name">
+            <button type="submit" class="pp-button pp-primary">Create space</button>
+          </form>
+        </div>
+          </section>
+          <section class="settings-section" id="settings-devices" hidden>
+            <div class="page-head"><h2 class="section-title">Devices and sync</h2><p class="muted">Every device keeps all your spaces and works offline. Changes leave a device only encrypted and signed.</p></div>
+            
+        
+        
+
+        <div class="card">
+          <div class="card-head">
+            <h2>This device</h2>
+            <button type="button" id="sync-now" hidden>Sync now</button>
+          </div>
+          <dl class="bench" id="sync-summary"></dl>
+        </div>
+
+        <div class="card" id="devices-card" hidden>
+          <h2>Paired devices</h2>
+          <ul class="plain" id="device-list"></ul>
+        </div>
+
+        <div class="card" id="pair-card" hidden>
+          <div class="card-head">
+            <h2>Pair a new device</h2>
+            <button type="button" class="primary" id="pair-start">Show pairing code</button>
+          </div>
+          <p class="muted">On the other device, open Devices and sync, choose Join, and enter the address and code shown here. The code works once and expires in 5 minutes.</p>
+          <div id="pair-code" class="pair-code" hidden>
+            <p class="code" id="pair-code-value"></p>
+            <dl class="bench">
+              <dt>Address</dt><dd id="pair-address"></dd>
+              <dt>Expires in</dt><dd id="pair-expiry"></dd>
+            </dl>
+            <div><button type="button" id="pair-cancel">Cancel</button></div>
+          </div>
+        </div>
+
+        <div class="card" id="join-card" hidden>
+          <h2>Join a space</h2>
+          <p class="muted">Use the address and code from “Pair a new device” on your computer. Both devices must be on your Tailscale network.</p>
+          <form id="join-form" class="pp-form">
+            <div class="pp-field">
+              <label class="pp-label" for="join-host">Host address</label>
+              <input class="pp-input" id="join-host" type="text" placeholder="100.x.y.z:7810" autocomplete="off" autocapitalize="off" required>
+            </div>
+            <div class="pp-field">
+              <label class="pp-label" for="join-code">Pairing code</label>
+              <input class="pp-input" id="join-code" type="text" placeholder="ABCDE-FGHJK" autocomplete="off" autocapitalize="characters" required>
+            </div>
+            <button type="submit" class="pp-button pp-primary">Join</button>
+          </form>
+        </div>
+
+        <div class="card" id="drive-card" hidden>
+          <div class="card-head">
+            <h2>Google Drive</h2>
+            <span class="muted" id="drive-state"></span>
+          </div>
+          <p class="muted">Optional. Lets your phone sync while this computer is asleep. Only this app's hidden folder is used, and Google sees only encrypted data.</p>
+          <form id="drive-form" class="pp-form" hidden>
+            <p class="muted">Create an OAuth client of type “Desktop app” in Google Cloud Console (enable the Google Drive API first), then paste its ID and secret here.</p>
+            <div class="pp-field">
+              <label class="pp-label" for="drive-id">OAuth client ID</label>
+              <input class="pp-input" id="drive-id" type="text" autocomplete="off" required>
+            </div>
+            <div class="pp-field">
+              <label class="pp-label" for="drive-secret">OAuth client secret</label>
+              <input class="pp-input" id="drive-secret" type="password" autocomplete="off" required>
+            </div>
+            <button type="submit" class="pp-button pp-primary">Connect Google Drive</button>
+          </form>
+          <div><button type="button" id="drive-disconnect" hidden>Disconnect</button></div>
+        </div>
+
+        <div class="card" id="recovery-card" hidden>
+          <div class="card-head">
+            <h2>Recovery phrase</h2>
+            <button type="button" id="recovery-show">Show</button>
+          </div>
+          <p class="muted">These 24 words are the space key. Anyone with them can read your space; without them, losing every device loses the data. Write them down and keep them somewhere safe.</p>
+          <p id="recovery-phrase" class="recovery mono" hidden></p>
+        </div>
+
+        
+
+        
+      
+          </section>
+          <section class="settings-section" id="settings-backups" hidden>
+            <div class="card" id="backup-card">
+          <div class="card-head">
+            <h2>Backups</h2>
+            <button type="button" id="backup-create">Back up now</button>
+          </div>
+          <p class="muted">A backup holds every plugin's data and the plugin list, encrypted with the recovery phrase. Restoring merges it in: newer changes are kept.</p>
+          <p class="muted" id="backup-health" role="status"></p>
+          <p class="muted" id="backup-dir"></p>
+          <ul class="pp-list" id="backup-list"></ul>
+          <form id="restore-form" class="pp-form">
+            <div class="pp-field">
+              <label class="pp-label" for="restore-file">Restore from a file</label>
+              <input class="pp-input" id="restore-file" type="file">
+            </div>
+            <div class="pp-field" id="restore-phrase-field">
+              <label class="pp-label" for="restore-phrase">Recovery phrase (only on a new device)</label>
+              <textarea class="pp-input" id="restore-phrase" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+            </div>
+            <button type="submit" class="pp-button">Restore</button>
+          </form>
+        </div>
+          </section>
+          <section class="settings-section" id="settings-appearance" hidden>
+            <div class="page-head"><h2 class="section-title">Appearance</h2><p class="muted">Pick light or dark and a theme for this device. Installed themes are on all your devices.</p></div>
+            <div class="card">
+              <h2 id="mode-title">Mode</h2>
+              <div class="segmented" role="radiogroup" aria-labelledby="mode-title" id="mode-picker">
+                <button type="button" role="radio" data-mode="system">System</button>
+                <button type="button" role="radio" data-mode="light">Light</button>
+                <button type="button" role="radio" data-mode="dark">Dark</button>
+              </div>
+              <p class="muted" id="mode-note" hidden></p>
+            </div>
+            <div class="card">
+              <button type="button" data-customize-rail="widgets">Customize workspace</button><p class="muted">Choose and reorder pinned apps, companion widgets and quick actions for this space.</p>
+              <label for="icon-style">App icons</label>
+              <select class="pp-input" id="icon-style" aria-describedby="icon-style-note">
+                <option value="mono">Monochrome</option>
+                <option value="color">App colors</option>
+              </select>
+              <p class="muted" id="icon-style-note">Use quiet outlines or each app’s color across navigation, widgets and app pages. Saved on this device.</p>
+            </div>
+            <div class="card">
+              <h2 id="themes-title">Themes</h2>
+              <div class="theme-grid" role="radiogroup" aria-labelledby="themes-title" id="theme-list"></div>
+            </div>
+            <div class="card" id="theme-gallery-card" hidden>
+              <h2>More themes</h2>
+              <p class="muted">Themes that come with the app. Install one to use it.</p>
+              <div class="theme-grid" id="theme-gallery"></div>
+            </div>
+            <div class="card">
+              <h2>Install a theme</h2>
+              <p class="muted">A theme is a <code>.theme.json</code> file of colours. Installing one with the same id updates it.</p>
+              <p id="theme-error" class="error" role="alert" hidden></p>
+              <form id="theme-form" class="inline-form">
+                <!-- No accept filter: Android greys out files whose type it does not know. -->
+                <input class="pp-input" id="theme-file" type="file" aria-label="Theme file">
+                <button type="submit" class="pp-button pp-primary">Install</button>
+              </form>
+            </div>
+          </section>
+          <section class="settings-section" id="settings-ai" hidden>
+            <div class="page-head"><h2 class="section-title">AI</h2><p class="muted">Plugins that ask for it (like Reports) can write text with your AI provider. They never see the key or the provider. Settings and the key are on all your devices.</p></div>
+            <p class="ai-status" id="ai-status" role="status"></p>
+            <form class="card pp-form" id="ai-form">
+              <h2>Provider</h2>
+              <label class="pp-checkbox"><input type="checkbox" id="ai-enabled"> Let plugins use AI</label>
+              <div class="pp-field">
+                <label class="pp-label" for="ai-preset">Service</label>
+                <select class="pp-input" id="ai-preset"></select>
+                <p class="muted small" id="ai-preset-hint"></p>
+              </div>
+              <div class="pp-field">
+                <label class="pp-label" for="ai-base-url">Base URL</label>
+                <input class="pp-input" id="ai-base-url" type="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/v1">
+              </div>
+              <div class="pp-field">
+                <label class="pp-label" for="ai-model">Model</label>
+                <div class="inline-form">
+                  <input class="pp-input grow" id="ai-model" list="ai-model-list" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="e.g. anthropic/claude-sonnet-4">
+                  <button type="button" class="pp-button" id="ai-load-models">Load models</button>
+                </div>
+                <datalist id="ai-model-list"></datalist>
+              </div>
+              <details class="ai-advanced">
+                <summary>Advanced</summary>
+                <div class="ai-grid">
+                  <div class="pp-field"><label class="pp-label" for="ai-temperature">Creativity (temperature, 0–2)</label><input class="pp-input" id="ai-temperature" type="number" min="0" max="2" step="0.1"></div>
+                  <div class="pp-field"><label class="pp-label" for="ai-max-tokens">Longest reply (tokens)</label><input class="pp-input" id="ai-max-tokens" type="number" min="100" max="32000" step="100"></div>
+                  <div class="pp-field"><label class="pp-label" for="ai-timeout">Give up after (seconds)</label><input class="pp-input" id="ai-timeout" type="number" min="10" max="600"></div>
+                  <div class="pp-field"><label class="pp-label" for="ai-concurrency">Requests at once</label><input class="pp-input" id="ai-concurrency" type="number" min="1" max="8"></div>
+                  <div class="pp-field"><label class="pp-label" for="ai-monthly">Requests per month (0 = no limit)</label><input class="pp-input" id="ai-monthly" type="number" min="0" step="10"></div>
+                  <div class="pp-field"><label class="pp-label" for="ai-prompt-kb">Largest prompt (KB)</label><input class="pp-input" id="ai-prompt-kb" type="number" min="8" max="2000"></div>
+                </div>
+                <button type="button" class="pp-button" id="ai-defaults">Reset to defaults</button>
+              </details>
+              <p id="ai-error" class="error" role="alert" hidden></p>
+              <p class="muted" id="ai-test-result" role="status" hidden></p>
+              <div class="inline-form">
+                <button type="submit" class="pp-button pp-primary">Save</button>
+                <button type="button" class="pp-button" id="ai-test">Test connection</button>
+              </div>
+            </form>
+            <div class="card">
+              <h2>API key</h2>
+              <p class="muted">Stored encrypted. Your paired devices can use it; plugins cannot read it.</p>
+              <div class="widget-head" id="ai-key-set" hidden>
+                <span><code id="ai-key-hint"></code></span>
+                <button type="button" class="pp-button pp-danger" id="ai-key-remove">Remove</button>
+              </div>
+              <form class="inline-form" id="ai-key-form">
+                <input class="pp-input grow" id="ai-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste API key" aria-label="API key">
+                <button type="submit" class="pp-button pp-primary" id="ai-key-save">Save key</button>
+              </form>
+            </div>
+            <div class="card">
+              <h2>This month</h2>
+              <div class="stats" id="ai-usage"></div>
+              <p class="muted" id="ai-plugins"></p>
+            </div>
+          </section>
+          <section class="settings-section" id="settings-scheduled" hidden>
+            <div class="page-head"><h2 class="section-title">Scheduled</h2><p class="muted">Work plugins run on a schedule. Schedules are on all your devices and run on whichever one is open when they fall due; phones run them only while the app is open.</p></div>
+            <div class="card">
+              <label class="pp-checkbox"><input type="checkbox" id="sched-paused"> Pause all schedules</label>
+              <label class="pp-checkbox"><input type="checkbox" id="sched-notify"> Notify me when a run fails</label>
+              <label class="pp-checkbox"><input type="checkbox" id="sched-notify-done"> Notify me when a run has something ready (like a report)</label>
+            </div>
+            <p id="sched-error" class="error" role="alert" hidden></p>
+            <div class="card">
+              <h2>Schedules</h2>
+              <ul class="pp-list" id="sched-list"></ul>
+            </div>
+            <div class="card">
+              <h2>Recent runs</h2>
+              <ul class="pp-list" id="sched-runs"></ul>
+            </div>
+          </section>
+          <section class="settings-section" id="settings-plugins" hidden>
+            <div class="page-head"><h2 class="section-title">Plugins</h2><p class="muted">Install, update, roll back or remove plugins. Packages sync to your devices. Review each new version on a device before it runs there.</p></div>
+            
+        
+        <p id="plugins-error" class="error" role="alert" hidden></p>
+
+        <div class="card" id="install-card">
+          <h2>Install or update</h2>
+          <form id="install-form" class="pp-form">
+            <div class="pp-field">
+              <label class="pp-label" for="install-kind">From</label>
+              <select class="pp-input" id="install-kind">
+                <option value="upload">Package file (.terrapkg)</option>
+                <option value="folder" data-desktop>Built package folder</option>
+                <option value="git" data-desktop>Git repository</option>
+              </select>
+            </div>
+            <div class="pp-field" id="install-file-field">
+              <label class="pp-label" for="install-file">Package file</label>
+              <!-- No accept filter: Android greys out files whose type it does not know. -->
+              <input class="pp-input" id="install-file" type="file">
+            </div>
+            <div class="pp-field" id="install-location-field" hidden>
+              <label class="pp-label" for="install-location" id="install-location-label">Folder</label>
+              <input class="pp-input" id="install-location" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+              <p class="muted" id="install-location-hint"></p>
+            </div>
+            <button type="submit" class="pp-button pp-primary" id="install-check">Check package</button>
+          </form>
+        </div>
+
+        <div class="card" id="review-card" hidden>
+          <div class="card-head">
+            <h2 id="review-title"></h2>
+            <span class="pp-badge" id="review-kind"></span>
+          </div>
+          <p class="muted" id="review-description"></p>
+          <p id="review-trust"></p>
+          <p class="muted" id="review-dev" hidden>This device runs this plugin from a development folder, which stays in use here. Your other devices switch to the new version.</p>
+          <h3 class="pp-section-title">This plugin can</h3>
+          <ul class="plain" id="review-caps"></ul>
+          <label class="pp-checkbox" id="review-trust-confirm" hidden>
+            <input type="checkbox" id="review-trust-box"> <span id="review-trust-text"></span>
+          </label>
+          <label class="pp-checkbox" id="review-caps-confirm" hidden>
+            <input type="checkbox" id="review-caps-box"> <span>Allow the permissions listed above</span>
+          </label>
+          <div class="card-foot">
+            <button type="button" class="pp-button pp-primary" id="review-install">Install</button>
+            <button type="button" class="pp-button" id="review-cancel">Cancel</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Installed</h2>
+          <ul class="pp-list" id="installed-list"></ul>
+        </div>
+
+        <div class="card" id="pending-plugins-card" hidden>
+          <h2>Needs review</h2>
+          <p class="muted">Review the publisher and permissions before running these versions on this device.</p>
+          <ul class="pp-list" id="pending-plugins-list"></ul>
+        </div>
+
+        <div class="card" id="removed-card" hidden>
+          <h2>Removed</h2>
+          <p class="muted">Their data is kept. Add one back to use it again.</p>
+          <ul class="pp-list" id="removed-list"></ul>
+        </div>
+
+        <div class="card">
+          <h2>Trusted publishers</h2>
+          <p class="muted">Packages signed by these keys install without asking about the publisher.</p>
+          <ul class="plain" id="signer-list"></ul>
+        </div>
+      
+          </section>
+          <section class="settings-section" id="settings-developer" hidden>
+            <div class="page-head"><h2 class="section-title">Developer</h2><p class="muted">The storage inspector writes through the host like any plugin. Rows belong to the built-in <code>inspector-test</code> plugin.</p></div>
+            
+        
+
+        <div class="chips" aria-label="Merge rules">
+          <span class="chip"><code>lww</code> last writer wins</span>
+          <span class="chip"><code>counter</code> increments add up</span>
+          <span class="chip"><code>append</code> insert only</span>
+          <span class="chip"><code>trash</code> delete moves to trash</span>
+        </div>
+
+        <p id="error" class="error" role="alert" hidden></p>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Device benchmark</h2>
+            <button type="button" id="benchmark">Run benchmark</button>
+          </div>
+          <p class="muted">Loads To-do into a throwaway space, runs 50 operations, one query and 1,000 raw inserts. Your data is not touched.</p>
+          <dl id="bench-results" class="bench" hidden></dl>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Items</h2>
+            <form id="add-form" class="inline-form">
+              <label for="add-title" class="sr-only">New item title</label>
+              <input id="add-title" type="text" placeholder="New item title" autocomplete="off">
+              <button type="submit" class="primary">Add</button>
+            </form>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Done</th><th>Title</th><th>Points</th><th>State</th><th><span class="sr-only">Actions</span></th></tr></thead>
+              <tbody id="items"></tbody>
+            </table>
+          </div>
+          <div class="card-foot">
+            <button type="button" id="simulate">Simulate offline conflict</button>
+            <span class="muted">A simulated second device edits the newest item while this device edits it too, then they sync.</span>
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <h2>Conflict history</h2>
+            <ul id="conflicts" class="plain"></ul>
+          </div>
+          <div class="card">
+            <h2>Trash notices</h2>
+            <ul id="notices" class="plain"></ul>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Change log</h2><span class="muted" id="log-count"></span></div>
+          <div class="table-wrap">
+            <table class="mono">
+              <thead><tr><th>#</th><th>HLC</th><th>Device</th><th>Row</th><th>Op</th></tr></thead>
+              <tbody id="changes"></tbody>
+            </table>
+          </div>
+        </div>
+      
+          </section>
+        </div>
+      </section>
+    </main>
+
+  </div>
+
+  <div class="companion-backdrop" id="companion-backdrop" hidden></div>
+  <aside class="companion" id="companion" aria-label="Companion">
+    <header class="companion-head"><div><h2>Companion</h2><span id="companion-space" class="muted">Personal</span></div><div class="head-actions"><button type="button" class="icon-button" id="companion-close" aria-label="Close companion panel" title="Close panel"><svg class="icon" aria-hidden="true" data-icon="close"></svg></button></div></header>
+
+    <section id="rail-pinned-panel" data-rail-panel="pinned" role="tabpanel" aria-labelledby="rail-pinned-tab"><div id="rail-widgets"></div><p id="rail-empty" class="muted" hidden>Pin widgets in Settings → Appearance → Customize workspace.</p></section>
+    <section id="rail-actions-panel" data-rail-panel="actions" role="tabpanel" aria-labelledby="rail-actions-tab" hidden><h3>Capture without leaving.</h3><div id="rail-actions-list"></div><p id="rail-actions-empty" class="muted" hidden>Choose quick actions in Settings → Appearance → Customize workspace.</p></section>
+    <section id="rail-assistant-panel" data-rail-panel="assistant" role="tabpanel" aria-labelledby="rail-assistant-tab" hidden>
+      <p class="muted" id="rail-ai-status" role="status">Checking AI settings…</p><button type="button" class="link-button" data-rail-settings="ai">AI settings</button>
+      <p class="muted rail-session-note">Messages stay in this session and go to your configured provider when you send them. The assistant suggests; it cannot change your data.</p>
+      <div id="rail-chat" class="rail-chat" role="log" aria-label="Assistant conversation" aria-live="polite"></div>
+      <p id="rail-chat-empty" class="muted">Ask a question, think through a plan, or shape a rough note.</p>
+      <button type="button" class="rail-suggestion" id="rail-plan-day">Help me plan my day ↗</button>
+      <form id="rail-assistant-form" class="pp-form"><label class="pp-checkbox"><input id="rail-attach-tasks" type="checkbox"> Include Today’s task list</label><p class="muted rail-session-note">Up to 100 open tasks from Today. Titles and due dates only; #private excluded.</p><details id="rail-context" hidden><summary>Review attached task titles</summary><p id="rail-context-status" class="muted"></p><ul id="rail-context-list" class="plain"></ul></details><label class="pp-field"><span class="pp-label">Message</span><textarea id="rail-message" class="pp-input" rows="3" maxlength="8000" required placeholder="Ask or think out loud…"></textarea></label><button type="submit" class="primary" id="rail-send">Send</button></form>
+      <p class="muted" id="rail-reply-state" role="status" hidden></p><p id="rail-assistant-error" class="error" role="alert" hidden></p><button type="button" id="rail-assistant-retry" hidden>Retry last message</button><button type="button" class="link-button" id="rail-chat-clear">Clear conversation</button>
+    </section>
+    <section id="rail-activity-panel" data-rail-panel="activity" role="tabpanel" aria-labelledby="rail-activity-tab" hidden><h3>Your activity</h3><p id="rail-activity-error" class="error" role="alert" hidden></p><div id="rail-activity-list"></div><button type="button" class="link-button" id="rail-activity-refresh">Refresh activity</button><button type="button" class="link-button" data-rail-settings="scheduled">Manage schedules</button></section>
+    <section data-rail-panel="customize" aria-label="Customize workspace" hidden><h3>Customize workspace.</h3><p id="rail-layout-scope" class="muted">Personal · this device</p><div class="rail-modes" role="group" aria-label="What to customize"><button type="button" data-rail-mode="nav" aria-pressed="false">Left rail</button><button type="button" data-rail-mode="widgets" aria-pressed="true">Widgets</button><button type="button" data-rail-mode="actions" aria-pressed="false">Actions</button></div><p id="rail-layout-preview" class="muted" role="status"></p><div id="rail-custom-list"></div><div class="rail-custom-footer"><button type="button" id="rail-reset">Restore defaults</button><button type="button" id="rail-custom-cancel">Cancel</button><button type="button" class="primary" id="rail-custom-done">Apply</button></div></section>
+
+  </aside>
+  <nav class="companion-tools" id="companion-tools" role="tablist" aria-label="Companion tools" aria-orientation="vertical"><button type="button" class="icon-button" id="rail-assistant-tab" role="tab" aria-selected="false" aria-controls="rail-assistant-panel" data-rail-tab="assistant" aria-label="Assistant" title="Assistant"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg></button><button type="button" class="icon-button" id="rail-activity-tab" role="tab" aria-selected="false" aria-controls="rail-activity-panel" data-rail-tab="activity" aria-label="Activity" title="Activity"><svg class="icon" aria-hidden="true" data-icon="clock"></svg></button><button type="button" class="icon-button" id="rail-actions-tab" role="tab" aria-selected="false" aria-controls="rail-actions-panel" data-rail-tab="actions" aria-label="Quick actions" title="Quick actions"><svg class="icon" aria-hidden="true" data-icon="plus"></svg></button><button type="button" class="icon-button" id="rail-pinned-tab" role="tab" aria-selected="false" aria-controls="rail-pinned-panel" data-rail-tab="pinned" aria-label="Pinned widgets" title="Pinned widgets"><svg class="icon" aria-hidden="true" data-icon="grid"></svg></button><button type="button" class="icon-button rail-customize-shortcut" data-customize-rail="widgets" aria-label="Customize workspace" title="Customize workspace"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg></button></nav>
+  <nav class="tabbar" aria-label="Main">
+    <button type="button" class="tab" data-view="home"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
+    <button type="button" class="tab" data-view="apps"><svg class="icon" aria-hidden="true" data-icon="grid"></svg><span>Apps</span></button>
+    <button type="button" class="tab" data-open-search><svg class="icon" aria-hidden="true" data-icon="search"></svg><span>Search</span></button>
+    <button type="button" class="tab" data-view="settings"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg><span>Settings</span></button>
+  </nav>
+  <button type="button" class="fab" data-open-search="add" aria-label="Quick add"><svg class="icon" aria-hidden="true" data-icon="plus"></svg></button>
+</div>
+
+<footer class="workspace-status" id="workspace-status" aria-label="Workspace status"><button type="button" id="space-status" data-settings="devices">Opening space…</button><span id="workspace-work" role="status"></span><button type="button" id="workspace-jobs" hidden>Background work</button><button type="button" id="workspace-health" hidden>App status</button><span id="workspace-page-info"></span></footer>
+
+<div class="overlay" id="palette" hidden>
+  <section class="palette" id="palette-dialog" role="dialog" aria-modal="true" aria-label="Search and commands">
+    <div class="palette-input">
+      <svg class="icon" aria-hidden="true" data-icon="search"></svg>
+      <label for="palette-input" id="palette-label" class="sr-only">Search or run a command</label>
+      <input id="palette-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Search or type a command">
+      <button type="button" class="icon-button" id="palette-close" aria-label="Close quick add or search">×</button>
+    </div>
+    <p class="capture-destination muted" id="capture-destination" hidden></p>
+    <div class="palette-scope" id="palette-scope" role="group" aria-label="Search in">
+      <button type="button" class="pill" id="scope-space" aria-pressed="true">This space</button>
+      <button type="button" class="pill" id="scope-all" aria-pressed="false">All spaces</button>
+    </div>
+    <div class="palette-results" id="palette-results" role="listbox" aria-label="Results"></div>
+    <p class="palette-foot muted">↑↓ move · ↵ open · Esc close</p>
+  </section>
+</div>
+
+<div class="overlay" id="space-sheet" hidden>
+  <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="space-sheet-title">
+    <span class="grabber" aria-hidden="true"></span>
+    <h2 id="space-sheet-title">Spaces</h2>
+    <div class="space-options" id="space-options"></div>
+    <div class="sheet-actions">
+      <button type="button" class="primary" id="space-new"><svg class="icon" aria-hidden="true" data-icon="plus"></svg>New space</button>
+      <button type="button" data-settings="spaces">Manage</button>
+    </div>
+  </section>
+</div>
+
+<div id="toasts" class="toasts" role="status" aria-live="polite" popover="manual"></div>
+<script src="confirm.js"></script>
+<script src="performance.js"></script>
+<script src="viewport.js"></script>
+<script src="renderer.js"></script>
+<script src="layout.js"></script>
+<script src="grid.js"></script>
+<script src="session.js"></script>
+<script src="status.js"></script>
+<script src="rails.js"></script>
+<script src="pages.js"></script>
+<script src="templates.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

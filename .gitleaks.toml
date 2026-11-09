@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Two immutable split-provenance SHA-256 values, not credentials"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)docs/split-source-hashes\.json$''']
+regexTarget = "match"
+regexes = [
+  '''^secrets\.rs": "cb8ccc84de0ab7aea3ebd913ec20bfb230e073d3fc2c2c6d40d926ea818981a2"$''',
+  '''^keys\.rs": "d29cce91b2ab8a387a8de1bb270a7ababcc55730b770305f0dbdfefb1c7d09ee"$''',
+]

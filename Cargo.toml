@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/ai", "crates/scheduler", "crates/runtime", "crates/sync", "crates/cli", "apps/tauri/src-tauri"]
+exclude = ["crates/guest", "packages", "crates/runtime/tests/fixtures"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/RAHUL445/terrarium"
+homepage = "https://github.com/RAHUL445/terrarium"
+publish = false
+
+[workspace.dependencies]
+rusqlite = { version = "0.41", features = ["bundled", "hooks", "limits"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }
+tempfile = "3"
+
+# Reviewed collection backport; upstream Loro format and version retained.
+[patch.crates-io]
+loro-internal = { path = "vendor/loro-internal" }

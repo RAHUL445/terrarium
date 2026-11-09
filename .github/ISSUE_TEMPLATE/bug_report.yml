@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For security problems, use private vulnerability reporting instead (see SECURITY.md).
+        Use synthetic data only; never attach databases, keys, recovery phrases or private logs.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS app
+        - Android app
+        - Browser preview (terra preview)
+        - terra CLI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: e.g. 9899fe7 or v0.1.0-alpha.1
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      render: text

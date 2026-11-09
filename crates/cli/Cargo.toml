@@ -1,0 +1,15 @@
+[package]
+name = "terra"
+description = "Terrarium developer CLI: scaffold, build, check, pack, sign and preview plugins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom = "0.2"
+terrarium-runtime = { path = "../runtime" }
+serde_json.workspace = true
+tiny_http = "0.12"

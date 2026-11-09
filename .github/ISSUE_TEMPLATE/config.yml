@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/RAHUL445/terrarium/security/advisories/new
+    about: Please report security problems privately.
+  - name: Plugin issues
+    url: https://github.com/RAHUL445/terrarium-plugins/issues
+    about: Problems with a specific plugin (To-do, Notes, Habits, Bookmarks, Reports, Voice).

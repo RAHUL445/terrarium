@@ -1,0 +1,28 @@
+name: Host checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  checks:
+    timeout-minutes: 30
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup show
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked --workspace --exclude terrarium-app
+      - name: Verify unpatched and patched CRDT interoperability
+        run: python3 scripts/check_crdt_compat.py --fetch-legacy
+      - run: cargo clippy --locked --workspace --exclude terrarium-app --all-targets -- -D warnings
+      - run: node --test ui/tests/*.test.cjs
+      - run: python3 -m unittest discover -s scripts/tests -v
+      - name: Fetch locked dependencies for supported arm64 targets
+        run: cargo fetch --locked --target aarch64-apple-darwin --target aarch64-linux-android
+      - name: Check source pins and advisory exposure on both supported targets
+        run: python3 scripts/dependency_exposure.py

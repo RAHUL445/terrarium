@@ -1,0 +1,38 @@
+{
+  "id": "rose",
+  "name": "Rose",
+  "version": "1.0.0",
+  "description": "Soft pinks and plum, with rounded type.",
+  "author": "Terrarium",
+  "font": "rounded",
+  "light": {
+    "bg": "#fbf4f6",
+    "surface": "#ffffff",
+    "border": "#efdde3",
+    "ink": "#2d1a22",
+    "muted": "#674c57",
+    "accent": "#b0305f",
+    "accent-soft": "#fbe4ec",
+    "accent-ink": "#7a1d41",
+    "accent-strong": "#b0305f",
+    "ok": "#2f7a4a",
+    "warn-bg": "#fdf0e0",
+    "warn-ink": "#73400e",
+    "danger": "#b42318"
+  },
+  "dark": {
+    "bg": "#170e12",
+    "surface": "#21141a",
+    "border": "#3a2530",
+    "ink": "#f6e8ee",
+    "muted": "#c4a6b3",
+    "accent": "#f28bb2",
+    "accent-soft": "#3d1a29",
+    "accent-ink": "#fbd0e0",
+    "accent-strong": "#b0305f",
+    "ok": "#7fd1a0",
+    "warn-bg": "#3d2a12",
+    "warn-ink": "#f6d6a8",
+    "danger": "#f59b8f"
+  }
+}

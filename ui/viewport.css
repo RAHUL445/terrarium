@@ -1,0 +1,16 @@
+/* Shared by every plugin form, including large editors. The header stays
+   outside the scrolling body; all fields/actions remain scroll-reachable. */
+@media (max-width: 760px) {
+  .pp-sheet[open], .pp-sheet.pp-sheet-large[open] {
+    inset: calc(var(--visible-top, 0px) + var(--visible-height, 100dvh) * .08) 0 auto;
+    margin: 0;
+    height: calc(var(--visible-height, 100dvh) * .92);
+    max-height: calc(var(--visible-height, 100dvh) * .92);
+  }
+  .overlay {
+    top: var(--visible-top, 0px);
+    bottom: auto;
+    height: var(--visible-height, 100dvh);
+  }
+  .palette { max-height: 100%; }
+}

@@ -1,0 +1,38 @@
+{
+  "id": "forest",
+  "name": "Forest",
+  "version": "1.0.0",
+  "description": "Calm greens and pine accents.",
+  "author": "Terrarium",
+  "font": "system",
+  "light": {
+    "bg": "#f3f6f1",
+    "surface": "#ffffff",
+    "border": "#dbe3d6",
+    "ink": "#1b2a1f",
+    "muted": "#4d5e51",
+    "accent": "#2f6b3f",
+    "accent-soft": "#e3efe4",
+    "accent-ink": "#1d4a2a",
+    "accent-strong": "#2f6b3f",
+    "ok": "#2f6b3f",
+    "warn-bg": "#fbf3e2",
+    "warn-ink": "#6b4310",
+    "danger": "#b42318"
+  },
+  "dark": {
+    "bg": "#0e1511",
+    "surface": "#151f19",
+    "border": "#26352b",
+    "ink": "#e6efe7",
+    "muted": "#9fb2a4",
+    "accent": "#7cc58f",
+    "accent-soft": "#1b3323",
+    "accent-ink": "#bfe5c8",
+    "accent-strong": "#2f6b3f",
+    "ok": "#7cc58f",
+    "warn-bg": "#3a2a0e",
+    "warn-ink": "#f5d9a8",
+    "danger": "#f2867c"
+  }
+}
