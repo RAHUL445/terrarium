@@ -5,7 +5,7 @@
 <h1 align="center">Terrarium</h1>
 
 <p align="center">
-  A local-first desktop and Android app whose features are sandboxed WebAssembly plugins.
+  An extensible, local-first app host for macOS and Android. Every feature is a sandboxed WebAssembly plugin.
 </p>
 
 <p align="center">
@@ -14,11 +14,11 @@
   <img src="https://img.shields.io/badge/status-experimental-orange.svg" alt="Status: experimental">
 </p>
 
-Terrarium is a small Rust host that runs productivity plugins (to-do, notes,
-habits, bookmarks, reports, voice capture) on macOS and Android. Every device
-keeps a full copy of its data and works offline; devices sync end-to-end
-encrypted with no project server. Plugins run in a WebAssembly sandbox and draw
-their UI as declarative templates, so they cannot run code in the app shell.
+Terrarium is a host, not an app with a fixed feature set. It provides what
+every personal-data app needs: storage, end-to-end encrypted sync between your
+devices, a sandbox, a UI shell, a scheduler and AI access. Features arrive as
+plugins that you install or write yourself. Every device keeps a full copy
+of its data and works offline, with no project server.
 
 > **Status:** experimental source preview. It is not a production release and
 > has known security gaps; read [SECURITY.md](SECURITY.md) before using it with
@@ -26,7 +26,7 @@ their UI as declarative templates, so they cannot run code in the app shell.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/home-dark.png">
-  <img src="docs/screenshots/home-light.png" alt="Terrarium home page with widgets for today's tasks, quick voice capture, habits and notes">
+  <img src="docs/screenshots/home-light.png" alt="Terrarium home page with widgets from the recommended plugins: today's tasks, quick voice capture, habits and notes">
 </picture>
 
 <table>
@@ -40,34 +40,59 @@ their UI as declarative templates, so they cannot run code in the app shell.
   </tr>
 </table>
 
-<sub>Screenshots use synthetic demo data.</sub>
+<sub>Terrarium running the <a href="#recommended-plugins">recommended plugins</a>. Screenshots use synthetic demo data.</sub>
 
-## Features
+## What the host provides
 
-- **Plugins as Wasm components.** Each plugin gets its own SQLite database,
-  capability-gated host APIs and per-call fuel, time and memory limits.
-  Packages are signed; installs and permission increases need your consent.
-- **Local-first sync.** Per-column merge rules (last-writer-wins, counters,
-  append-only, Loro text CRDT) with trash-by-default delete handling. Batches
-  are encrypted and signed, and travel directly between devices over Tailscale
-  or through your own Google Drive app folder.
+Plugins get these for free, so a plugin is mostly a schema, a few operations
+and some templates.
+
+- **Sandboxed plugins.** Each plugin is a WebAssembly component with its own
+  SQLite database, capability-gated host APIs and per-call fuel, time and
+  memory limits. Packages are signed; installs and permission increases need
+  your consent. Plugin UI is declarative templates, so plugins cannot run code
+  in the app shell.
+- **Sync for every plugin.** Plugins declare per-column merge rules
+  (last-writer-wins, counters, append-only, Loro text CRDT) and the host syncs
+  their data. Batches are encrypted and signed, and travel directly between
+  devices over Tailscale or through your own Google Drive app folder. Deletes
+  go to trash by default.
 - **One UI for desktop and phone.** A shared web shell renders plugin
-  templates, custom pages with a widget grid, a search palette and themes.
+  templates, custom pages with a widget grid where plugins share one screen,
+  a search palette and themes.
 - **Spaces.** Keep Personal, Work and other spaces apart while sharing one
   plugin list and pairing.
-- **Scheduler and AI.** Reminders and scheduled jobs, plus reports generated
-  through any OpenAI-compatible provider you configure, local or remote.
+- **Scheduler and AI.** Plugins can schedule jobs and reminders and generate
+  text through any OpenAI-compatible provider you configure, local or remote.
 - **Developer CLI.** `terra` scaffolds, builds, checks, hot-reloads, signs and
   previews plugins in a browser.
 
-See [architecture](docs/architecture.md) for how the pieces fit together.
+See [architecture](docs/architecture.md) for how the pieces fit together and
+[writing a plugin](docs/plugin-authoring.md) to build your own.
+
+## Recommended plugins
+
+The recommended plugins live in their own repository,
+[terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins), and are
+built against the same public SDK as any third-party plugin. The desktop and
+Android builds ship them as a digest-pinned bundle, and you can install more
+plugins as signed `.terrapkg` packages from a file or a Git repository.
+
+| Plugin | Features |
+| --- | --- |
+| **To-do** | Tasks with due dates, reminders, priorities, repeats and steps; list, board and matrix layouts |
+| **Notes** | Markdown notes in projects with checklists and autosave; edits on different devices merge |
+| **Habits** | Scheduled habits with check-ins, streaks, reminders and sleep logs |
+| **Bookmarks** | Links with projects, tags and notes; pin the ones you use most |
+| **Voice** | Record or type quick captures, transcribed locally, then send them to To-do or Notes |
+| **Reports** | AI-written reviews of your tasks, habits and notes, on demand or on a schedule |
 
 ## Repositories
 
 | Repository | Contents |
 | --- | --- |
-| **terrarium** (this one) | Host runtime, storage, sync, scheduler, AI, shared UI, Tauri apps, `terra` CLI, guest SDK and WIT contract |
-| [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins) | The six bundled plugins, built against a vendored SDK snapshot |
+| **terrarium** (this one) | The host: runtime, storage, sync, scheduler, AI, shared UI, Tauri apps, `terra` CLI, guest SDK and WIT contract |
+| [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins) | The recommended plugins, built against a vendored SDK snapshot |
 
 ## Getting started
 
@@ -81,7 +106,8 @@ See [architecture](docs/architecture.md) for how the pieces fit together.
 
 ### Try the UI in a browser
 
-Clone both repositories side by side, then:
+Clone both repositories side by side, then build the host CLI and run it with
+the recommended plugins:
 
 ```sh
 cargo build --locked -p terra
@@ -93,7 +119,7 @@ Open <http://localhost:8767>.
 
 ### Build the desktop app
 
-The app embeds an imported, digest-pinned plugin bundle:
+The app embeds an imported, digest-pinned bundle of the recommended plugins:
 
 ```sh
 cargo build --locked -p terra
