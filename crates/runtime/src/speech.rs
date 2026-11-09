@@ -1,5 +1,5 @@
-//! Local speech-to-text through a Parakeet (MLX) worker process, as set up
-//! for the Python version: a prepared virtualenv, a 4-bit Parakeet v2
+//! Local speech-to-text through a Parakeet (MLX) worker process, configured
+//! with a prepared virtualenv, a 4-bit Parakeet v2
 //! checkpoint and ffmpeg. Audio is decoded to 16 kHz mono WAV in a private
 //! temporary directory that is removed afterwards; nothing is downloaded,
 //! stored or logged.

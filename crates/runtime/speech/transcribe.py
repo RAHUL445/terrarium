@@ -1,4 +1,4 @@
-"""Short-lived Parakeet worker (from the Python version): never downloads models or saves user content."""
+"""Short-lived Parakeet worker: never downloads models or saves user content."""
 import json
 from pathlib import Path
 import sys

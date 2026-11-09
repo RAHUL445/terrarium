@@ -33,7 +33,7 @@ as sandboxed WebAssembly plugins, and devices sync end-to-end encrypted.
 | `wit/` | `terrarium:plugin@0.1.0` WIT contract between host and plugins |
 | `ui/` | Shared web shell and declarative template renderer |
 | `apps/tauri` | One Tauri 2 app for macOS and Android |
-| `vendor/loro-internal` | Reviewed Loro backport, see [dependency review](security/dependency-advisory-review.md) |
+| `vendor/loro-internal` | Reviewed Loro backport, see [dependency review](../security/dependency-advisory-review.md) |
 
 Plugin implementations live in the separate
 [`terrarium-plugins`](https://github.com/RAHUL445/terrarium-plugins) repository.
@@ -105,5 +105,5 @@ carries `space` and `user_id` so shared team spaces need no data migration.
 - Reminders are scheduled as local notifications on the device chosen per
   reminder (`phone`, `desktop` or `both`).
 
-Security boundaries and known gaps: [threat model](security/threat-model.md),
-[SECURITY.md](../SECURITY.md) and the [roadmap](roadmap.md).
+Security boundaries and known gaps: [threat model](../security/threat-model.md),
+[SECURITY.md](../../SECURITY.md) and the [roadmap](../roadmap.md).

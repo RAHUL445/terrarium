@@ -15,7 +15,7 @@ spare time, so small, focused changes are the easiest to review.
 ## Development setup
 
 Follow the prerequisites and build steps in the [README](README.md). The
-[architecture overview](docs/architecture.md) explains how the crates fit
+[architecture overview](docs/develop/architecture.md) explains how the crates fit
 together.
 
 ## Checks

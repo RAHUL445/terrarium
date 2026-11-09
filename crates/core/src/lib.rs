@@ -3,7 +3,7 @@
 //! Phase 1 scope: per-plugin SQLite storage where every write goes through
 //! the host, lands in a change log stamped with a hybrid logical clock, and
 //! merges deterministically on every device using per-column merge rules
-//! and per-table delete policies. See `docs/architecture.md`.
+//! and per-table delete policies. See `docs/develop/architecture.md`.
 
 pub mod change;
 pub mod error;

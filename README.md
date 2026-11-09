@@ -67,16 +67,17 @@ and some templates.
 - **Developer CLI.** `terra` scaffolds, builds, checks, hot-reloads, signs and
   previews plugins in a browser.
 
-See [architecture](docs/architecture.md) for how the pieces fit together and
-[writing a plugin](docs/plugin-authoring.md) to build your own.
+See [architecture](docs/develop/architecture.md) for how the pieces fit together and
+[writing a plugin](docs/develop/plugin-authoring.md) to build your own.
 
 ## Recommended plugins
 
 The recommended plugins live in their own repository,
 [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins), and are
 built against the same public SDK as any third-party plugin. The desktop and
-Android builds ship them as a digest-pinned bundle, and you can install more
-plugins as signed `.terrapkg` packages from a file or a Git repository.
+Android builds ship them as a digest-pinned bundle. You can install more
+plugins as signed `.terrapkg` packages from a file or a Git repository, and
+roll back or remove any plugin; see the [plugins guide](docs/guide/plugins.md).
 
 | Plugin | Features |
 | --- | --- |
@@ -94,20 +95,40 @@ plugins as signed `.terrapkg` packages from a file or a Git repository.
 | **terrarium** (this one) | The host: runtime, storage, sync, scheduler, AI, shared UI, Tauri apps, `terra` CLI, guest SDK and WIT contract |
 | [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins) | The recommended plugins, built against a vendored SDK snapshot |
 
-## Getting started
+## Use the app
 
-### Prerequisites
+Terrarium has no downloadable release yet. You build it from source on a Mac,
+which takes a few commands and bundles the recommended plugins.
 
-- Rust stable with the `wasm32-unknown-unknown` target (pinned in `rust-toolchain.toml`)
-- Node.js 22+ and Python 3
-- Tauri CLI: `cargo install tauri-cli --version 2.12.4 --locked`
-- macOS with Xcode command line tools for the desktop app
-- For Android: Android SDK, Java/Gradle and an NDK supported by Tauri
+**macOS**
 
-### Try the UI in a browser
+1. Install Rust, Node.js 22+, Python 3, the Xcode command line tools and the
+   Tauri CLI.
+2. Clone this repository and
+   [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins) side by side.
+3. Build the plugin bundle and the app, then drag `Terrarium.app` into
+   `/Applications`.
 
-Clone both repositories side by side, then build the host CLI and run it with
-the recommended plugins:
+Full steps: [Install on macOS](docs/guide/install-macos.md).
+
+**Android** (64-bit ARM, Android 7.0+)
+
+1. Add the Android SDK, NDK and Rust Android target to the macOS setup.
+2. Build the APK with `cargo tauri android build`.
+3. Install it with `adb install` or by opening the APK on the phone.
+4. Pair the phone with your Mac over Tailscale to sync.
+
+Full steps: [Install on Android](docs/guide/install-android.md).
+
+Then read [first steps](docs/guide/first-steps.md) and
+[sync and devices](docs/guide/sync-and-devices.md). The
+[user guide](docs/README.md#user-guide) covers plugins, AI, schedules, themes,
+backups and troubleshooting.
+
+### Try it in a browser
+
+To look around without building the app, run the host CLI's preview server with
+the recommended plugins (no sync or device features):
 
 ```sh
 cargo build --locked -p terra
@@ -117,84 +138,37 @@ for p in ../terrarium-plugins/packages/*/; do ./target/debug/terra build "$p"; d
 
 Open <http://localhost:8767>.
 
-### Build the desktop app
-
-The app embeds an imported, digest-pinned bundle of the recommended plugins:
-
-```sh
-cargo build --locked -p terra
-python3 ../terrarium-plugins/scripts/build-release.py \
-  --terra "$PWD/target/debug/terra" \
-  --output ../terrarium-plugins/releases/dev-001
-python3 scripts/import-plugins.py ../terrarium-plugins/releases/dev-001 --update-lock
-cargo tauri build --debug --bundles app --config '{"bundle":{"active":true}}'
-```
-
-For Android, use the same imported bundle:
-
-```sh
-cargo tauri android build --debug --target aarch64
-```
-
-The Android Studio project in `apps/tauri/src-tauri/gen/android` contains
-project-specific native configuration; do not regenerate it blindly.
-
-During plugin development, set `TERRA_PLUGINS` to built package directories
-(separated by the platform path separator) to override the bundled versions.
-
 ## Development
 
-Host-only checks, no plugins checkout needed:
+[Building from source](docs/develop/building-from-source.md) covers debug
+builds, plugin development with `TERRA_PLUGINS`, host and cross-repository
+checks, the plugin bundle lock and the SDK export. Quick host-only checks:
 
 ```sh
 cargo fmt --all -- --check
 cargo test --locked --workspace --exclude terrarium-app
 node --test ui/tests/*.test.cjs
-python3 -m unittest discover -s scripts/tests -v
 ```
-
-Cross-repository checks:
-
-```sh
-export TERRA_PLUGIN_SOURCE="$(cd ../terrarium-plugins/packages && pwd)"
-export TERRA_HOST_SOURCE="$PWD"
-cargo test --locked --workspace --features terrarium-runtime/plugin-integration
-node --test ui/tests/*.test.cjs ../terrarium-plugins/tests/*.test.cjs
-python3 -m unittest discover -s ../terrarium-plugins/packages/notes/tests -p '*_query.py'
-```
-
-Integration suites fail, rather than skip, when the sources are missing.
-
-### Plugin bundle lock
-
-`plugins.lock.json` pins the approved plugin commit, SDK and artifact digests.
-The importer verifies API version, package identity, required files, component
-headers and SHA-256 digests, and stages only declared files under the ignored
-`bundled-plugins/`. Approving a new bundle means reviewing it, importing with
-`--update-lock` and committing the new lock. Digests prove integrity, not
-publisher identity; signed `.terrapkg` packages cover trusted distribution.
-
-### SDK
-
-`crates/guest` and `wit/` are canonical here. To update the plugins repository:
-
-```sh
-python3 scripts/export-sdk.py --output /tmp/terrarium-sdk-export
-```
-
-Copy the export's `vendor/terrarium-sdk/` and `sdk.lock.json` into the plugins
-repository together; never hand-edit the vendored copy. API changes need a
-compatibility review, plugin rebuilds and the cross-repository checks.
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Writing a plugin](docs/plugin-authoring.md)
-- [Themes](docs/themes.md)
-- [Threat model](docs/security/threat-model.md) and [security policy](SECURITY.md)
-- [Privacy and data handling](PRIVACY.md)
-- [Roadmap](docs/roadmap.md)
-- [Releasing](docs/releasing.md)
+All documentation is in [docs/](docs/README.md):
+
+- **User guide:** [install on macOS](docs/guide/install-macos.md),
+  [install on Android](docs/guide/install-android.md),
+  [first steps](docs/guide/first-steps.md),
+  [sync and devices](docs/guide/sync-and-devices.md),
+  [plugins](docs/guide/plugins.md),
+  [AI, schedules and voice](docs/guide/ai-and-schedules.md),
+  [appearance](docs/guide/appearance.md),
+  [troubleshooting](docs/guide/troubleshooting.md)
+- **Develop:** [architecture](docs/develop/architecture.md),
+  [writing a plugin](docs/develop/plugin-authoring.md),
+  [making a theme](docs/develop/themes.md),
+  [building from source](docs/develop/building-from-source.md)
+- **Security and project:** [threat model](docs/security/threat-model.md),
+  [security policy](SECURITY.md), [privacy](PRIVACY.md),
+  [roadmap](docs/roadmap.md), [releasing](docs/releasing.md)
 
 ## Contributing
 
