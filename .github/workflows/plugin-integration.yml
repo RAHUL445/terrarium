@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 30
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           path: host
@@ -29,7 +29,7 @@ jobs:
           assert re.fullmatch(r'[0-9a-fA-F]{40}', os.environ['PLUGINS_REF']), 'Use a full commit SHA'
           assert re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', os.environ['PLUGINS_REPOSITORY']), 'Use owner/repository'
           PY
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: ${{ inputs.plugins_repository }}
