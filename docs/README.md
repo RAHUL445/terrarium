@@ -16,7 +16,7 @@ for an overview.
 | [Plugins](guide/plugins.md) | Install, review, update, roll back and remove plugins |
 | [AI, schedules and voice](guide/ai-and-schedules.md) | AI provider, scheduled runs, reminders, local transcription |
 | [Appearance](guide/appearance.md) | Light and dark mode, themes, app icons, workspace layout |
-| [Command line](guide/command-line.md) | Read your data from the `terrarium` command line or an agent |
+| [Command line](guide/command-line.md) | Read and change your data from the `terrarium` command line or an AI agent (MCP), with or without the app window |
 | [Troubleshooting](guide/troubleshooting.md) | Build errors, sync problems, conflicts, starting over |
 
 ## Develop

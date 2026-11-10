@@ -64,6 +64,9 @@ and some templates.
   plugin list and pairing.
 - **Scheduler and AI.** Plugins can schedule jobs and reminders and generate
   text through any OpenAI-compatible provider you configure, local or remote.
+- **Command line and agents.** The `terrarium` command and its MCP server
+  run the same commands as the UI, with per-client tokens, an audit log,
+  dry runs and confirmation for destructive actions.
 - **Developer CLI.** `terra` scaffolds, builds, checks, hot-reloads, signs and
   previews plugins in a browser.
 
@@ -161,6 +164,7 @@ All documentation is in [docs/](docs/README.md):
   [plugins](docs/guide/plugins.md),
   [AI, schedules and voice](docs/guide/ai-and-schedules.md),
   [appearance](docs/guide/appearance.md),
+  [command line](docs/guide/command-line.md),
   [troubleshooting](docs/guide/troubleshooting.md)
 - **Develop:** [architecture](docs/develop/architecture.md),
   [writing a plugin](docs/develop/plugin-authoring.md),

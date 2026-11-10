@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] - 2026-11-10
+
 ### Added
 
 - First public source preview of the Terrarium host for macOS and Android.
@@ -18,8 +20,22 @@ All notable changes to this project are documented here. The format follows
 - Spaces, scheduler and reminders, AI reports through OpenAI-compatible
   providers, and private voice transcription.
 - `terra` developer CLI and the `terrarium:plugin@0.1.0` guest SDK.
+- One command registry shared by the app's UI and outside callers: host
+  commands for spaces, pages, search, schedules and the window, and plugin
+  queries and actions described with parameters, effects and examples.
+- `terrarium` command line, off until turned on in Settings → Developer:
+  named clients with read-only or read-and-change tokens, an audit log of
+  what each ran, dry runs that keep nothing, and confirmation for
+  destructive actions.
+- `terrarium mcp` serves the same commands as MCP tools for AI agents, asking
+  the user through the agent before destructive ones.
+- `terrarium serve` runs Terrarium without its window until the app opens,
+  with a lock so only one process writes the data.
 
 ### Known issues
 
 - See [SECURITY.md](SECURITY.md) and the [roadmap](docs/roadmap.md) for open
   security and release gates.
+
+[Unreleased]: https://github.com/RAHUL445/terrarium/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.1]: https://github.com/RAHUL445/terrarium/releases/tag/v0.1.0-alpha.1

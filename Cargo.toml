@@ -4,7 +4,7 @@ members = ["crates/core", "crates/ai", "crates/scheduler", "crates/runtime", "cr
 exclude = ["crates/guest", "packages", "crates/runtime/tests/fixtures"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/RAHUL445/terrarium"

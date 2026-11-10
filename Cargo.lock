@@ -5426,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "terra"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "getrandom 0.2.17",
  "serde_json",
@@ -5436,7 +5436,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-ai"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -5453,7 +5453,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-app"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -5478,7 +5478,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-cli"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde_json",
  "terrarium-control-proto",
@@ -5486,7 +5486,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-control-proto"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5495,7 +5495,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "loro",
@@ -5509,7 +5509,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-host"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.2.17",
@@ -5522,7 +5522,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
@@ -5543,7 +5543,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-scheduler"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "jiff",
  "serde",
@@ -5554,7 +5554,7 @@ dependencies = [
 
 [[package]]
 name = "terrarium-sync"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "bip39",
