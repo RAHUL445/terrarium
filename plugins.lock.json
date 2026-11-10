@@ -1,7 +1,7 @@
 {
   "format": 1,
   "api": "terrarium:plugin@0.1.0",
-  "plugins_commit": "0414b1945bb3134adc1b58731c5093b111c6b99c",
+  "plugins_commit": "e9f0fc356de9134d391a9a12908e50ab633316a4",
   "source_dirty": false,
   "sdk": {
     "host_commit": "16a25a90eac326d034bf08e1a7969ceceb98b451",
@@ -10,20 +10,20 @@
   "plugins": [
     {
       "id": "bookmarks",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "files": {
         "dist/plugin.wasm": "929052991f5ad1211130145a11af27987b583016f5328a9611a11d97f76076aa",
-        "manifest.json": "68294c0200a44c317835e93f2e599aa361853846bf575f19adc92260815264c6",
+        "manifest.json": "a53914402f73ea4e1f6eb38b09d75d4d708e272eaad602bc2145f676c49170e0",
         "ui/page-main.json": "0ebed86b8c790ec57f5d8a28c99e41554ff15b9cf38d066d698fc719b801a8f0",
         "ui/widget-recent.json": "e31b356edfaf6c8f5994dbfdee8aa941fbbe4178d436561c34b5b9baea116e31"
       }
     },
     {
       "id": "habits",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "files": {
         "dist/plugin.wasm": "37c17d1f09d225b3cce736734f19fce81be8a07ca82d777ac0d16d33bacb9cfd",
-        "manifest.json": "f5f191ed18c8d9bb2ad3f80260676cee9c5e39949d12806e5b3b119f95f18fa0",
+        "manifest.json": "979bdd0f95a14413c960e2b6d8b0aac062cffb08d34e0eb08f20e43605a6bae7",
         "ui/page-main.json": "86dfc8244f1e331373b43c5e7041b544ac9f50ee0b16828369f0173c5ff6edcf",
         "ui/widget-streaks.json": "8a6e4284aa83e850d96b446a582b82baf3970a37a2f5473e481897f6c3052f7f",
         "ui/widget-today.json": "05e7239ae6fd7dea626082d9b36f6f3ed19ca6e88f610ddd88a8084164e4503b"
@@ -31,10 +31,10 @@
     },
     {
       "id": "notes",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "files": {
         "dist/plugin.wasm": "38e3c68076435ede41e653605bf613c148c8b098977fa7fe99489ad736e6c393",
-        "manifest.json": "5cb43572527c4fe3f63ea89da269e14027ce6e6e42dee747111713d38ed5766d",
+        "manifest.json": "54c17dadcc639c2fd711320294be04508c039a06424473bc864260e53456fb4c",
         "ui/page-main.json": "4ccfc911eef0133602990d71fcbf1e57f28e963d127a4b6424e1b879d5f8bd26",
         "ui/widget-capture.json": "cd3e695be27e0e6abb24cb3741c5e54cd2285280a5c74bec34e7a3e52c9226b9",
         "ui/widget-pinned.json": "ce5cec52ce341c5673d4d63072880b36c24196f7a331c572831d8f8e52ccb19c"
@@ -42,20 +42,20 @@
     },
     {
       "id": "reports",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "files": {
         "dist/plugin.wasm": "0f68f61ce5e06c3d2f0e6d990c1f001281bbce70e7565d958f6502b08f79c559",
-        "manifest.json": "ded575a01372b6a3805dff06dc414372db5c4c306cc31dc4a618af23ba741205",
+        "manifest.json": "cc2c1d9d7c9b6df7578f0d67e4d611ad65a00401a6fbacb4570d4a105b2683f4",
         "ui/page-main.json": "28c695066b0af855da9505b37603dbdbe10413f19fbc855a87830323e1ec49be",
         "ui/widget-latest.json": "3bb9b5e55b55d21f5bd7809a7d21345b755fdb00d09efcae353b71503223ad5a"
       }
     },
     {
       "id": "todo",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "files": {
         "dist/plugin.wasm": "c4930f4dc3df82fc35eeed87ba04cd4f446cd1ee1f40644571c1210cf61722fa",
-        "manifest.json": "82d0557b7e4c8dc23887e56a16b096fb5ab0f2560b688b127e25f37dd3c88b4a",
+        "manifest.json": "f42168f8e6264ebd5c01c1ce2eb6fb8367910f1efda6b6370b937c300c0c227b",
         "ui/page-main.json": "a591d7324d05386bbe2b4d52993df4f96fa7611192a6aec9a9351c327e036015",
         "ui/widget-quick-add.json": "c73b5d371eb4c90062dd2a69135bdfe5afdf874547ccc26580cc68258ed7bdc6",
         "ui/widget-today.json": "32bfa83cac914cbd852c5f8c4f4944d5369202d3017dc5b913f18fa4f36462a5"
@@ -63,10 +63,10 @@
     },
     {
       "id": "voice",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "files": {
         "dist/plugin.wasm": "3174c488b36e378666ff62a1e160241b2691faa88d344c2e25453fa69dd4270e",
-        "manifest.json": "95426525c1904d8118f272ac9d60282a330e7ebbea61b83ef6a400b9bce0b18c",
+        "manifest.json": "9d8d531d7c737ce27428bbea2a4a54a6c9b8c719a6c2ccbfa3bbbaf0c8839bae",
         "ui/page-main.json": "c6f70ba8f95efa30b245b8f22f1ea388c8dcda80bbe429031ef7278511e22eb3",
         "ui/widget-capture.json": "ff5432baf7285efc2b1eeeb0f25d155afaf2ab13646d1371ed68774cd1ab728e"
       }
