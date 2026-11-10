@@ -28,6 +28,7 @@ const USAGE: &str = "usage: terrarium <command> [options]
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   watch                         print app events as data changes
   mcp                           serve these commands as MCP tools on stdin/stdout, for agents
+  serve                         run Terrarium without its window until the app opens
 
   page list | show <page> | widgets | create <title> | rename <page> <title> | remove <page>
   page place <page> <plugin/widget> | move <page> <placement> | unplace <page> <placement>
@@ -209,7 +210,7 @@ impl Conn {
             Failure::new(
                 "unreachable",
                 format!(
-                    "Can't reach Terrarium at {} ({e}). Is the app open, with Settings → Developer → Command-line control on?",
+                    "Can't reach Terrarium at {} ({e}). Is the app open (or `terrarium serve` running), with Settings → Developer → Command-line control on?",
                     path.display()
                 ),
             )
@@ -552,7 +553,44 @@ fn cmd_status(o: &Options) -> Outcome {
         .map(|p| format!("{} {}", cell(&p["id"]), cell(&p["version"])))
         .collect();
     println!("Plugins    {}", plugins.join(", "));
+    if status["window"] == false {
+        println!("Window     none: `terrarium serve` is answering until the app opens");
+    }
     Ok(())
+}
+
+/// The app binary that runs headless: `$TERRA_APP_BIN`, else
+/// `terrarium-app` next to this command (as in `Terrarium.app/Contents/MacOS`
+/// and in `target/<profile>`).
+fn app_binary() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("TERRA_APP_BIN") {
+        return Some(path.into());
+    }
+    // Follow the `~/.local/bin/terrarium` link back into the app.
+    let exe = std::env::current_exe().ok()?.canonicalize().ok()?;
+    Some(exe.parent()?.join("terrarium-app"))
+}
+
+/// Replaces this process with the app binary in headless mode.
+fn cmd_serve(o: &Options) -> Outcome {
+    if !o.words.is_empty() || o.socket.is_some() || o.space.is_some() {
+        return Err(Failure::usage(
+            "usage: terrarium serve\n\nIt uses the app's data folder and socket.",
+        ));
+    }
+    let app = app_binary().filter(|p| p.is_file()).ok_or_else(|| {
+        Failure::new(
+            "failed",
+            "Can't find the Terrarium app next to this command. Set TERRA_APP_BIN to its \
+                 binary (Terrarium.app/Contents/MacOS/terrarium-app).",
+        )
+    })?;
+    use std::os::unix::process::CommandExt;
+    let e = std::process::Command::new(&app).arg("--headless").exec();
+    Err(Failure::new(
+        "failed",
+        format!("Can't start {}: {e}", app.display()),
+    ))
 }
 
 fn cmd_commands(o: &Options) -> Outcome {
@@ -927,6 +965,7 @@ fn run(args: &[String]) -> Outcome {
         "search" => cmd_search(&o),
         "watch" => cmd_watch(&o),
         "mcp" => mcp::cmd_mcp(&o),
+        "serve" => cmd_serve(&o),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())

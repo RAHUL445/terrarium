@@ -286,7 +286,7 @@ terrarium mcp                                 # the registry as MCP tools over s
 | 1. Contract | Command registry, `describe`, manifest `params`/`effect`/`open`, host `search`; the UI moves onto `invoke` | `crates/runtime` (new `commands.rs`), `manifest.rs`, `services.rs`, `apps/tauri/src-tauri/src/plugins.rs`, `ui/app.js` |
 | 2. Read-only CLI | Control socket, Settings switch, named read tokens, audit log, the `terrarium` binary in the bundle with `login/status/commands/query/search/watch` | `apps/tauri/src-tauri/src/control.rs` (new), new crates `control-proto` and `control-cli`, `tauri.conf.json` |
 | 3. Writes | Read-and-change tokens, `terrarium run`, `--dry-run`, changes in the audit log, `page`/`space` subcommands, `ui.open`/`ui.notify` | `crates/core/src/change.rs`, `crates/control-cli`, `apps/tauri` |
-| 4. Agents and later | `terrarium mcp`, a headless host with a lock, remote control over Tailscale | `crates/control-cli`, `crates/runtime` |
+| 4. Agents and later | `terrarium mcp` (4a), a headless host with a lock (4b, `terrarium serve`), remote control over Tailscale (4c) | `crates/control-cli`, `crates/host`, `crates/runtime` |
 
 Annotating the recommended plugins' manifests (`params`, `effect`, `open`)
 can start in phase 1, in `terrarium-plugins/packages/*/manifest.json`.
@@ -454,6 +454,45 @@ because `reopen` undoes it.
   error saying so. While the app is closed, calls return `unreachable`.
 - **Malformed previews.** A `dry_run` that is not true or false is refused
   rather than ignored, so a preview never runs for real.
+
+### Phase 4b as built: `terrarium serve`
+
+`terrarium serve` runs Terrarium without its window, so scripts and agents
+work while the app is closed. It answers on the same socket with the same
+clients, tokens, scopes and audit log.
+
+- **Shared services.** The plugin host wiring, scheduled runs and
+  reminders, and the control socket moved out of the Tauri app into
+  `crates/host` (`terrarium-host`). Nothing there knows about a window;
+  what the services need from the process running them goes through a
+  `Shell` trait: send an app event, show a notification, show something in
+  the window, deliver reminders. The app implements it with Tauri, and
+  headless mode with no window.
+- **Same binary.** `terrarium serve` replaces itself with the app binary
+  next to it (`terrarium-app --headless`, or `$TERRA_APP_BIN`). The app
+  binary already carries the bundled plugins and wasmtime, so the
+  `terrarium` command stays small and both always run the same plugin
+  versions.
+- **What runs.** Plugins (including dev reloads and synced plugin set
+  changes), queries and actions, host commands, scheduled runs and
+  reminders (shown with `osascript` on macOS). Not sync, AI requests or
+  pairing: those need the app's keys. AI requests queue in memory and are
+  dropped when serve stops, as when the app quits. `ui.open` and
+  `ui.notify` fail with `unavailable`, and `status` reports
+  `"window": false`.
+- **One writer.** The app and serve each take an exclusive lock on
+  `terrarium.lock` in the data folder (`File::try_lock`, so `flock` on
+  Unix) and write their role into it. The system releases it when the
+  process ends, however it ends. Serve refuses to start while the app is
+  open; a second serve or a second app is refused too.
+- **Hand-over.** When the app opens and finds serve holding the lock, it
+  creates `terrarium.handoff` and waits up to 10 s. Serve checks for it
+  every 200 ms, takes the plugin host (so a command in progress finishes
+  first), removes its socket and exits. No process is signalled by id,
+  so a reused pid can never be hit. MCP sessions see the app go away and
+  come back, as on any restart.
+- **Must be turned on.** Serve exits if command-line control is off. It
+  can't turn it on: that stays a choice made in the app.
 
 ## 4. Decisions
 

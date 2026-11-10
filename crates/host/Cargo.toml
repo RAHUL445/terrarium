@@ -1,0 +1,22 @@
+[package]
+name = "terrarium-host"
+description = "Terrarium services shared by the app window and its headless mode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[features]
+# Local duration-only diagnostics, enabled by the app's feature of the same name.
+startup-profiling = []
+
+[dependencies]
+terrarium-runtime = { path = "../runtime" }
+terrarium-control-proto = { path = "../control-proto" }
+base64 = "0.22"
+getrandom = "0.2"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

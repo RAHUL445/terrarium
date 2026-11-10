@@ -950,7 +950,7 @@ pub async fn restore_backup(
             .with_host(|host| backup.restore(host))
             .ok_or("plugin host unavailable")?
             .map_err(err)?;
-        plugins.reconcile(&app);
+        plugins.reconcile(&crate::shell::AppShell(app.clone()));
         let second = plugins
             .with_host(|host| backup.restore(host))
             .ok_or("plugin host unavailable")?

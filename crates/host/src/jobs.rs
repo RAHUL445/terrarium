@@ -3,50 +3,48 @@
 //! Every 30 s this thread:
 //! - runs the scheduled runs due on this device (the scheduler in the
 //!   runtime decides which; `desktop` schedules never run on a phone);
-//! - reads every plugin's reminders query and turns rows meant for this
-//!   kind of device (`notify_on`: `phone` by default, `desktop`, `both`)
-//!   into system notifications. On Android they are scheduled ahead with
-//!   exact alarms, so they fire even when the app is closed; on desktop
-//!   they are shown when due while the app runs.
+//! - reads every plugin's reminders query and hands rows meant for this
+//!   kind of device (`notify_on`: `phone` by default, `desktop`, `both`) to
+//!   the [`Shell`]. On a computer they are shown when due; the Android app
+//!   schedules them ahead with exact alarms instead.
 //!
 //! State (notifications already handled) is kept in
 //! `<space>/jobs-state.json`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use serde_json::{json, Value};
+use terrarium_runtime::scheduler::Finished;
 use terrarium_runtime::{store_id, DEFAULT_SPACE};
 
-use crate::plugins::Plugins;
+use crate::{now_ms, Plugins, Shell, DESKTOP};
 
 const TICK: Duration = Duration::from_secs(30);
-/// Desktop shows a reminder only if it fell due this recently.
-const LATE_LIMIT_MS: u64 = 15 * 60_000;
+/// A computer shows a reminder only if it fell due this recently.
+pub const LATE_LIMIT_MS: u64 = 15 * 60_000;
 
 #[derive(Default, Serialize, Deserialize)]
-struct State {
+pub struct State {
     /// Reminder keys (`plugin/id@at_ms`) already shown or scheduled.
-    handled: BTreeSet<String>,
+    pub handled: BTreeSet<String>,
     /// Android: notification id -> reminder key, to cancel removed ones.
     #[serde(default)]
-    scheduled: BTreeMap<i32, String>,
+    pub scheduled: BTreeMap<i32, String>,
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+pub struct Reminder {
+    pub key: String,
+    pub at_ms: u64,
+    pub title: String,
+    pub body: String,
 }
 
 /// Stable notification id from the reminder's plugin and row id.
-fn notification_id(key: &str) -> i32 {
+pub fn notification_id(key: &str) -> i32 {
     let mut hash: u32 = 0x811c_9dc5;
     for byte in key.bytes() {
         hash ^= u32::from(byte);
@@ -55,51 +53,62 @@ fn notification_id(key: &str) -> i32 {
     (hash & 0x7fff_ffff) as i32
 }
 
-pub fn start(app: AppHandle, state_path: PathBuf) {
+pub fn start(plugins: Plugins, shell: Arc<dyn Shell>, state_path: PathBuf) {
     std::thread::spawn(move || {
-        let mut state: State = fs::read(&state_path)
+        let mut state: State = std::fs::read(&state_path)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         // Android drops an app's alarms when it is updated, force-stopped
         // or the phone restarts. Schedule every future reminder again;
         // the same id replaces an alarm that did survive.
-        if cfg!(mobile) {
+        if !DESKTOP {
             state
                 .handled
                 .retain(|key| !state.scheduled.values().any(|k| k == key));
         }
         loop {
             std::thread::sleep(TICK);
-            let plugins = app.state::<Plugins>();
-            let ran = run_due_jobs(&app, &plugins);
-            notify(&app, &plugins, &mut state);
+            let ran = run_due_jobs(&plugins, &*shell);
+            let now = now_ms();
+            let reminders = reminders(&plugins, now);
+            shell.deliver_reminders(&reminders, &mut state, now);
+            forget_old(&mut state, now);
             if ran {
-                let _ = app.emit("data-changed", ());
+                shell.emit("data-changed", json!(null));
             }
             if let Ok(bytes) = serde_json::to_vec(&state) {
-                let _ = fs::write(&state_path, bytes);
+                let _ = crate::private::write_private(&state_path, &bytes);
             }
         }
     });
 }
 
-fn run_due_jobs(app: &AppHandle, plugins: &Plugins) -> bool {
+/// Tells the user how a scheduled run ended: a failure, or the notice the
+/// run left ("Report ready").
+pub fn notify_ended(shell: &dyn Shell, done: &Finished) {
+    let (title, body) = if done.notify {
+        (
+            format!("{} failed", done.schedule_name),
+            "Open Settings → Scheduled to review the error and retry.".to_string(),
+        )
+    } else if let Some(notice) = &done.notice {
+        (done.schedule_name.clone(), notice.clone())
+    } else {
+        return;
+    };
+    shell.notify(None, &title, &body);
+}
+
+fn run_due_jobs(plugins: &Plugins, shell: &dyn Shell) -> bool {
     let ended = plugins
-        .with_host(|host| host.run_due(now_ms(), cfg!(desktop)))
+        .with_host(|host| host.run_due(now_ms(), DESKTOP))
         .unwrap_or_default();
     for done in &ended {
         eprintln!("run {} {}", done.run.id, done.run.status);
-        crate::ai::notify_ended(app, done);
+        notify_ended(shell, done);
     }
     !ended.is_empty()
-}
-
-struct Reminder {
-    key: String,
-    at_ms: u64,
-    title: String,
-    body: String,
 }
 
 fn for_this_device(row: &serde_json::Map<String, Value>) -> bool {
@@ -107,7 +116,7 @@ fn for_this_device(row: &serde_json::Map<String, Value>) -> bool {
         .get("notify_on")
         .and_then(Value::as_str)
         .unwrap_or("phone");
-    let this = if cfg!(mobile) { "phone" } else { "desktop" };
+    let this = if DESKTOP { "desktop" } else { "phone" };
     match target {
         "both" => true,
         "desktop" | "phone" => target == this,
@@ -116,8 +125,9 @@ fn for_this_device(row: &serde_json::Map<String, Value>) -> bool {
     }
 }
 
-fn notify(app: &AppHandle, plugins: &Plugins, state: &mut State) {
-    let now = now_ms();
+/// Reminders meant for this kind of device that are due from
+/// [`LATE_LIMIT_MS`] ago on.
+fn reminders(plugins: &Plugins, now: u64) -> Vec<Reminder> {
     let (rows, names) = plugins
         .with_host(|host| {
             let names: BTreeMap<String, String> = host
@@ -130,8 +140,7 @@ fn notify(app: &AppHandle, plugins: &Plugins, state: &mut State) {
             (host.reminders(now.saturating_sub(LATE_LIMIT_MS)), names)
         })
         .unwrap_or_default();
-    let reminders: Vec<Reminder> = rows
-        .into_iter()
+    rows.into_iter()
         .filter(|(_, _, row)| for_this_device(row))
         .filter_map(|(space, plugin, row)| {
             let id = row.get("id")?.as_str()?.to_string();
@@ -155,80 +164,29 @@ fn notify(app: &AppHandle, plugins: &Plugins, state: &mut State) {
                     .to_string(),
             })
         })
-        .collect();
+        .collect()
+}
 
-    #[cfg(mobile)]
-    {
-        use tauri_plugin_notification::Schedule;
-        let wanted: BTreeSet<&str> = reminders.iter().map(|r| r.key.as_str()).collect();
-        // Cancel alarms whose reminder disappeared (done, deleted, moved).
-        let stale: Vec<i32> = state
-            .scheduled
-            .iter()
-            .filter(|(_, key)| !wanted.contains(key.as_str()))
-            .map(|(id, _)| *id)
-            .collect();
-        if !stale.is_empty() {
-            let _ = app.notification().cancel(stale.clone());
-            for id in stale {
-                if let Some(key) = state.scheduled.remove(&id) {
-                    state.handled.remove(&key);
-                }
-            }
-        }
-        for reminder in &reminders {
-            if state.handled.contains(&reminder.key) || reminder.at_ms <= now {
-                continue;
-            }
-            let Ok(at) = time::OffsetDateTime::from_unix_timestamp((reminder.at_ms / 1000) as i64)
-            else {
-                continue;
-            };
-            let id = notification_id(&reminder.key);
-            let result = app
-                .notification()
-                .builder()
-                .id(id)
-                .title(&reminder.title)
-                .body(&reminder.body)
-                .schedule(Schedule::At {
-                    date: at,
-                    repeating: false,
-                    allow_while_idle: true,
-                })
-                .show();
-            match result {
-                Ok(()) => {
-                    state.handled.insert(reminder.key.clone());
-                    state.scheduled.insert(id, reminder.key.clone());
-                }
-                Err(e) => eprintln!("could not schedule reminder: {e}"),
-            }
-        }
-    }
-
-    #[cfg(desktop)]
-    for reminder in &reminders {
+/// Shows the reminders that are due now and not shown yet.
+pub fn show_due<S: Shell + ?Sized>(shell: &S, reminders: &[Reminder], state: &mut State, now: u64) {
+    for reminder in reminders {
         if state.handled.contains(&reminder.key)
             || reminder.at_ms > now
             || reminder.at_ms + LATE_LIMIT_MS < now
         {
             continue;
         }
-        let shown = app
-            .notification()
-            .builder()
-            .id(notification_id(&reminder.key))
-            .title(&reminder.title)
-            .body(&reminder.body)
-            .show();
-        if let Err(e) = shown {
-            eprintln!("could not show reminder: {e}");
-        }
+        shell.notify(
+            Some(notification_id(&reminder.key)),
+            &reminder.title,
+            &reminder.body,
+        );
         state.handled.insert(reminder.key.clone());
     }
+}
 
-    // Forget handled keys older than a day so the state stays small.
+/// Forgets handled keys older than a day so the state stays small.
+fn forget_old(state: &mut State, now: u64) {
     let horizon = now.saturating_sub(24 * 3_600_000);
     state.handled.retain(|key| {
         key.rsplit('@')

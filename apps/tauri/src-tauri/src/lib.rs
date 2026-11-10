@@ -4,17 +4,22 @@
 
 mod ai;
 mod control;
+#[cfg(desktop)]
+mod headless;
 mod install;
-mod jobs;
 mod plugins;
 mod secrets;
+mod shell;
 mod sync;
 mod themes;
+
+#[cfg(desktop)]
+pub use headless::run as run_headless;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -28,17 +33,11 @@ const SPACE: &str = "personal";
 const PLUGIN: &str = "inspector-test";
 const SIM_DEVICE: &str = "sim-b";
 
-/// Static phase labels and elapsed time only. Opt-in even in release builds.
-pub(crate) fn startup_span(phase: &'static str, start: Instant) {
-    if cfg!(feature = "startup-profiling") {
-        eprintln!(
-            "[terrarium-startup] {}",
-            json!({"phase": phase, "duration_ms": ms(start)})
-        );
-    }
-}
+use terrarium_host::startup_span;
 
 struct AppState {
+    /// Held while the app runs: no other process writes this data.
+    _lock: terrarium_host::lock::DataLock,
     store: Mutex<Store>,
     data_dir: PathBuf,
     host_cfg: terrarium_runtime::HostConfig,
@@ -358,6 +357,44 @@ fn open_external(app: tauri::AppHandle, url: String) -> CmdResult<()> {
     app.opener().open_url(url, None::<&str>).map_err(err)
 }
 
+/// The plugin host for the default space under `app_data`, with the
+/// bundled plugins installed but not loaded yet ([`plugins::Plugins::start`]).
+pub(crate) struct Opened {
+    data_dir: PathBuf,
+    host_cfg: terrarium_runtime::HostConfig,
+    plugins: plugins::Plugins,
+}
+
+pub(crate) fn open_host(app_data: &Path) -> Result<Opened, Box<dyn std::error::Error>> {
+    let data_dir = app_data.join("spaces").join(SPACE);
+    fs::create_dir_all(&data_dir)?;
+    let device = device_id(&data_dir)?;
+    let host_cfg = terrarium_runtime::HostConfig {
+        data_dir: data_dir.join("plugins"),
+        // Other spaces: <app data>/spaces/<id>/plugins.
+        spaces_dir: Some(app_data.join("spaces")),
+        space: SPACE.into(),
+        device,
+        user: "owner".into(),
+        timezone: plugins::system_timezone(),
+        execution: Default::default(),
+        speech: speech_config(app_data),
+    };
+    let dev_dirs = plugins::package_dirs();
+    let stage = Instant::now();
+    let bundled = plugins::install_bundled(&app_data.join("packages"))?;
+    startup_span("bundle-install", stage);
+    let stage = Instant::now();
+    let plugins = plugins::Plugins::new(host_cfg.clone(), dev_dirs, bundled)?;
+    startup_span("plugin-host-create", stage);
+    install::trust_developer_key(&plugins);
+    Ok(Opened {
+        data_dir,
+        host_cfg,
+        plugins,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let launched = Instant::now();
@@ -374,38 +411,26 @@ pub fn run() {
                 Some(path) => path.clone(),
                 None => app.path().app_data_dir()?,
             };
-            let data_dir = app_data.join("spaces").join(SPACE);
-            fs::create_dir_all(&data_dir)?;
-            let device = device_id(&data_dir)?;
-            let store = open_store(&data_dir, device.clone())?;
+            fs::create_dir_all(&app_data)?;
+            // Stops a running `terrarium serve` first: one writer at a time.
+            let lock = terrarium_host::lock::take_over(&app_data, Duration::from_secs(10))
+                .map_err(|e| e.to_string())?;
+            let Opened {
+                data_dir,
+                host_cfg,
+                plugins,
+            } = open_host(&app_data)?;
+            let store = open_store(&data_dir, host_cfg.device.clone())?;
             startup_span("store-ready", launched);
-            let host_cfg = terrarium_runtime::HostConfig {
-                data_dir: data_dir.join("plugins"),
-                // Other spaces: <app data>/spaces/<id>/plugins.
-                spaces_dir: Some(app_data.join("spaces")),
-                space: SPACE.into(),
-                device,
-                user: "owner".into(),
-                timezone: plugins::system_timezone(),
-                execution: Default::default(),
-                speech: speech_config(&app_data),
-            };
-            let dev_dirs = plugins::package_dirs();
-            let stage = Instant::now();
-            let bundled = plugins::install_bundled(&app_data.join("packages"))?;
-            startup_span("bundle-install", stage);
-            let stage = Instant::now();
-            let plugins = plugins::Plugins::new(host_cfg.clone(), dev_dirs, bundled)?;
-            startup_span("plugin-host-create", stage);
-            install::trust_developer_key(&plugins);
-            app.manage(plugins);
+            let shell = shell::AppShell::arc(app.handle());
+            app.manage(plugins.clone());
             app.manage(install::Pending::default());
             let stage = Instant::now();
             app.manage(sync::Sync::open(&data_dir, SPACE, host_cfg.device.clone())?);
             startup_span("sync-open", stage);
-            plugins::Plugins::start(app.handle().clone());
+            plugins.start(shell.clone());
             sync::Sync::start(app.handle().clone());
-            jobs::start(app.handle().clone(), data_dir.join("jobs-state.json"));
+            terrarium_host::jobs::start(plugins, shell, data_dir.join("jobs-state.json"));
             ai::start(app.handle().clone());
             app.manage(control::Control::open(&app_data));
             control::start(app.handle());
@@ -420,6 +445,7 @@ pub fn run() {
                 }
             }
             app.manage(AppState {
+                _lock: lock,
                 store: Mutex::new(store),
                 data_dir,
                 host_cfg,

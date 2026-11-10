@@ -36,6 +36,10 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
   token, so an agent gets exactly that client's scope; destructive tools
   ask the user through the agent when it supports elicitation, and
   otherwise rely on the agent asking before passing `confirmed: true`.
+  `terrarium serve` runs the same services without a window, behind an
+  exclusive lock on the data folder that the app also takes, so only one
+  process writes the data; it has no access to the device keys, so it
+  neither syncs nor sends AI requests.
 - Dependency advisories are tracked with exposure guards
   ([review](dependency-advisory-review.md)).
 

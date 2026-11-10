@@ -139,6 +139,26 @@ Without `TERRA_TOKEN` it uses the token `terrarium login` saved.
   runs. If you quit Terrarium, the tools report that the app isn't open
   and work again once it is.
 
+## Without the app window
+
+`terrarium serve` runs Terrarium in the background without its window, so
+scripts and agents keep working after you close the app. It uses the same
+data, clients and tokens, and command-line control must be on.
+
+```sh
+terrarium serve          # runs until the app opens; Ctrl-C stops it
+```
+
+- It runs plugin queries and actions, scheduled commands and reminders.
+- It doesn't sync, send AI requests or show anything in a window: those
+  wait until the app is open. `terrarium open` and `terrarium notify` fail
+  while it runs, and `terrarium status` says there is no window.
+- Opening the app takes over: serve finishes the command it is running
+  and stops, and the app answers from then on. Serve won't start while the
+  app is open.
+- If the command can't find the app, set `TERRA_APP_BIN` to
+  `/Applications/Terrarium.app/Contents/MacOS/terrarium-app`.
+
 ## Arguments, output and errors
 
 - **Arguments** come from the command's description: `--name value`, or
@@ -160,7 +180,7 @@ Without `TERRA_TOKEN` it uses the token `terrarium login` saved.
 | 3 | No such command, item, page or space |
 | 4 | The item is in the trash |
 | 5 | Not allowed: unknown token, or the client may only read |
-| 6 | Can't reach the app: it isn't open, or command-line control is off |
+| 6 | Can't reach the app: it isn't open (nor `terrarium serve`), or command-line control is off |
 | 7 | Needs confirmation: run again with `--yes`, or try `--dry-run` |
 
 ## What the app records

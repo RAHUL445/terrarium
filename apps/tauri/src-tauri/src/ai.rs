@@ -10,36 +10,16 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_notification::NotificationExt;
 use terrarium_runtime::ai::Sealer;
-use terrarium_runtime::scheduler::Finished;
 use terrarium_runtime::services;
 
 use crate::plugins::{err, Plugins};
+use crate::shell::AppShell;
 use crate::sync::Sync;
 
 const TICK: Duration = Duration::from_millis(250);
 /// How often the sealing root is checked (joining a space changes it).
 const SEALER_EVERY: u32 = 20;
-
-/// Tells the user how a scheduled run ended: a failure, or the notice the
-/// run left ("Report ready").
-pub fn notify_ended(app: &AppHandle, done: &Finished) {
-    let (title, body) = if done.notify {
-        (
-            format!("{} failed", done.schedule_name),
-            "Open Settings → Scheduled to review the error and retry.".to_string(),
-        )
-    } else if let Some(notice) = &done.notice {
-        (done.schedule_name.clone(), notice.clone())
-    } else {
-        return;
-    };
-    let shown = app.notification().builder().title(title).body(body).show();
-    if let Err(e) = shown {
-        eprintln!("could not show run notice: {e}");
-    }
-}
 
 fn update_sealer(app: &AppHandle, current: &mut Option<String>) {
     let Ok((kind, root)) = app.state::<Sync>().secrets_root() else {
@@ -85,7 +65,7 @@ pub fn start(app: AppHandle) {
                         .with_host(|host| host.deliver_ai(job, result))
                         .flatten();
                     if let Some(done) = ended {
-                        notify_ended(&app, &done);
+                        terrarium_host::jobs::notify_ended(&AppShell(app.clone()), &done);
                     }
                     let _ = app.emit("data-changed", ());
                 });

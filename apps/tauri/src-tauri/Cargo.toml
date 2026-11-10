@@ -17,13 +17,14 @@ tauri-build = { version = "2", features = [] }
 
 [features]
 # Local duration-only diagnostics; never enables WebView debugging or records data.
-startup-profiling = []
+startup-profiling = ["terrarium-host/startup-profiling"]
 
 [dependencies]
 terrarium-core = { path = "../../../crates/core" }
 terrarium-runtime = { path = "../../../crates/runtime" }
 terrarium-sync = { path = "../../../crates/sync" }
 terrarium-control-proto = { path = "../../../crates/control-proto" }
+terrarium-host = { path = "../../../crates/host" }
 base64 = "0.22"
 getrandom = "0.2"
 if-addrs = "0.13"

@@ -459,7 +459,7 @@ pub async fn confirm_install(
                     .map_err(err)
             })
             .ok_or("plugin host unavailable")??;
-        plugins.reconcile(&app);
+        plugins.reconcile(&crate::shell::AppShell(app.clone()));
         Ok(id)
     })
     .await
@@ -481,7 +481,7 @@ pub async fn rollback_plugin(app: AppHandle, id: String) -> Result<String, Strin
         let installed = plugins
             .with_host(|host| host.packages_mut().rollback(&id).map_err(err))
             .ok_or("plugin host unavailable")??;
-        plugins.reconcile(&app);
+        plugins.reconcile(&crate::shell::AppShell(app.clone()));
         Ok(installed.version)
     })
     .await
@@ -508,7 +508,7 @@ pub async fn set_plugin_removed(app: AppHandle, id: String, removed: bool) -> Re
                     .map_err(err)
             })
             .ok_or("plugin host unavailable")??;
-        plugins.reconcile(&app);
+        plugins.reconcile(&crate::shell::AppShell(app.clone()));
         Ok(())
     })
     .await
