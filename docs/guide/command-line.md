@@ -53,7 +53,7 @@ readable only by you. Scripts can set `TERRA_TOKEN` instead.
 terrarium status                              # app version, this client, spaces, plugins
 terrarium commands                            # everything this client can run
 terrarium commands todo.                      # only To-do's commands
-terrarium query todo.tasks --filter all       # run a query
+terrarium query todo.tasks --filter upcoming  # run a query
 terrarium query todo.counts --space work      # in another space
 terrarium search "milk"                       # search every plugin
 terrarium search "milk" --all-spaces --plugin notes

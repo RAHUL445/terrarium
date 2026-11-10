@@ -21,7 +21,7 @@ const USAGE: &str = "usage: terrarium <command> [options]
   logout                        forget the saved token
   status                        the app, this client, spaces and plugins
   commands [prefix]             commands this client can run
-  query <id> [--param value]... run a query, e.g. terrarium query todo.tasks --filter all
+  query <id> [--param value]... run a query, e.g. terrarium query todo.tasks --filter upcoming
   run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   watch                         print app events as data changes

@@ -55,6 +55,21 @@ fn described_todo(root: &Path) -> PathBuf {
     }
     let path = to.join("manifest.json");
     let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Start from no descriptions, whatever the plugin bundle declares, so
+    // these tests cover the host's defaults (untyped, inferred effects).
+    for op in m["operations"].as_object_mut().unwrap().values_mut() {
+        let op = op.as_object_mut().unwrap();
+        for key in ["effect", "confirm", "params", "result", "examples", "cli"] {
+            op.remove(key);
+        }
+    }
+    for q in m["queries"].as_object_mut().unwrap().values_mut() {
+        let q = q.as_object_mut().unwrap();
+        for key in ["description", "types", "cli"] {
+            q.remove(key);
+        }
+    }
+    m.as_object_mut().unwrap().remove("open");
     m["operations"]["create"]["params"] = json!({
         "title": { "type": "string", "required": true },
         "due": { "type": "date" },
