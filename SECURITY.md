@@ -25,10 +25,13 @@ their own policy. See the [threat model](docs/security/threat-model.md).
 
 ## Known limits
 
-- The full dependency audit reports one glib unsoundness finding and five
-  maintenance warnings. None is in the reviewed arm64 macOS/Android build
-  graphs, and CI guards that; the strict audit is not waived. Other
-  architectures and feature sets need separate review.
+- The full dependency audit reports one glib unsoundness finding
+  (RUSTSEC-2024-0429) and five maintenance warnings. None is in the reviewed
+  arm64 macOS/Android build graphs, and CI guards that. The blocking audit
+  records the glib finding as known so that any new finding fails CI; a
+  separate strict-audit job with no exceptions keeps reporting it. This is
+  not a risk acceptance. Other architectures and feature sets need separate
+  review.
 - Blocking a device is host-local. Signed membership and key-rotation
   primitives exist, but complete compromised-device revocation is not active,
   and data already downloaded cannot be erased remotely.

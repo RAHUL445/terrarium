@@ -6,8 +6,9 @@ for the gates that must close before a binary or store release.
 
 ## Cut a source prerelease
 
-1. Make sure `main` is green, including the strict security job. Known findings
-   stay visible in the release notes; they are not waived.
+1. Make sure `main` is green. The `strict audit (informational, no ignores)`
+   job in Security checks does not block CI; copy every finding it reports
+   into the release notes. Known findings are listed, not waived.
 2. Run the `Pinned plugin integration` workflow with the plugins repository
    (`RAHUL445/terrarium-plugins`) and the **full commit SHA recorded in
    `plugins.lock.json`**, never a branch name.
