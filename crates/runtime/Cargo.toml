@@ -61,6 +61,11 @@ path = "tests/assistant.rs"
 required-features = ["plugin-integration"]
 
 [[test]]
+name = "commands"
+path = "tests/commands.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
 name = "security_payloads"
 path = "tests/security_payloads.rs"
 required-features = ["plugin-integration"]

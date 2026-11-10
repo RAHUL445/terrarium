@@ -45,6 +45,8 @@ fn main() {
             "view_template",
             "run_query",
             "run_action",
+            "command",
+            "describe_commands",
             "list_spaces",
             "create_space",
             "rename_space",

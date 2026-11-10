@@ -34,6 +34,11 @@ pub(crate) fn today(now_ms: u64, tz: &str) -> Result<String, String> {
     local_date(now_ms, tz)
 }
 
+/// Milliseconds to add to a UTC instant to get local wall-clock time.
+pub(crate) fn utc_offset_ms(at_ms: u64, tz: &str) -> Result<i64, String> {
+    Ok(i64::from(zone(tz)?.to_offset(instant(at_ms)?).seconds()) * 1000)
+}
+
 pub(crate) fn local_date(at_ms: u64, tz: &str) -> Result<String, String> {
     Ok(instant(at_ms)?.to_zoned(zone(tz)?).date().to_string())
 }

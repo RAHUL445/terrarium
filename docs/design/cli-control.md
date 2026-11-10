@@ -169,7 +169,7 @@ no `params` accepts any object and is labelled "untyped" in `describe`.
   "tasks": {
     "sql": "…",
     "params": ["today", "filter", "q", "tags"],          // unchanged
-    "describe": {
+    "types": {
       "filter": { "type": "enum", "values": ["today", "upcoming", "all", "done"] },
       "q": { "type": "string" }
     }
@@ -294,6 +294,41 @@ can start in phase 1, in `terrarium-plugins/packages/*/manifest.json`.
 Phase 1 is useful by itself: the UI ends up with a single path for every
 command, and `terra preview` gets the same commands for free.
 
+### Phase 1 as built
+
+- `crates/runtime/src/commands.rs` holds the registry: `describe(host,
+  caller)` and `invoke(host, caller, kind, id, space, args, desktop)`.
+- A command is identified by **kind and id**, because a plugin may declare
+  an operation and a query with the same name (To-do has both a
+  `note_settings` operation and a `note_settings` query). The CLI verbs
+  `run` and `query` supply the kind.
+- `Caller::App` (the UI and `terra preview`) is not checked against
+  `params`, so templates that pass extra fields keep working.
+  `Caller::Client(Read | Change)` is checked: unknown or mistyped arguments
+  are refused, read-only clients get `forbidden` for anything but `read`,
+  and hidden commands look like missing ones (`not-found`).
+- Automatically hidden: operations named `on_…` (AI callbacks; this is a
+  naming convention, because callbacks are chosen at run time). Job
+  targets are **not** hidden after all: Reports' `generate` is both a job
+  target and something people run from its page. Plugins mark purely
+  internal job targets (`habits.plan_reminders`,
+  `voice.transcribe_pending`) `"cli": false` instead.
+- Host commands so far: `app.describe`, `plugin.list`,
+  `space.list/create/rename/remove/restore`,
+  `page.list/get/widgets/create/update/save/remove`, `search.query`,
+  `schedule.list/runs/run_now/enable/disable`. `page.place/move/unplace`,
+  `app.status`, and the theme, backup, sync and ui namespaces come later.
+- The Tauri `run_query` and `run_action` commands, and the same commands in
+  `terra preview`, now go through `invoke`. A new `command` Tauri command
+  runs any registry command, and `describe_commands` lists them. ⌘K search
+  calls `search.query` once instead of querying each plugin from
+  JavaScript.
+- Manifest fields: `effect`, `confirm`, `params`, `result`, `examples` and
+  `cli` on operations; `description`, `types` and `cli` on queries; `open`
+  on the manifest. The ids in `HOST_NAMESPACES` are reserved.
+- The recommended plugins don't describe their commands yet. That work
+  happens in `terrarium-plugins` and needs a new pinned bundle.
+
 ## 4. Decisions
 
 Settled on 2026-11-10.
@@ -304,4 +339,4 @@ Settled on 2026-11-10.
 | Default | Off until turned on in Settings → Developer. |
 | MCP | After `terrarium run` is stable (phase 4). |
 | Client identity | Named tokens per client, scoped to Read or Read and change, revocable, named in the audit log. |
-| Hiding operations | Both: the host hides AI callbacks and job targets automatically, and a plugin can mark any operation `"cli": false`. |
+| Hiding operations | Both: the host hides AI callbacks (`on_…`) automatically, and a plugin can mark any operation `"cli": false`. Hiding job targets automatically was dropped in Phase 1 (see above). |

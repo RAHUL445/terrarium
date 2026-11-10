@@ -1889,32 +1889,34 @@ function commands() {
 
 async function searchPlugins(q, seq) {
   const returnTo = { query: q, allSpaces: palette.allSpaces };
-  const scope = palette.allSpaces ? spaces.filter((sp) => !sp.removed) : [current()];
+  let hits = [];
+  try {
+    const found = await call("command", { kind: "query", id: "search.query", space: currentSpace, args: { q, all_spaces: palette.allSpaces } });
+    hits = found.results;
+  } catch (_) {}
   const found = [];
-  await Promise.all(pluginList.plugins.filter((p) => p.search).flatMap((p) => scope.map(async (sp) => {
-    try {
-      const rows = await call("run_query", { space: sp.id, plugin: p.id, name: p.search, params: { q } });
-      for (const row of rows) {
-        found.push({
-          group: p.name,
-          label: String(row.title ?? ""),
-          sub: [row.subtitle, palette.allSpaces ? sp.name : null].filter(Boolean).join(" · "),
-          tile: appTile(p, "xs"),
-          run: async () => {
-            if (!p.pages.length) return;
-            if (sp.id !== currentSpace) {
-              if (await setSpace(sp.id, { reload: false }) === false) return;
-              renderSpaceChrome();
-              renderHome();
-              loadBadges();
-            }
-            searchReturn = returnTo;
-            await openPage(p.id, p.pages[0].id, { item: row.id, fromSearch: true });
-          },
-        });
-      }
-    } catch (_) {}
-  })));
+  for (const hit of hits) {
+    const p = pluginList.plugins.find((x) => x.id === hit.plugin);
+    if (!p) continue;
+    const sp = spaces.find((x) => x.id === hit.space);
+    found.push({
+      group: p.name,
+      label: String(hit.title ?? ""),
+      sub: [hit.subtitle, palette.allSpaces ? sp?.name : null].filter(Boolean).join(" · "),
+      tile: appTile(p, "xs"),
+      run: async () => {
+        if (!hit.open) return;
+        if (hit.space !== currentSpace) {
+          if (await setSpace(hit.space, { reload: false }) === false) return;
+          renderSpaceChrome();
+          renderHome();
+          loadBadges();
+        }
+        searchReturn = returnTo;
+        await openPage(hit.open.plugin, hit.open.page, { item: hit.id, fromSearch: true });
+      },
+    });
+  }
   return seq === palette.seq ? found : null;
 }
 

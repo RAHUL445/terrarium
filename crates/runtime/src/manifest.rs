@@ -70,6 +70,10 @@ pub struct Manifest {
     /// passed to `op` as the `arg` argument.
     #[serde(default)]
     pub quick_actions: Vec<QuickAction>,
+    /// Where search hits and items named by id open. Defaults to the
+    /// first page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<OpenDef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -132,12 +136,145 @@ pub struct RemindersDef {
     pub query: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationDef {
     #[serde(default)]
     pub description: String,
+    /// What running it does to the user's data. Callers outside the app
+    /// need a token that allows changes for anything but `read`.
+    #[serde(default)]
+    pub effect: Effect,
+    /// Text a person must approve before the operation runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+    /// The arguments it takes. Without them the operation is "untyped":
+    /// any object is passed through unchecked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<BTreeMap<String, ParamSpec>>,
+    /// Fields of the object it returns, for callers and documentation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<BTreeMap<String, ParamSpec>>,
+    /// Example argument objects.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<serde_json::Value>,
+    /// `false` keeps the operation away from callers outside the app (the
+    /// command line, agents). The UI, schedules and interop still reach it.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub cli: bool,
 }
+
+impl Default for OperationDef {
+    fn default() -> Self {
+        OperationDef {
+            description: String::new(),
+            effect: Effect::default(),
+            confirm: None,
+            params: None,
+            result: None,
+            examples: Vec::new(),
+            cli: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+/// What an operation does to the user's data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effect {
+    /// Reads only.
+    Read,
+    /// Creates or changes data.
+    #[default]
+    Write,
+    /// Removes or hides data, or changes many items at once.
+    Destructive,
+}
+
+/// The type of an argument, query parameter or result field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParamType {
+    /// One line of text.
+    String,
+    /// Longer text.
+    Text,
+    Integer,
+    Number,
+    Boolean,
+    /// `YYYY-MM-DD`.
+    Date,
+    /// `HH:MM`.
+    Time,
+    /// A row id.
+    Id,
+    /// One of `values`.
+    Enum,
+    /// Any JSON value.
+    Json,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParamSpec {
+    #[serde(rename = "type")]
+    pub ty: ParamType,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Allowed values of an `enum`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// Bounds of an `integer` or `number`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+}
+
+impl ParamSpec {
+    pub fn new(ty: ParamType) -> Self {
+        ParamSpec {
+            ty,
+            required: false,
+            description: String::new(),
+            values: Vec::new(),
+            min: None,
+            max: None,
+        }
+    }
+
+    fn validate(&self, what: &str) -> std::result::Result<(), String> {
+        match self.ty {
+            ParamType::Enum if self.values.is_empty() => {
+                Err(format!("{what}: an enum needs `values`"))
+            }
+            ParamType::Enum => Ok(()),
+            _ if !self.values.is_empty() => Err(format!("{what}: only an enum takes `values`")),
+            ParamType::Integer | ParamType::Number => match (self.min, self.max) {
+                (Some(lo), Some(hi)) if lo > hi => Err(format!("{what}: `min` is above `max`")),
+                _ => Ok(()),
+            },
+            _ if self.min.is_some() || self.max.is_some() => {
+                Err(format!("{what}: only numbers take `min` and `max`"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Query parameters the host fills in from the device clock when a caller
+/// leaves them out.
+pub const CONTEXT_PARAMS: &[&str] = &["today", "weekday", "now_ms", "utc_offset_ms", "tz"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -146,6 +283,23 @@ pub struct QueryDef {
     /// Names bound in order to `?1`, `?2`, ... from the caller's values.
     #[serde(default)]
     pub params: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Types of some or all of `params`. Context parameters (see
+    /// [`CONTEXT_PARAMS`]) need none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub types: BTreeMap<String, ParamSpec>,
+    /// `false` keeps the query away from callers outside the app.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub cli: bool,
+}
+
+/// Where an item found by search, or named by id, opens in the UI.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenDef {
+    /// A declared page; the item id is passed to it.
+    pub page: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -209,6 +363,9 @@ impl Manifest {
                 "id `{}` must use a-z, 0-9 and - and start with a letter",
                 self.id
             ));
+        }
+        if crate::commands::HOST_NAMESPACES.contains(&self.id.as_str()) {
+            return bad(format!("id `{}` is reserved for the host", self.id));
         }
         if self.api != API_VERSION {
             return bad(format!(
@@ -324,6 +481,39 @@ impl Manifest {
             }
             if action.label.trim().is_empty() || action.label.chars().count() > 40 {
                 return bad("quick action labels must be 1-40 characters".into());
+            }
+        }
+        for (name, op) in &self.operations {
+            for (param, spec) in op.params.iter().chain(op.result.iter()).flatten() {
+                spec.validate(&format!("operation `{name}`, `{param}`"))
+                    .map_err(RuntimeError::Manifest)?;
+            }
+            if op.examples.iter().any(|e| !e.is_object()) {
+                return bad(format!("operation `{name}`: examples must be objects"));
+            }
+            if op.confirm.as_ref().is_some_and(|c| c.trim().is_empty()) {
+                return bad(format!("operation `{name}`: `confirm` must not be empty"));
+            }
+        }
+        for (name, query) in &self.queries {
+            for (param, spec) in &query.types {
+                if !query.params.contains(param) {
+                    return bad(format!(
+                        "query `{name}`: `{param}` has a type but is not a parameter"
+                    ));
+                }
+                if CONTEXT_PARAMS.contains(&param.as_str()) {
+                    return bad(format!(
+                        "query `{name}`: `{param}` is filled in by the host and takes no type"
+                    ));
+                }
+                spec.validate(&format!("query `{name}`, `{param}`"))
+                    .map_err(RuntimeError::Manifest)?;
+            }
+        }
+        if let Some(open) = &self.open {
+            if !self.pages.iter().any(|p| p.id == open.page) {
+                return bad(format!("open: `{}` is not a declared page", open.page));
             }
         }
         if let Some(reminders) = &self.reminders {

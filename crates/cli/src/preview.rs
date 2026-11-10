@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
+use terrarium_runtime::commands::{self, Caller, Kind};
 use terrarium_runtime::{HostConfig, Manifest, PluginHost, ViewKind, DEFAULT_SPACE};
 use tiny_http::{Header, Method, Response, Server};
 
@@ -191,14 +192,19 @@ fn invoke(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value, Strin
                 .clone()
         }
         "run_query" => {
-            let params = args["params"].as_object().cloned().unwrap_or_default();
-            json!(host
-                .query_in(&space, &text("plugin"), &text("name"), &params)
-                .map_err(err)?)
+            let id = format!("{}.{}", text("plugin"), text("name"));
+            app_command(host, Kind::Query, &id, &space, &args["params"])?
         }
-        "run_action" => host
-            .call_in(&space, &text("plugin"), &text("op"), &args["args"])
-            .map_err(err)?,
+        "run_action" => {
+            let id = format!("{}.{}", text("plugin"), text("op"));
+            app_command(host, Kind::Action, &id, &space, &args["args"])?
+        }
+        "command" => {
+            let kind: Kind =
+                serde_json::from_value(args["kind"].clone()).map_err(|e| e.to_string())?;
+            app_command(host, kind, &text("id"), &space, &args["args"])?
+        }
+        "describe_commands" => json!(commands::describe(host, Caller::App)),
         "list_spaces" => json!(host.spaces().list().map_err(err)?),
         "create_space" => {
             let space = host.spaces_mut().create(&text("name")).map_err(err)?;
@@ -255,6 +261,16 @@ fn invoke(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value, Strin
         }
         other => return Err(format!("`{other}` is not available in preview")),
     })
+}
+
+fn app_command(
+    host: &mut PluginHost,
+    kind: Kind,
+    id: &str,
+    space: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    commands::invoke(host, Caller::App, kind, id, Some(space), args, true).map_err(|e| e.message)
 }
 
 fn plugin_info(m: &Manifest) -> Value {

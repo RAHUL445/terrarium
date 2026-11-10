@@ -36,6 +36,8 @@
     "allow-view-template",
     "allow-run-query",
     "allow-run-action",
+    "allow-command",
+    "allow-describe-commands",
     "allow-list-spaces",
     "allow-create-space",
     "allow-rename-space",

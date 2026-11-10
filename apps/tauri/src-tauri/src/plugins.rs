@@ -15,6 +15,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use terrarium_runtime::commands::{self, Caller, Kind};
 use terrarium_runtime::{
     fingerprint, HostConfig, Manifest, PluginHost, RuntimeError, SpaceInfo, ViewKind,
     BUNDLED_DIGEST, DEFAULT_SPACE,
@@ -505,10 +506,9 @@ pub fn run_query(
     plugin: String,
     name: String,
     params: Map<String, Value>,
-) -> Result<Vec<Map<String, Value>>, String> {
-    let host = state.host.lock().map_err(err)?;
-    host.query_in(&space_or_default(space), &plugin, &name, &params)
-        .map_err(err)
+) -> Result<Value, String> {
+    let id = format!("{plugin}.{name}");
+    app_command(&state, Kind::Query, &id, space, Value::Object(params))
 }
 
 #[tauri::command]
@@ -519,9 +519,58 @@ pub fn run_action(
     op: String,
     args: Value,
 ) -> Result<Value, String> {
+    let id = format!("{plugin}.{op}");
+    app_command(&state, Kind::Action, &id, space, args)
+}
+
+/// Runs a registry command for the app's own UI.
+fn app_command(
+    state: &Plugins,
+    kind: Kind,
+    id: &str,
+    space: Option<String>,
+    args: Value,
+) -> Result<Value, String> {
     let mut host = state.host.lock().map_err(err)?;
-    host.call_in(&space_or_default(space), &plugin, &op, &args)
-        .map_err(err)
+    let space = space_or_default(space);
+    commands::invoke(
+        &mut host,
+        Caller::App,
+        kind,
+        id,
+        Some(&space),
+        &args,
+        cfg!(desktop),
+    )
+    .map_err(|e| e.message)
+}
+
+/// Any registry command (host or plugin), as the UI calls it.
+#[tauri::command]
+pub fn command(
+    app: AppHandle,
+    state: State<'_, Plugins>,
+    kind: Kind,
+    id: String,
+    space: Option<String>,
+    args: Option<Value>,
+) -> Result<Value, String> {
+    let out = app_command(&state, kind, &id, space, args.unwrap_or(Value::Null))?;
+    if kind == Kind::Action {
+        if id.starts_with("space.") {
+            let _ = app.emit("spaces-changed", ());
+        } else if id.starts_with("schedule.") {
+            let _ = app.emit("data-changed", ());
+        }
+    }
+    Ok(out)
+}
+
+/// Every command the app can run, with its parameters.
+#[tauri::command]
+pub fn describe_commands(state: State<'_, Plugins>) -> Result<Value, String> {
+    let host = state.host.lock().map_err(err)?;
+    serde_json::to_value(commands::describe(&host, Caller::App)).map_err(err)
 }
 
 // ---- Spaces --------------------------------------------------------------

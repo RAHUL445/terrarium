@@ -256,6 +256,11 @@ impl PluginHost {
         Ok(&self.plugins[&id].manifest)
     }
 
+    /// The user's IANA timezone.
+    pub fn timezone(&self) -> &str {
+        &self.cfg.timezone
+    }
+
     /// `"native"` or `"interpreter"`: how this host runs plugin code.
     pub fn execution_mode(&self) -> &'static str {
         self.runtime.mode()

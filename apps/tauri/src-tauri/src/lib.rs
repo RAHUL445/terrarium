@@ -456,6 +456,8 @@ pub fn run() {
             plugins::view_template,
             plugins::run_query,
             plugins::run_action,
+            plugins::command,
+            plugins::describe_commands,
             plugins::list_spaces,
             plugins::create_space,
             plugins::rename_space,

@@ -7,6 +7,7 @@
 
 mod assistant;
 mod builder;
+pub mod commands;
 mod error;
 mod host;
 mod manifest;
@@ -24,8 +25,9 @@ pub use builder::{build_plugin, componentize};
 pub use error::{Result, RuntimeError};
 pub use host::Execution;
 pub use manifest::{
-    InterfaceDef, JobDef, Limits, Manifest, OperationDef, QueryDef, QuickAction, RemindersDef,
-    RunOn, Schedule, ViewDef, API_VERSION, ICONS, PERMISSIONS,
+    Effect, InterfaceDef, JobDef, Limits, Manifest, OpenDef, OperationDef, ParamSpec, ParamType,
+    QueryDef, QuickAction, RemindersDef, RunOn, Schedule, ViewDef, API_VERSION, CONTEXT_PARAMS,
+    ICONS, PERMISSIONS,
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,

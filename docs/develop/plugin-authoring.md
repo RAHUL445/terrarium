@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -153,8 +153,51 @@ Optional manifest fields for the shell:
 | `icon` | One of `check`, `note`, `target`, `bookmark`, `chart`, `mic`, `calendar`, `book`, `star`, `heart`, `folder`, `inbox`, `link`, `clock`, `list`. Without one, the tile shows the name's first letter. |
 | `color` | Tile color, `#rrggbb`. The icon is white, so pick a color dark enough for it. |
 | `badge` | A declared query returning one row with `count`, shown next to the app in the menu and on its tile. Params may be `today` and `weekday`. |
-| `search` | A declared query taking `q` and returning `title` and optionally `subtitle`, for ⌘K search (this space or all spaces). |
+| `search` | A declared query taking `q` and returning `id`, `title` and optionally `subtitle`, for ⌘K search (this space or all spaces) and the host's `search.query` command. |
+| `open` | `{"page": "main"}`: the page a search hit opens, with the hit's `id` as the item. Defaults to the first page. |
 | `quick_actions` | `[{"label": "New task", "op": "create", "arg": "title"}]`: offered in search, quick add and the Apps screen; the typed text goes to `op` as `arg`. |
+
+## Describing commands
+
+Every operation and query is also a command that the command line and agents can call: `<plugin id>.<name>`, for example `todo.create` (an action) or `todo.tasks` (a query). Callers outside the app see what the manifest declares. Describe your commands so they can call them without guessing. All of these fields are optional; an operation without `params` is listed as untyped and accepts any object.
+
+```json
+"operations": {
+  "create": {
+    "description": "Create a task. The first sentence is the summary.",
+    "effect": "write",
+    "params": {
+      "title": { "type": "string", "required": true, "description": "Natural language allowed" },
+      "due": { "type": "date" },
+      "priority": { "type": "integer", "min": 0, "max": 3 }
+    },
+    "result": { "id": { "type": "id" } },
+    "examples": [{ "title": "Call Sam tomorrow 6pm #work" }]
+  },
+  "delete": { "effect": "destructive", "params": { "id": { "type": "id", "required": true } } },
+  "clear_done": { "effect": "destructive", "confirm": "Hide all completed tasks?" }
+},
+"queries": {
+  "tasks": {
+    "sql": "…",
+    "params": ["today", "filter", "q"],
+    "description": "Open tasks for a list.",
+    "types": { "filter": { "type": "enum", "values": ["today", "upcoming", "all"] }, "q": { "type": "string" } }
+  }
+}
+```
+
+| Field | What it does |
+| --- | --- |
+| `effect` | `read`, `write` (the default) or `destructive` (removes, hides, or changes many items). A read-only client can only run `read` commands. |
+| `confirm` | Text a person approves before a destructive command runs. |
+| `params` / `types` | Argument types: `string`, `text`, `integer`, `number`, `boolean`, `date` (`YYYY-MM-DD`), `time` (`HH:MM`), `id`, `enum` (with `values`), `json`. `required`, `description`, and `min`/`max` for numbers. An empty string is accepted for optional fields, meaning "clear". |
+| `result` | Fields of the returned object. |
+| `cli` | `false` keeps an operation or query away from outside callers. The UI, schedules and interop still reach it. |
+
+Outside callers can't pass arguments you didn't declare, and their types and required fields are checked before your code runs. Your own UI templates aren't checked, so a template can still pass extra fields.
+
+The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup` and `ui` are reserved for host commands.
 
 ## Home and search entry
 
