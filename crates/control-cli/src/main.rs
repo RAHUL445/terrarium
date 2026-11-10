@@ -5,6 +5,8 @@
 //! Turn on Settings → Developer → Command-line control, add a client, then
 //! run `terrarium login` with its token.
 
+mod mcp;
+
 use std::io::{BufReader, IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -25,6 +27,7 @@ const USAGE: &str = "usage: terrarium <command> [options]
   run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   watch                         print app events as data changes
+  mcp                           serve these commands as MCP tools on stdin/stdout, for agents
 
   page list | show <page> | widgets | create <title> | rename <page> <title> | remove <page>
   page place <page> <plugin/widget> | move <page> <placement> | unplace <page> <placement>
@@ -88,7 +91,7 @@ type Outcome = Result<(), Failure>;
 
 // ---- Options ------------------------------------------------------------------
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Options {
     json: bool,
     dry_run: bool,
@@ -241,6 +244,23 @@ impl Conn {
                 };
             }
         }
+    }
+
+    /// Whether this connection can't be used for the next request: the app
+    /// closed it (it quit or restarted). Found without sending anything, by
+    /// a non-blocking read; the app sends nothing unasked on a connection
+    /// that hasn't subscribed, so any byte waiting there also means the
+    /// connection is out of step and is reported as closed.
+    fn is_closed(&self) -> bool {
+        let mut socket = self.reader.get_ref();
+        if !self.reader.buffer().is_empty() || socket.set_nonblocking(true).is_err() {
+            return true;
+        }
+        let closed = match socket.read(&mut [0u8; 1]) {
+            Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+            Ok(_) => true,
+        };
+        closed || socket.set_nonblocking(false).is_err()
     }
 
     fn read(&mut self) -> Result<Response, Failure> {
@@ -906,6 +926,7 @@ fn run(args: &[String]) -> Outcome {
         }
         "search" => cmd_search(&o),
         "watch" => cmd_watch(&o),
+        "mcp" => mcp::cmd_mcp(&o),
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
             Ok(())

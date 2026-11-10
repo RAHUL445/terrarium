@@ -32,6 +32,10 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
   arguments are checked against the command's declared parameters before any
   plugin code runs, and the recovery phrase, AI keys, pairing and backup
   restore have no commands ([design](../design/cli-control.md)).
+  `terrarium mcp` is only a client of the same socket with the agent's own
+  token, so an agent gets exactly that client's scope; destructive tools
+  ask the user through the agent when it supports elicitation, and
+  otherwise rely on the agent asking before passing `confirmed: true`.
 - Dependency advisories are tracked with exposure guards
   ([review](dependency-advisory-review.md)).
 
@@ -40,4 +44,6 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 Complete compromised-device revocation is not active
 ([design](device-revocation.md), [milestone](membership-v2-milestone.md)).
 Retention controls, hard quotas, fuzzing and production-signed artifacts remain
-open; see the [roadmap](../roadmap.md).
+open; see the [roadmap](../roadmap.md). An agent whose client cannot ask its
+user can pass `confirmed: true` on its own; a **Read only** token is the way
+to rule that out, and deleted items stay in the trash.

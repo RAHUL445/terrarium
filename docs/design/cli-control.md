@@ -263,21 +263,21 @@ terrarium page create --title Planning
 terrarium page place planning todo/today --w 6 --h 4
 terrarium space list
 terrarium watch [--plugin todo]
-terrarium mcp                                 # phase 4: the registry as MCP tools over stdio
+terrarium mcp                                 # the registry as MCP tools over stdio
 ```
 
 - Flags come from `params`; `--args '{…}'` or `--args @file.json` work for
   anything, including untyped commands.
 - Output is a table on a TTY and JSON when piped (or with `--json`).
   Errors go to stderr as `{code, message}` with the exit codes above.
-- Agents use `terrarium` like a person does until MCP lands: `terrarium
+- Agents without MCP use `terrarium` like a person does: `terrarium
   commands --json` is their tool list, and the JSON output and exit codes
   are stable.
-- `terrarium mcp` (phase 4, once `terrarium run` is stable) maps each
-  command to an MCP tool. The `effect` field becomes hints: `readOnlyHint`
-  for read, `destructiveHint` for destructive. The `confirm` text is shown
-  to the agent's user. It uses the client's token, so its scope and audit
-  name apply.
+- `terrarium mcp` maps each command to an MCP tool (see "Phase 4a as
+  built"). The `effect` field becomes hints: `readOnlyHint` for read,
+  `destructiveHint` for destructive. The `confirm` text is shown to the
+  agent's user. It uses the client's token, so its scope and audit name
+  apply.
 
 ## 3. Phases
 
@@ -406,6 +406,54 @@ command, and `terra preview` gets the same commands for free.
   the first `describe` already lists every plugin's commands.
 - An `invoke` result is now `{result, changes?, dry_run?}` for every
   command.
+
+### Recommended plugins described
+
+The six recommended plugins declare `params`, an explicit `effect`,
+`confirm` questions, `examples` and `open` (terrarium-plugins `5357137`,
+bundle `public-004`). Internal commands are hidden with `"cli": false`:
+widget suggestion, badge, reminder and per-plugin search queries, interop
+helpers and scheduler callbacks. `voice.archive` is declared `write`
+because `reopen` undoes it.
+
+### Phase 4a as built: `terrarium mcp`
+
+- `terrarium mcp [--space <id>] [--socket <path>]` serves MCP over stdio
+  (newline-delimited JSON-RPC, protocol `2025-11-25` back to
+  `2024-11-05`). It is a thin client of the socket, using the saved token
+  or `$TERRA_TOKEN`: `tools/list` is `describe`, `tools/call` is `invoke`,
+  so scope, argument checks, confirmation and the audit log apply
+  unchanged. It lives in `crates/control-cli/src/mcp.rs`.
+- **Names.** `todo.create` becomes `todo_create`, because many clients
+  (and the Claude API) allow only letters, digits, `_` and `-` in tool
+  names. A query that shares its id with an action is `<name>_query`.
+  `app.describe` is not offered; `tools/list` replaces it.
+- **Schemas.** Declared `params` become the tool's JSON Schema, with
+  `additionalProperties: false`; untyped commands take any object. Tools
+  that run in a space take `space`, and plugin actions take `dry_run`.
+- **Hints.** `effect` becomes `readOnlyHint` or `destructiveHint`; the
+  `confirm` text and the first example go into the description.
+- **Confirmation.** When the client supports elicitation, a destructive
+  call asks the user (`elicitation/create`) with the `confirm` text and
+  runs only on accept. Otherwise the tool takes `confirmed`, its
+  description tells the agent to ask the user first, and a call without it
+  returns a `needs-confirmation` tool error. Either way the app still
+  requires `confirmed: true` for destructive commands.
+- **Errors.** Command errors are tool results with `isError: true` and
+  `{error: {code, message}}` as structured content, so the agent can read
+  them; unknown tools and bad arguments objects are JSON-RPC errors.
+- **Live tools.** After `notifications/initialized`, a second connection
+  subscribes to app events. On `plugins-changed`, or when it reconnects
+  after the app restarted, the server sends
+  `notifications/tools/list_changed`. A bad token stops the watcher
+  instead of retrying, so it can't fill the activity log.
+- **Restarts.** Before each call the server checks, without sending
+  anything, whether the app closed the connection, and reconnects if so.
+  A connection lost while waiting for an answer is retried only for reads:
+  an action may already have run, so it returns an `unreachable` tool
+  error saying so. While the app is closed, calls return `unreachable`.
+- **Malformed previews.** A `dry_run` that is not true or false is refused
+  rather than ignored, so a preview never runs for real.
 
 ## 4. Decisions
 

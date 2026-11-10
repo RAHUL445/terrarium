@@ -97,6 +97,48 @@ terrarium notify "Report is ready"
   Without a terminal to ask in, they stop with exit code 7 unless you add
   `--yes`. Run with `--dry-run` first to see what would happen.
 
+## Use it from an AI agent (MCP)
+
+`terrarium mcp` offers the same commands as tools to any agent that speaks
+the Model Context Protocol, such as Claude Code or Claude Desktop. Add a
+client for the agent first (give each agent its own), then register the
+command with the agent. For Claude Code:
+
+```sh
+claude mcp add terrarium --env TERRA_TOKEN=<token> -- terrarium mcp
+```
+
+For agents configured with JSON:
+
+```json
+{
+  "mcpServers": {
+    "terrarium": {
+      "command": "/Applications/Terrarium.app/Contents/MacOS/terrarium",
+      "args": ["mcp"],
+      "env": { "TERRA_TOKEN": "<token>" }
+    }
+  }
+}
+```
+
+Without `TERRA_TOKEN` it uses the token `terrarium login` saved.
+
+- **Tools** are the commands with `.` turned into `_`: `todo_create`,
+  `notes_list`, `search_query`, `page_place`. A query that shares its name
+  with an action ends in `_query`. A **Read only** client gets only the
+  tools that read.
+- **Arguments** are checked the same way as on the command line. Tools that
+  work in a space take `space`, and plugin actions take `dry_run` to show
+  what they would change and keep nothing.
+- **Destructive tools** (deleting, removing, clearing) need your yes. If
+  the agent can ask you directly, Terrarium asks through it. Otherwise the
+  agent has to ask you and then pass `confirmed: true`; the agent's own
+  permission prompt is the place to say no.
+- **Changes** to installed plugins update the agent's tool list while it
+  runs. If you quit Terrarium, the tools report that the app isn't open
+  and work again once it is.
+
 ## Arguments, output and errors
 
 - **Arguments** come from the command's description: `--name value`, or
