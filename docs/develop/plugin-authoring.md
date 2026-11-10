@@ -189,7 +189,7 @@ Every operation and query is also a command that the command line and agents can
 
 | Field | What it does |
 | --- | --- |
-| `effect` | `read`, `write` (the default) or `destructive` (removes, hides, or changes many items). A read-only client can only run `read` commands. |
+| `effect` | `read`, `write` or `destructive` (removes, hides, or changes many items). Left out, it is `destructive` for operations named `delete…`, `remove…`, `clear…`, `purge…` or `archive…`, and `write` otherwise. A read-only client can only run `read` commands, and a destructive one needs the person's confirmation from outside callers. |
 | `confirm` | Text a person approves before a destructive command runs. |
 | `params` / `types` | Argument types: `string`, `text`, `integer`, `number`, `boolean`, `date` (`YYYY-MM-DD`), `time` (`HH:MM`), `id`, `enum` (with `values`), `json`. `required`, `description`, and `min`/`max` for numbers. An empty string is accepted for optional fields, meaning "clear". |
 | `result` | Fields of the returned object. |

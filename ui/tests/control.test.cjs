@@ -9,7 +9,8 @@ const start = source.indexOf('// ---- Settings → Developer → Command-line co
 const end = source.indexOf('function showSettings(section) {');
 const code = source.slice(start, end);
 
-function harness(responses = {}) {
+function harness(responses = {}, confirmAnswer = true) {
+  const confirms = [], toasts = [], spaces = [], opened = [];
   const elements = new Map();
   const listeners = {};
   const get = id => {
@@ -28,10 +29,15 @@ function harness(responses = {}) {
     el: (tag, attrs, ...children) => ({ tag, attrs, children: children.filter(c => c !== null) }),
     when: ms => `t${ms}`,
     statusChip: status => ({ chip: status }),
-    toast() {},
     getSelection: () => ({ selectAllChildren() {} }),
     navigator: { clipboard: { writeText: async () => {} } },
-    window: { terrariumConfirm: async () => true },
+    window: { terrariumConfirm: async (text) => { confirms.push(text); return confirmAnswer; } },
+    toast(text) { toasts.push(text); },
+    currentSpace: 'personal',
+    pluginList: { plugins: [{ id: 'todo', pages: [{ id: 'main' }] }] },
+    async setSpace(id) { spaces.push(id); context.currentSpace = id; },
+    renderSpaceChrome() {}, renderHome() {}, loadBadges() {},
+    async openPage(plugin, page, options) { opened.push({ plugin, page, item: options.item }); },
     async call(command, args) {
       calls.push({ command, args });
       const r = responses[command];
@@ -40,7 +46,7 @@ function harness(responses = {}) {
     },
   };
   vm.runInNewContext(code, context);
-  return { context, get, listeners, calls };
+  return { context, get, listeners, calls, confirms, toasts, spaces, opened };
 }
 
 const state = {
@@ -74,8 +80,10 @@ test('clients and recent activity are listed', () => {
 test('a new client shows its token once and Done clears it', async () => {
   const h = harness({ control_add_client: { token: 'trm_secret', state } });
   h.get('control-name').value = '  Agent ';
+  h.get('control-scope').value = 'read';
   await h.listeners['control-add:submit']({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0])), { command: 'control_add_client', args: { name: 'Agent' } });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0])), { command: 'control_add_client', args: { name: 'Agent', scope: 'read' } });
+  assert.equal(h.confirms.length, 0);
   assert.equal(h.get('control-token').hidden, false);
   assert.equal(h.get('control-token-value').textContent, 'trm_secret');
   assert.equal(h.get('control-name').value, '');
@@ -91,4 +99,38 @@ test('errors are shown, not thrown', async () => {
   assert.match(h.get('control-error').textContent, /socket path too long/);
   // The checkbox follows the saved state.
   assert.equal(h.get('control-enabled').checked, true);
+});
+
+test('a client that can change data needs a confirmation first', async () => {
+  const h = harness({ control_add_client: { token: 'trm_x', state } }, false);
+  h.get('control-name').value = 'Agent';
+  h.get('control-scope').value = 'change';
+  await h.listeners['control-add:submit']({ preventDefault() {} });
+  assert.equal(h.confirms.length, 1);
+  assert.match(h.confirms[0], /add, change and remove/);
+  assert.equal(h.calls.length, 0);
+});
+
+test('ui.open and ui.notify reach the window', async () => {
+  const h = harness();
+  await h.context.controlUi({ action: 'notify', text: 'Report ready' });
+  assert.deepEqual(h.toasts, ['Report ready']);
+  await h.context.controlUi({ action: 'open', space: 'work', plugin: 'todo', page: 'main', item: 'abc' });
+  assert.deepEqual(h.spaces, ['work']);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.opened)), [{ plugin: 'todo', page: 'main', item: 'abc' }]);
+  // Unknown plugins and pages are ignored.
+  await h.context.controlUi({ action: 'open', plugin: 'nope', page: 'main' });
+  await h.context.controlUi({ action: 'open', plugin: 'todo', page: 'nope' });
+  assert.equal(h.opened.length, 1);
+});
+
+test('activity shows dry runs and how many rows changed', () => {
+  const h = harness();
+  h.context.renderControl({ ...state, audit: [
+    { at_ms: 1, client: 'A', what: 'todo.create', kind: 'action', ok: true, dry_run: true, change_count: 1 },
+    { at_ms: 2, client: 'A', what: 'todo.clear_done', kind: 'action', ok: true, change_count: 3 },
+  ] });
+  const [dry, real] = h.get('control-audit').children;
+  assert.match(dry.children[0].children[1].children[0], /dry run, nothing kept · 1 change$/);
+  assert.match(real.children[0].children[1].children[0], /3 changes$/);
 });

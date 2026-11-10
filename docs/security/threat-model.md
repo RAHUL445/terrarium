@@ -25,8 +25,10 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 - Speech workspaces are private and cleaned up ([details](private-audio.md)).
 - Command-line control is off until turned on in Settings. The socket is a
   `0600` file in the data folder, not a network port. Each client has its own
-  token (only its SHA-256 is stored), a read-only scope in this release, and
-  every command it runs is audited without arguments. Outside callers'
+  token (only its SHA-256 is stored) scoped to read only or read and change,
+  and every command it runs is audited, with the rows it changed but without
+  arguments or values. Destructive actions need an explicit confirmation from
+  the caller, and dry runs roll back every store they touch. Outside callers'
   arguments are checked against the command's declared parameters before any
   plugin code runs, and the recovery phrase, AI keys, pairing and backup
   restore have no commands ([design](../design/cli-control.md)).

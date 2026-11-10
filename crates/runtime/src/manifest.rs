@@ -142,9 +142,10 @@ pub struct OperationDef {
     #[serde(default)]
     pub description: String,
     /// What running it does to the user's data. Callers outside the app
-    /// need a token that allows changes for anything but `read`.
-    #[serde(default)]
-    pub effect: Effect,
+    /// need a token that allows changes for anything but `read`. When left
+    /// out, see [`OperationDef::effect_of`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<Effect>,
     /// Text a person must approve before the operation runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<String>,
@@ -168,13 +169,30 @@ impl Default for OperationDef {
     fn default() -> Self {
         OperationDef {
             description: String::new(),
-            effect: Effect::default(),
+            effect: None,
             confirm: None,
             params: None,
             result: None,
             examples: Vec::new(),
             cli: true,
         }
+    }
+}
+
+/// Name prefixes of operations that are destructive unless the manifest
+/// says otherwise.
+const DESTRUCTIVE_NAMES: &[&str] = &["delete", "remove", "clear", "purge", "archive"];
+
+impl OperationDef {
+    /// The declared effect, or `destructive` for an operation named like
+    /// `delete…`, `remove…`, `clear…`, `purge…` or `archive…`, else `write`.
+    pub fn effect_of(&self, name: &str) -> Effect {
+        self.effect.unwrap_or_else(
+            || match DESTRUCTIVE_NAMES.iter().any(|p| name.starts_with(p)) {
+                true => Effect::Destructive,
+                false => Effect::Write,
+            },
+        )
     }
 }
 

@@ -13,7 +13,7 @@
 //! | `hello` | `{token, client?}` | `{client, scope, app_version}` |
 //! | `status` | `{}` | `{app_version, client, scope, spaces, plugins}` |
 //! | `describe` | `{}` | the commands this client may run |
-//! | `invoke` | `{kind, id, space?, args?}` | the command's result |
+//! | `invoke` | `{kind, id, space?, args?, dry_run?, confirmed?}` | `{result, changes?, dry_run?}` |
 //! | `subscribe` | `{}` | `true`, then `event` notifications: `{name}` |
 
 use std::io::{BufRead, Write};

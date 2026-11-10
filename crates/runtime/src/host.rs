@@ -210,6 +210,15 @@ impl Runtime {
             Ok(json) => json,
             Err(error) => return (core, peers, Err(error)),
         };
+        // The newest change before the call: what follows is this call's.
+        let mark = match peers.trace {
+            Some(_) => core
+                .changes(1)
+                .ok()
+                .and_then(|c| c.first().map(|r| r.lseq))
+                .unwrap_or(0),
+            None => 0,
+        };
         if let Err(e) = core.begin() {
             return (core, peers, Err(e.into()));
         }
@@ -280,12 +289,25 @@ impl Runtime {
 
         let data = store.into_data();
         let (mut core, mut peers) = (data.store, data.peers);
-        let finished = match &result {
-            Ok(_) => core.commit(),
-            Err(_) => core.rollback(),
+        if result.is_ok() {
+            if let Some(trace) = peers.trace.as_mut() {
+                if let Ok((batch, _)) = core.export_since(mark) {
+                    trace.extend(
+                        batch
+                            .changes
+                            .iter()
+                            .map(|c| crate::registry::ChangeSummary::of(&data.plugin_id, c)),
+                    );
+                }
+            }
+        }
+        let keep = result.is_ok() && !peers.dry_run;
+        let finished = match keep {
+            true => core.commit(),
+            false => core.rollback(),
         };
         let (committed, result) = match finished {
-            Ok(()) => (result.is_ok(), result),
+            Ok(()) => (keep, result),
             Err(e) => {
                 let _ = core.rollback();
                 (false, Err(e.into()))

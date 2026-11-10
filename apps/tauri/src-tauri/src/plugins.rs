@@ -31,6 +31,8 @@ pub struct Plugins {
     errors: Mutex<Vec<LoadError>>,
     /// What is loaded now; held while reconciling so passes never overlap.
     loaded: Mutex<BTreeMap<String, Loaded>>,
+    /// Set once the first load pass has finished.
+    ready: std::sync::atomic::AtomicBool,
 }
 
 /// Where the running version of a plugin came from.
@@ -222,6 +224,7 @@ impl Plugins {
             bundled,
             errors: Mutex::new(Vec::new()),
             loaded: Mutex::new(BTreeMap::new()),
+            ready: Default::default(),
         })
     }
 
@@ -229,9 +232,19 @@ impl Plugins {
     /// set changes arriving by sync.
     pub fn start(app: AppHandle) {
         std::thread::spawn(move || loop {
-            app.state::<Plugins>().reconcile(&app);
+            let plugins = app.state::<Plugins>();
+            plugins.reconcile(&app);
+            plugins
+                .ready
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(800));
         });
+    }
+
+    /// Whether the first load pass has finished, so every plugin that
+    /// can load has.
+    pub fn ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn set_error(&self, label: &str, error: Option<String>) {

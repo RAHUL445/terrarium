@@ -285,7 +285,7 @@ terrarium mcp                                 # phase 4: the registry as MCP too
 | --- | --- | --- |
 | 1. Contract | Command registry, `describe`, manifest `params`/`effect`/`open`, host `search`; the UI moves onto `invoke` | `crates/runtime` (new `commands.rs`), `manifest.rs`, `services.rs`, `apps/tauri/src-tauri/src/plugins.rs`, `ui/app.js` |
 | 2. Read-only CLI | Control socket, Settings switch, named read tokens, audit log, the `terrarium` binary in the bundle with `login/status/commands/query/search/watch` | `apps/tauri/src-tauri/src/control.rs` (new), new crates `control-proto` and `control-cli`, `tauri.conf.json` |
-| 3. Writes | Read-and-change tokens, `terrarium run`, `--dry-run`, `origin` on changes, `page`/`space` subcommands, `ui.open`/`ui.notify` | `crates/core/src/change.rs`, `crates/control-cli`, `apps/tauri` |
+| 3. Writes | Read-and-change tokens, `terrarium run`, `--dry-run`, changes in the audit log, `page`/`space` subcommands, `ui.open`/`ui.notify` | `crates/core/src/change.rs`, `crates/control-cli`, `apps/tauri` |
 | 4. Agents and later | `terrarium mcp`, a headless host with a lock, remote control over Tailscale | `crates/control-cli`, `crates/runtime` |
 
 Annotating the recommended plugins' manifests (`params`, `effect`, `open`)
@@ -367,6 +367,45 @@ command, and `terra preview` gets the same commands for free.
   Instead of an "Install command-line tool" button that writes to
   `/usr/local/bin` (which usually needs admin rights), Settings shows the
   path and a `ln -s` command for `~/.local/bin`.
+
+### Phase 3 as built
+
+- **Read and change** clients can be added in Settings, after a
+  confirmation that spells out what they can do.
+- `terrarium run <id>` runs actions, with flags typed from `describe`.
+  `page` and `space` subcommands wrap the host commands, and `open` and
+  `notify` wrap `ui.open` and `ui.notify`.
+- **Dry runs.** `PluginHost::call_traced` runs an operation with
+  `Peers.dry_run` set: every store the call reaches, including other
+  plugins reached through interop, is rolled back even on success, schedule
+  changes are dropped and AI requests are cancelled. The changes it made
+  are read from each store's change log before rolling back and returned as
+  `{plugin, table, row, op, column?}`. Host actions have no dry run.
+- **Confirmation.** An outside caller must pass `confirmed: true` to run a
+  `destructive` action; otherwise it gets `needs-confirmation` with the
+  confirm text. A dry run needs no confirmation. The CLI asks on a
+  terminal, takes `--yes`, and otherwise exits with code 7.
+- **Undeclared effects.** An operation without `effect` is `destructive`
+  when its name starts with `delete`, `remove`, `clear`, `purge` or
+  `archive`, and `write` otherwise. Without this, unannotated plugins
+  (all recommended plugins today) could be emptied without a confirmation.
+- **Where changes came from.** Instead of an `origin` field on `Change`,
+  which would change the signed sync format every device shares, the local
+  audit log records the rows each client action changed (up to 50, plus the
+  count) and whether it was a dry run. Sync and the change log are
+  unchanged.
+- **Page commands.** `page.place` (default position below the other
+  widgets, default size from the widget's template), `page.move` and
+  `page.unplace` (destructive) are host commands built on `page_save`, so
+  widget settings are checked the same way as in the UI.
+- **UI commands.** `ui.open` and `ui.notify` are listed by the registry but
+  run only in the app: the control server checks scope and arguments and
+  emits `control-ui`, which the UI handles by switching space and opening
+  the page, or showing a toast. Unknown plugins and pages are refused.
+- **Startup.** The socket opens only after the first plugin load pass, so
+  the first `describe` already lists every plugin's commands.
+- An `invoke` result is now `{result, changes?, dry_run?}` for every
+  command.
 
 ## 4. Decisions
 

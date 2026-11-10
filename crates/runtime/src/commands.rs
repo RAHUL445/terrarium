@@ -22,7 +22,8 @@ use serde_json::{json, Map, Value};
 
 use crate::error::RuntimeError;
 use crate::manifest::{Effect, Manifest, ParamSpec, ParamType, CONTEXT_PARAMS};
-use crate::registry::PluginHost;
+use crate::pages::{host_widgets, Placement, HOST_WIDGETS};
+use crate::registry::{ChangeSummary, PluginHost, ViewKind};
 use crate::spaces::DEFAULT_SPACE;
 
 /// Namespaces of host commands. Plugin ids can't use them.
@@ -195,6 +196,76 @@ fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, CommandE
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| CommandError::invalid(format!("`{key}` must be text")))
+}
+
+fn app_only() -> CommandError {
+    CommandError::new("unavailable", "Only the running app can do this.")
+}
+
+/// Reads a page's placements, lets `f` change them, and saves the page.
+fn edit_placements(
+    host: &mut PluginHost,
+    args: &Map<String, Value>,
+    desktop: bool,
+    f: impl FnOnce(&mut Vec<Placement>, &Map<String, Value>) -> Result<(), CommandError>,
+) -> Result<Value, CommandError> {
+    let page = text(args, "page")?.to_string();
+    if host.pages().page(&page)?.is_none() {
+        return Err(CommandError::new("not-found", format!("no page `{page}`")));
+    }
+    let mut list = host.pages().placements(&page)?;
+    f(&mut list, args)?;
+    let save = Map::from_iter([
+        ("page".to_string(), json!(page)),
+        ("placements".to_string(), json!(list)),
+    ]);
+    service(host, "page_save", None, &save, desktop)
+}
+
+fn place(
+    host: &mut PluginHost,
+    args: &Map<String, Value>,
+    desktop: bool,
+) -> Result<Value, CommandError> {
+    let widget = text(args, "widget")?;
+    let (plugin, widget) = widget
+        .split_once('/')
+        .ok_or_else(|| CommandError::invalid("`widget` must look like `plugin/widget`"))?;
+    let spec = if plugin == HOST_WIDGETS {
+        host_widgets()
+            .as_array()
+            .and_then(|w| w.iter().find(|x| x["id"] == widget).cloned())
+    } else {
+        host.template(plugin, ViewKind::Widget, widget)
+            .ok()
+            .cloned()
+    }
+    .ok_or_else(|| CommandError::new("not-found", format!("no widget `{plugin}/{widget}`")))?;
+    let size = &spec["page"]["size"]["default"];
+    let (dw, dh) = (size[0].as_i64().unwrap_or(4), size[1].as_i64().unwrap_or(3));
+    let int = |key: &str| args.get(key).and_then(Value::as_i64);
+    let config = match args.get("config") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(m)) => m.clone(),
+        Some(_) => return Err(CommandError::invalid("`config` must be an object")),
+    };
+    let (x, y, w, h) = (int("x"), int("y"), int("w"), int("h"));
+    let (plugin, widget) = (plugin.to_string(), widget.to_string());
+    edit_placements(host, args, desktop, move |list, _| {
+        let below = list.iter().map(|p| p.y + p.h).max().unwrap_or(0);
+        list.push(Placement {
+            id: String::new(),
+            plugin,
+            widget,
+            x: x.unwrap_or(0),
+            y: y.unwrap_or(below),
+            w: w.unwrap_or(dw),
+            h: h.unwrap_or(dh),
+            config,
+            focus: None,
+        });
+        Ok(())
+    })
 }
 
 fn change_spaces(
@@ -378,6 +449,80 @@ const HOST_COMMANDS: &[HostCommand] = &[
         run: |host, _, args, d| service(host, "page_save", None, args, d),
     },
     HostCommand {
+        id: "page.place",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: false,
+        description: "Add a widget to a page. Without a position it goes below the others, at its default size.",
+        confirm: None,
+        params: &[
+            ("page", ParamType::Id, true, "Page id"),
+            ("widget", ParamType::String, true, "`plugin/widget`, e.g. `todo/today`, or `_host/text` for the host's own"),
+            ("x", ParamType::Integer, false, "Column, 0 to 11"),
+            ("y", ParamType::Integer, false, "Row"),
+            ("w", ParamType::Integer, false, "Width in columns, 1 to 12"),
+            ("h", ParamType::Integer, false, "Height in rows"),
+            ("config", ParamType::Json, false, "The widget's settings"),
+        ],
+        run: |host, _, args, d| place(host, args, d),
+    },
+    HostCommand {
+        id: "page.move",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: false,
+        description: "Move or resize a widget on a page.",
+        confirm: None,
+        params: &[
+            ("page", ParamType::Id, true, "Page id"),
+            ("placement", ParamType::Id, true, "Placement id, from page.get"),
+            ("x", ParamType::Integer, false, "Column, 0 to 11"),
+            ("y", ParamType::Integer, false, "Row"),
+            ("w", ParamType::Integer, false, "Width in columns, 1 to 12"),
+            ("h", ParamType::Integer, false, "Height in rows"),
+        ],
+        run: |host, _, args, d| {
+            edit_placements(host, args, d, |list, args| {
+                let id = text(args, "placement")?;
+                let p = list.iter_mut().find(|p| p.id == id).ok_or_else(|| {
+                    CommandError::new("not-found", format!("no placement `{id}` on this page"))
+                })?;
+                for (key, field) in [("x", &mut p.x), ("y", &mut p.y), ("w", &mut p.w), ("h", &mut p.h)] {
+                    if let Some(v) = args.get(key).and_then(Value::as_i64) {
+                        *field = v;
+                    }
+                }
+                Ok(())
+            })
+        },
+    },
+    HostCommand {
+        id: "page.unplace",
+        kind: Kind::Action,
+        effect: Effect::Destructive,
+        space: false,
+        description: "Take a widget off a page. Its plugin's data is not touched.",
+        confirm: Some("Take this widget off the page?"),
+        params: &[
+            ("page", ParamType::Id, true, "Page id"),
+            ("placement", ParamType::Id, true, "Placement id, from page.get"),
+        ],
+        run: |host, _, args, d| {
+            edit_placements(host, args, d, |list, args| {
+                let id = text(args, "placement")?;
+                let before = list.len();
+                list.retain(|p| p.id != id);
+                if list.len() == before {
+                    return Err(CommandError::new(
+                        "not-found",
+                        format!("no placement `{id}` on this page"),
+                    ));
+                }
+                Ok(())
+            })
+        },
+    },
+    HostCommand {
         id: "page.remove",
         kind: Kind::Action,
         effect: Effect::Destructive,
@@ -401,6 +546,30 @@ const HOST_COMMANDS: &[HostCommand] = &[
             ("limit", ParamType::Integer, false, "Most results to return (default 200, at most 500)"),
         ],
         run: |host, space, args, _| run_search(host, space, args),
+    },
+    HostCommand {
+        id: "ui.open",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Show a plugin's page in the app window, optionally with one item open.",
+        confirm: None,
+        params: &[
+            ("plugin", ParamType::String, true, "Plugin id"),
+            ("page", ParamType::String, false, "Page id; the plugin's first page by default"),
+            ("item", ParamType::Id, false, "Item to open, e.g. a search hit's id"),
+        ],
+        run: |_, _, _, _| Err(app_only()),
+    },
+    HostCommand {
+        id: "ui.notify",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: false,
+        description: "Show a short message in the app window.",
+        confirm: None,
+        params: &[("text", ParamType::String, true, "The message, at most 200 characters")],
+        run: |_, _, _, _| Err(app_only()),
     },
     HostCommand {
         id: "schedule.list",
@@ -515,7 +684,7 @@ fn operation_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
         params: op.params.clone(),
         context: Vec::new(),
         result: op.result.clone(),
-        effect: op.effect,
+        effect: op.effect_of(name),
         confirm: op.confirm.clone(),
         space: true,
         examples: op.examples.clone(),
@@ -716,6 +885,29 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How an outside caller wants a command run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct InvokeOptions {
+    /// Run a plugin action and report what it would change, keeping
+    /// nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// A person approved a destructive command (its `confirm` text).
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// A command's result, with the changes a plugin action made (or would
+/// make, on a dry run). Changes are listed only for outside callers.
+#[derive(Clone, Debug, Serialize)]
+pub struct Outcome {
+    pub result: Value,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<ChangeSummary>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+}
+
 /// Runs a command. `space` defaults to the default space. `desktop`:
 /// whether this device is a computer (for running schedules now).
 pub fn invoke(
@@ -727,6 +919,26 @@ pub fn invoke(
     args: &Value,
     desktop: bool,
 ) -> Result<Value, CommandError> {
+    let options = InvokeOptions {
+        dry_run: false,
+        confirmed: true,
+    };
+    invoke_with(host, caller, kind, id, space, args, desktop, options).map(|o| o.result)
+}
+
+/// [`invoke`] with a dry run or confirmation. An outside caller must set
+/// `confirmed` to run a destructive action for real.
+#[allow(clippy::too_many_arguments)]
+pub fn invoke_with(
+    host: &mut PluginHost,
+    caller: Caller,
+    kind: Kind,
+    id: &str,
+    space: Option<&str>,
+    args: &Value,
+    desktop: bool,
+    options: InvokeOptions,
+) -> Result<Outcome, CommandError> {
     let space = space.unwrap_or(DEFAULT_SPACE);
     let info = find(host, kind, id).ok_or_else(|| CommandError::not_found(kind, id))?;
     let args = match args {
@@ -747,27 +959,53 @@ pub fn invoke(
         if let Some(params) = &info.params {
             check_args(params, &info.context, &args)?;
         }
+        if info.effect == Effect::Destructive && !options.confirmed && !options.dry_run {
+            let message = info
+                .confirm
+                .clone()
+                .unwrap_or_else(|| format!("`{id}` removes or hides data. Confirm to run it."));
+            return Err(CommandError::new("needs-confirmation", message));
+        }
+    }
+    let plain = |result: Value| Outcome {
+        result,
+        changes: Vec::new(),
+        dry_run: false,
+    };
+    if options.dry_run && kind == Kind::Action && info.owner == Owner::Host {
+        return Err(CommandError::invalid(
+            "A dry run works only for plugin actions.",
+        ));
     }
     match (info.owner, kind) {
-        (Owner::Host, _) if id == "app.describe" => Ok(json!(describe(host, caller))),
+        (Owner::Host, _) if id == "app.describe" => Ok(plain(json!(describe(host, caller)))),
         (Owner::Host, _) => {
             let command = HOST_COMMANDS
                 .iter()
                 .find(|c| c.kind == kind && c.id == id)
                 .expect("found above");
-            (command.run)(host, space, &args, desktop)
+            (command.run)(host, space, &args, desktop).map(plain)
         }
         (Owner::Plugin, Kind::Query) => {
             let mut values = args;
             fill_context(host, &info.context, &mut values);
             let plugin = info.plugin.as_deref().unwrap_or_default();
             let name = &id[plugin.len() + 1..];
-            Ok(json!(host.query_in(space, plugin, name, &values)?))
+            Ok(plain(json!(host.query_in(space, plugin, name, &values)?)))
         }
         (Owner::Plugin, Kind::Action) => {
             let plugin = info.plugin.as_deref().unwrap_or_default();
             let op = &id[plugin.len() + 1..];
-            Ok(host.call_in(space, plugin, op, &Value::Object(args))?)
+            let args = Value::Object(args);
+            if caller == Caller::App && !options.dry_run {
+                return Ok(plain(host.call_in(space, plugin, op, &args)?));
+            }
+            let (result, changes) = host.call_traced(space, plugin, op, &args, options.dry_run)?;
+            Ok(Outcome {
+                result,
+                changes,
+                dry_run: options.dry_run,
+            })
         }
     }
 }

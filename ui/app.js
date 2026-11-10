@@ -2131,7 +2131,9 @@ function renderControl(state) {
   const audit = state.audit.map((a) => el("li", { class: "pp-list-item sched-row" },
     el("div", { class: "grow" },
       el("div", {}, a.what, a.kind ? el("span", { class: "muted" }, ` · ${a.kind}`) : null),
-      el("div", { class: "muted small" }, [when(a.at_ms), a.client || "unknown client"].join(" · "))),
+      el("div", { class: "muted small" }, [when(a.at_ms), a.client || "unknown client",
+        a.dry_run ? "dry run, nothing kept" : null,
+        a.change_count ? `${a.change_count} ${a.change_count === 1 ? "change" : "changes"}` : null].filter(Boolean).join(" · "))),
     statusChip(a.ok ? "done" : "failed"),
     a.ok ? null : el("span", { class: "muted small" }, a.code || "")));
   $("control-audit").replaceChildren(...(audit.length ? audit : [el("li", { class: "pp-empty" }, "Nothing yet.")]));
@@ -2158,7 +2160,9 @@ $("control-add").addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = $("control-name").value.trim();
   if (!name) return;
-  const out = await controlCall("control_add_client", { name });
+  const scope = $("control-scope").value;
+  if (scope === "change" && !await window.terrariumConfirm(`“${name}” will be able to add, change and remove your data, and open pages in this window. Only give this token to programs you trust.`)) return;
+  const out = await controlCall("control_add_client", { name, scope });
   if (!out) return;
   $("control-name").value = "";
   $("control-token-value").textContent = out.token;
@@ -2174,6 +2178,25 @@ $("control-token-copy").addEventListener("click", async () => {
     getSelection().selectAllChildren($("control-token-value"));
   }
 });
+
+// `ui.open` and `ui.notify` from a command-line client.
+async function controlUi(event) {
+  if (!event) return;
+  if (event.action === "notify") {
+    toast(String(event.text || ""));
+    return;
+  }
+  if (event.action !== "open") return;
+  const plugin = pluginList.plugins.find((p) => p.id === event.plugin);
+  if (!plugin || !plugin.pages.some((p) => p.id === event.page)) return;
+  if (event.space && event.space !== currentSpace) {
+    if (await setSpace(event.space, { reload: false }) === false) return;
+    renderSpaceChrome();
+    renderHome();
+    loadBadges();
+  }
+  await openPage(plugin.id, event.page, { item: event.item || null });
+}
 
 $("control-token-done").addEventListener("click", () => {
   $("control-token-value").textContent = "";
@@ -2280,7 +2303,9 @@ async function start() {
       if (currentView === "settings" && settingsSection === "developer") refresh();
       if (currentView === "settings" && settingsSection === "scheduled" && !schedEditing) loadSchedules();
       if (currentView === "settings" && settingsSection === "ai") aiCall("ai_settings").then((st) => st && renderAi(st, false));
+      if (currentView === "settings" && settingsSection === "developer") loadControl();
     });
+    await window.__TAURI__.event.listen("control-ui", (e) => controlUi(e.payload));
   }
   const location = workspaceSession.read(currentSpace);
   await showView("home");

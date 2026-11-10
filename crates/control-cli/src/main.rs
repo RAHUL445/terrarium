@@ -22,19 +22,28 @@ const USAGE: &str = "usage: terrarium <command> [options]
   status                        the app, this client, spaces and plugins
   commands [prefix]             commands this client can run
   query <id> [--param value]... run a query, e.g. terrarium query todo.tasks --filter all
+  run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   watch                         print app events as data changes
+
+  page list | show <page> | widgets | create <title> | rename <page> <title> | remove <page>
+  page place <page> <plugin/widget> | move <page> <placement> | unplace <page> <placement>
+  space list | create <name> | rename <id> <name> | remove <id> | restore <id>
+  open <plugin> [--page <id>] [--item <id>]   show it in the app window
+  notify <text>                               show a message in the app window
 
 options:
   --space <id>      run in this space (default: the default space)
   --args <json>     arguments as a JSON object, or @file.json
+  --dry-run         run an action, show what it would change, keep nothing
+  --yes             confirm a destructive action without asking
   --json            print JSON (the default when output is not a terminal)
   --socket <path>   the app's socket (default: in the app's data folder, or $TERRA_SOCKET)
 
 The token comes from $TERRA_TOKEN, or from the file `terrarium login` saves.
 
 exit codes: 0 ok, 1 failed, 2 invalid, 3 not found, 4 in trash,
-            5 not allowed, 6 the app is not reachable";
+            5 not allowed, 6 the app is not reachable, 7 needs confirmation";
 
 /// Exit codes for error codes.
 fn exit_code(code: &str) -> u8 {
@@ -44,6 +53,7 @@ fn exit_code(code: &str) -> u8 {
         "in-trash" => 4,
         "forbidden" | "unauthorized" => 5,
         "unreachable" => 6,
+        "needs-confirmation" => 7,
         _ => 1,
     }
 }
@@ -81,6 +91,8 @@ type Outcome = Result<(), Failure>;
 #[derive(Default)]
 struct Options {
     json: bool,
+    dry_run: bool,
+    yes: bool,
     socket: Option<PathBuf>,
     space: Option<String>,
     args: Option<String>,
@@ -110,6 +122,8 @@ fn parse(args: &[String]) -> Result<Options, Failure> {
         };
         match name.as_str() {
             "json" => o.json = true,
+            "dry-run" => o.dry_run = true,
+            "yes" => o.yes = true,
             "socket" => o.socket = Some(PathBuf::from(value("socket")?)),
             "space" => o.space = Some(value("space")?),
             "args" => o.args = Some(value("args")?),
@@ -240,10 +254,25 @@ impl Conn {
         }
     }
 
-    fn invoke(&mut self, o: &Options, kind: &str, id: &str, args: Value) -> Result<Value, Failure> {
+    /// Runs a command; the reply is `{result, changes?, dry_run?}`.
+    fn invoke(
+        &mut self,
+        o: &Options,
+        kind: &str,
+        id: &str,
+        args: Value,
+        confirmed: bool,
+    ) -> Result<Value, Failure> {
         self.call(
             "invoke",
-            json!({ "kind": kind, "id": id, "space": o.space, "args": args }),
+            json!({
+                "kind": kind,
+                "id": id,
+                "space": o.space,
+                "args": args,
+                "dry_run": o.dry_run && kind == "action",
+                "confirmed": confirmed,
+            }),
         )
     }
 }
@@ -571,13 +600,192 @@ fn cmd_query(o: &Options) -> Outcome {
         )
     })?;
     let args = build_args(o, info)?;
-    let result = conn.invoke(o, "query", id, args)?;
+    let outcome = conn.invoke(o, "query", id, args, false)?;
     if human(o) {
-        print_value(&result);
+        print_value(&outcome["result"]);
     } else {
-        print_json(&result);
+        print_json(&outcome["result"]);
     }
     Ok(())
+}
+
+/// The error for an action `describe` didn't list: a read-only client
+/// can't see actions at all.
+fn missing_action(hello: &Value, id: &str) -> Failure {
+    if hello["scope"] == "read" {
+        Failure::new(
+            "forbidden",
+            format!("`{id}` changes data, and this client may only read. Add a client with \"Read and change\" in Settings → Developer."),
+        )
+    } else {
+        Failure::new(
+            "not-found",
+            format!("no action `{id}`; see `terrarium commands`"),
+        )
+    }
+}
+
+fn cmd_run(o: &Options) -> Outcome {
+    let id = o
+        .words
+        .first()
+        .ok_or_else(|| Failure::usage("terrarium run <id> [--param value]..."))?
+        .clone();
+    let (mut conn, hello) = connect(o)?;
+    let all = conn.call("describe", json!({}))?;
+    let info = find_command(&all, "action", &id).ok_or_else(|| missing_action(&hello, &id))?;
+    let args = build_args(o, info)?;
+    act(o, &mut conn, info, args)
+}
+
+/// Asks before a destructive action unless `--yes` or `--dry-run`.
+fn confirm(o: &Options, info: &Value) -> Result<bool, Failure> {
+    if info["effect"] != "destructive" || o.dry_run {
+        return Ok(false);
+    }
+    if o.yes {
+        return Ok(true);
+    }
+    let question = info["confirm"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("`{}` removes or hides data.", cell(&info["id"])));
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        return Err(Failure::new(
+            "needs-confirmation",
+            format!("{question} Run again with --yes to confirm, or --dry-run to see what it would change."),
+        ));
+    }
+    eprint!("{question} [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| Failure::new("failed", e.to_string()))?;
+    if matches!(answer.trim(), "y" | "Y" | "yes") {
+        Ok(true)
+    } else {
+        Err(Failure::new(
+            "needs-confirmation",
+            "Not confirmed; nothing was changed.",
+        ))
+    }
+}
+
+/// Runs an action and prints its result and changes.
+fn act(o: &Options, conn: &mut Conn, info: &Value, args: Value) -> Outcome {
+    let id = info["id"].as_str().unwrap_or_default().to_string();
+    let confirmed = confirm(o, info)?;
+    let outcome = conn.invoke(o, "action", &id, args, confirmed)?;
+    if !human(o) {
+        print_json(&outcome);
+        return Ok(());
+    }
+    let changes = outcome["changes"].as_array().cloned().unwrap_or_default();
+    if outcome["dry_run"] == true {
+        println!("Dry run: nothing was kept.");
+    }
+    if !changes.is_empty() {
+        let rows: Vec<Vec<String>> = changes
+            .iter()
+            .map(|c| {
+                vec![
+                    cell(&c["op"]),
+                    cell(&c["plugin"]),
+                    cell(&c["table"]),
+                    cell(&c["row"]),
+                    cell(&c["column"]),
+                ]
+            })
+            .collect();
+        print_table(
+            &["op", "plugin", "table", "row", "column"].map(String::from),
+            &rows,
+        );
+    }
+    match &outcome["result"] {
+        Value::Null => {}
+        Value::Bool(true) if changes.is_empty() => println!("Done."),
+        result => print_value(result),
+    }
+    Ok(())
+}
+
+/// A host command with positional arguments, e.g. `page create <title>`.
+fn shortcut(o: &Options, parent: &str, kind: &str, id: &str, names: &[&str]) -> Outcome {
+    let words = &o.words[1..];
+    let usage = || {
+        let parts: Vec<String> = names.iter().map(|n| format!("<{n}>")).collect();
+        let command = [parent, o.words[0].as_str()].join(" ");
+        Failure::usage(format!("terrarium {} {}", command.trim(), parts.join(" ")))
+    };
+    if words.len() > names.len() && id != "ui.notify" {
+        return Err(usage());
+    }
+    let (mut conn, hello) = connect(o)?;
+    let all = conn.call("describe", json!({}))?;
+    let info = find_command(&all, kind, id).ok_or_else(|| missing_action(&hello, id))?;
+    let mut args = build_args(o, info)?;
+    if id == "ui.notify" {
+        args["text"] = json!(words.join(" "));
+    } else {
+        for (name, word) in names.iter().zip(words) {
+            let ty = info["params"][*name]["type"].as_str().unwrap_or("string");
+            args[*name] = typed(name, ty, Some(word))?;
+        }
+    }
+    if let Some(missing) = names
+        .iter()
+        .skip(words.len())
+        .find(|n| info["params"][**n]["required"] == true && args.get(**n).is_none())
+    {
+        return Err(Failure::usage(format!(
+            "{} (missing <{missing}>)",
+            usage().message
+        )));
+    }
+    if kind == "query" {
+        let outcome = conn.invoke(o, "query", id, args, false)?;
+        if human(o) {
+            print_value(&outcome["result"]);
+        } else {
+            print_json(&outcome["result"]);
+        }
+        return Ok(());
+    }
+    act(o, &mut conn, info, args)
+}
+
+fn cmd_page(o: &Options) -> Outcome {
+    let sub = o.words.first().map(String::as_str).unwrap_or("");
+    match sub {
+        "list" => shortcut(o, "page", "query", "page.list", &[]),
+        "show" => shortcut(o, "page", "query", "page.get", &["page"]),
+        "widgets" => shortcut(o, "page", "query", "page.widgets", &[]),
+        "create" => shortcut(o, "page", "action", "page.create", &["title"]),
+        "rename" => shortcut(o, "page", "action", "page.update", &["page", "title"]),
+        "remove" => shortcut(o, "page", "action", "page.remove", &["page"]),
+        "place" => shortcut(o, "page", "action", "page.place", &["page", "widget"]),
+        "move" => shortcut(o, "page", "action", "page.move", &["page", "placement"]),
+        "unplace" => shortcut(o, "page", "action", "page.unplace", &["page", "placement"]),
+        _ => Err(Failure::usage(
+            "terrarium page list | show | widgets | create | rename | remove | place | move | unplace",
+        )),
+    }
+}
+
+fn cmd_space(o: &Options) -> Outcome {
+    let sub = o.words.first().map(String::as_str).unwrap_or("");
+    match sub {
+        "list" => shortcut(o, "space", "query", "space.list", &[]),
+        "create" => shortcut(o, "space", "action", "space.create", &["name"]),
+        "rename" => shortcut(o, "space", "action", "space.rename", &["id", "name"]),
+        "remove" => shortcut(o, "space", "action", "space.remove", &["id"]),
+        "restore" => shortcut(o, "space", "action", "space.restore", &["id"]),
+        _ => Err(Failure::usage(
+            "terrarium space list | create | rename | remove | restore",
+        )),
+    }
 }
 
 fn cmd_search(o: &Options) -> Outcome {
@@ -599,7 +807,7 @@ fn cmd_search(o: &Options) -> Outcome {
         args["plugins"] = json!(plugins);
     }
     let (mut conn, _) = connect(o)?;
-    let found = conn.invoke(o, "query", "search.query", args)?;
+    let found = conn.invoke(o, "query", "search.query", args, false)?["result"].take();
     if !human(o) {
         print_json(&found);
         return Ok(());
@@ -683,6 +891,19 @@ fn run(args: &[String]) -> Outcome {
         "status" => cmd_status(&o),
         "commands" => cmd_commands(&o),
         "query" => cmd_query(&o),
+        "run" => cmd_run(&o),
+        "page" => cmd_page(&o),
+        "space" => cmd_space(&o),
+        "open" | "notify" => {
+            // `open todo` is `ui.open` with the plugin first.
+            let mut o = o;
+            o.words.insert(0, command.clone());
+            if command == "open" {
+                shortcut(&o, "", "action", "ui.open", &["plugin"])
+            } else {
+                shortcut(&o, "", "action", "ui.notify", &["text"])
+            }
+        }
         "search" => cmd_search(&o),
         "watch" => cmd_watch(&o),
         "help" | "--help" | "-h" => {
@@ -795,6 +1016,7 @@ mod tests {
         assert_eq!(exit_code("not-found"), 3);
         assert_eq!(exit_code("forbidden"), 5);
         assert_eq!(exit_code("unreachable"), 6);
+        assert_eq!(exit_code("needs-confirmation"), 7);
         assert_eq!(exit_code("anything"), 1);
     }
 }

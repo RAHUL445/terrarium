@@ -341,6 +341,21 @@ impl PluginHost {
         self.call_for_run(space, plugin, operation, args, None)
     }
 
+    /// [`PluginHost::call_in`], also returning the changes the call made
+    /// in every plugin it reached. With `dry_run` nothing is kept: every
+    /// store is rolled back and no schedule changes or AI requests remain.
+    pub fn call_traced(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        operation: &str,
+        args: &Value,
+        dry_run: bool,
+    ) -> Result<(Value, Vec<ChangeSummary>)> {
+        let (result, trace) = self.call_with(space, plugin, operation, args, None, dry_run, true);
+        result.map(|v| (v, trace.unwrap_or_default()))
+    }
+
     /// [`PluginHost::call_in`] on behalf of scheduled run `run`, so AI
     /// requests it makes are tied to the run.
     fn call_for_run(
@@ -351,8 +366,23 @@ impl PluginHost {
         args: &Value,
         run: Option<String>,
     ) -> Result<Value> {
+        self.call_with(space, plugin, operation, args, run, false, false)
+            .0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn call_with(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        operation: &str,
+        args: &Value,
+        run: Option<String>,
+        dry_run: bool,
+        trace: bool,
+    ) -> (Result<Value>, Option<Vec<ChangeSummary>>) {
         if !self.open_spaces.contains(space) {
-            return Err(RuntimeError::UnknownSpace(space.into()));
+            return (Err(RuntimeError::UnknownSpace(space.into())), None);
         }
         let peers = Peers {
             space: space.to_string(),
@@ -363,12 +393,14 @@ impl PluginHost {
             ai: self.ai.take(),
             scheduler: self.scheduler.take(),
             run,
+            dry_run,
+            trace: trace.then(Vec::new),
         };
         let (peers, result) = invoke(peers, plugin, operation, args, 0);
         self.plugins = peers.plugins;
         self.ai = peers.ai;
         self.scheduler = peers.scheduler;
-        result
+        (result, peers.trace)
     }
 
     // ---- AI ------------------------------------------------------------
@@ -681,6 +713,44 @@ pub(crate) struct Peers {
     pub scheduler: Option<Scheduler>,
     /// The scheduled run this call serves, if any.
     pub run: Option<String>,
+    /// Roll back every store the call touched, even on success, and skip
+    /// its schedule changes and AI requests.
+    pub dry_run: bool,
+    /// When set, each call appends the changes it made (or would make).
+    pub trace: Option<Vec<ChangeSummary>>,
+}
+
+/// One change an operation made, for dry runs and the audit log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ChangeSummary {
+    pub plugin: String,
+    pub table: String,
+    pub row: String,
+    /// `create`, `set`, `increment`, `text_edit`, `delete` or `restore`.
+    pub op: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+}
+
+impl ChangeSummary {
+    pub(crate) fn of(plugin: &str, change: &terrarium_core::Change) -> Self {
+        use terrarium_core::Op;
+        let (op, column) = match &change.op {
+            Op::Create => ("create", None),
+            Op::Set { column, .. } => ("set", Some(column.clone())),
+            Op::Increment { column, .. } => ("increment", Some(column.clone())),
+            Op::TextEdit { column, .. } => ("text_edit", Some(column.clone())),
+            Op::Delete { .. } => ("delete", None),
+            Op::Restore => ("restore", None),
+        };
+        ChangeSummary {
+            plugin: plugin.to_string(),
+            table: change.table.clone(),
+            row: change.row.clone(),
+            op: op.to_string(),
+            column,
+        }
+    }
 }
 
 impl Peers {

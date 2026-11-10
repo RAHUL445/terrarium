@@ -39,7 +39,7 @@ pub use pages::{
     clean_config, clean_host_config, home_id, host_widgets, PageInfo, Pages, Placement,
     HOST_WIDGETS, MAX_PLACEMENTS, PAGES_STORE_ID,
 };
-pub use registry::{fingerprint, HostConfig, PluginHost, ViewKind};
+pub use registry::{fingerprint, ChangeSummary, HostConfig, PluginHost, ViewKind};
 pub use spaces::{split_store_id, store_id, SpaceInfo, Spaces, DEFAULT_SPACE, SPACES_STORE_ID};
 pub use speech::SpeechConfig;
 /// The AI service and scheduler crates, for hosts.

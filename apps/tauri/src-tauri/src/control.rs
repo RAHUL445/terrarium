@@ -52,7 +52,7 @@ pub struct Client {
     pub last_used_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub at_ms: u64,
     pub client: String,
@@ -63,7 +63,25 @@ pub struct AuditEntry {
     pub ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    /// The rows an action changed (or would have, on a dry run), at most
+    /// `AUDIT_CHANGES`: `{plugin, table, row, op, column?}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<Value>,
+    /// How many changes there were in all.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub change_count: usize,
 }
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Changes kept per audit entry.
+const AUDIT_CHANGES: usize = 50;
+/// Longest `ui.notify` message.
+const MAX_NOTICE: usize = 200;
 
 pub struct Control {
     dir: PathBuf,
@@ -329,11 +347,21 @@ fn append_private(path: &Path, entry: &AuditEntry) -> std::io::Result<()> {
     file.write_all(&line)
 }
 
-/// Starts the socket if command-line control is on, and forwards app events
-/// to subscribed clients.
+/// Starts the socket if command-line control is on, once plugins have
+/// loaded (so clients never see a half-empty command list), and forwards
+/// app events to subscribed clients.
 pub fn start(app: &AppHandle) {
     use tauri::Listener;
-    app.state::<Control>().apply(app);
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        while !handle.state::<crate::plugins::Plugins>().ready()
+            && started.elapsed() < std::time::Duration::from_secs(60)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        handle.state::<Control>().apply(&handle);
+    });
     for name in ["data-changed", "spaces-changed", "plugins-changed"] {
         let handle = app.clone();
         app.listen_any(name, move |_| handle.state::<Control>().broadcast(name));
@@ -362,10 +390,13 @@ pub fn control_set_enabled(
 }
 
 /// Adds a client and returns its token, which is never shown again.
-/// Clients can only read for now; changes come with `terrarium run`.
 #[tauri::command]
-pub fn control_add_client(state: State<'_, Control>, name: String) -> Result<Value, String> {
-    let token = state.add_client(&name, Scope::Read)?;
+pub fn control_add_client(
+    state: State<'_, Control>,
+    name: String,
+    scope: Scope,
+) -> Result<Value, String> {
+    let token = state.add_client(&name, scope)?;
     Ok(json!({ "token": token, "state": state.state() }))
 }
 
@@ -393,9 +424,10 @@ mod server {
         read_message, write_message, ReadError, Request, Response, RpcError, INVALID_REQUEST,
         METHOD_NOT_FOUND, PARSE_ERROR,
     };
-    use terrarium_runtime::commands::{self, Caller, Kind};
+    use terrarium_runtime::commands::{self, Caller, Kind, Scope};
+    use terrarium_runtime::DEFAULT_SPACE;
 
-    use super::{now_ms, AuditEntry, Client, Control};
+    use super::{now_ms, AuditEntry, Client, Control, AUDIT_CHANGES, MAX_NOTICE};
     use crate::plugins::Plugins;
 
     /// Longest socket path macOS accepts (`sun_path`), minus the NUL.
@@ -564,6 +596,94 @@ mod server {
         space: Option<String>,
         #[serde(default)]
         args: Value,
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        confirmed: bool,
+    }
+
+    /// `ui.open` and `ui.notify`: checked like any command, then shown in
+    /// the app window by the UI (event `control-ui`).
+    fn ui_command(app: &AppHandle, scope: Scope, call: &Invoke) -> Result<Value, RpcError> {
+        if scope != Scope::Change {
+            return Err(RpcError::command(
+                "forbidden",
+                format!(
+                    "`{}` changes what the app shows; this client may only read",
+                    call.id
+                ),
+            ));
+        }
+        if call.dry_run {
+            return Err(RpcError::command(
+                "invalid",
+                "A dry run works only for plugin actions.",
+            ));
+        }
+        let text = |key: &str| call.args.get(key).and_then(Value::as_str);
+        let event = match call.id.as_str() {
+            "ui.notify" => {
+                let message = text("text").map(str::trim).unwrap_or_default();
+                if message.is_empty() || message.chars().count() > MAX_NOTICE {
+                    return Err(RpcError::command(
+                        "invalid",
+                        format!("`text` must be 1 to {MAX_NOTICE} characters"),
+                    ));
+                }
+                json!({ "action": "notify", "text": message })
+            }
+            "ui.open" => {
+                let plugin = text("plugin").unwrap_or_default();
+                let space = call
+                    .space
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_SPACE.to_string());
+                let page = app
+                    .state::<Plugins>()
+                    .with_host(|host| {
+                        if !host.open_spaces().any(|s| s == space) {
+                            return Err(RpcError::command(
+                                "unknown-space",
+                                format!("no open space `{space}`"),
+                            ));
+                        }
+                        let m = host.manifests().find(|m| m.id == plugin).ok_or_else(|| {
+                            RpcError::command("not-found", format!("no plugin `{plugin}`"))
+                        })?;
+                        match text("page") {
+                            Some(p) if m.pages.iter().any(|x| x.id == p) => Ok(p.to_string()),
+                            Some(p) => Err(RpcError::command(
+                                "not-found",
+                                format!("`{plugin}` has no page `{p}`"),
+                            )),
+                            None => m.pages.first().map(|p| p.id.clone()).ok_or_else(|| {
+                                RpcError::command("not-found", format!("`{plugin}` has no pages"))
+                            }),
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        Err(RpcError::command(
+                            "failed",
+                            "The plugin host is unavailable.",
+                        ))
+                    })?;
+                json!({ "action": "open", "space": space, "plugin": plugin, "page": page, "item": text("item") })
+            }
+            other => {
+                return Err(RpcError::command(
+                    "not-found",
+                    format!("no action `{other}`"),
+                ))
+            }
+        };
+        if call.args.as_object().is_some_and(|a| {
+            a.keys()
+                .any(|k| !matches!(k.as_str(), "text" | "plugin" | "page" | "item"))
+        }) {
+            return Err(RpcError::command("invalid", "unknown argument"));
+        }
+        let _ = app.emit("control-ui", event);
+        Ok(json!({ "result": true }))
     }
 
     fn serve(app: &AppHandle, hub: &Hub, conn: u64, stream: UnixStream) {
@@ -618,6 +738,11 @@ mod server {
                 }
             };
             let audit = |what: &str, kind: Option<Kind>, result: &Result<Value, RpcError>| {
+                let changes = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|v| v["changes"].as_array().cloned())
+                    .unwrap_or_default();
                 control.record(AuditEntry {
                     at_ms: now_ms(),
                     client: current.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
@@ -628,6 +753,9 @@ mod server {
                     }),
                     ok: result.is_ok(),
                     code: result.as_ref().err().map(|e| e.kind().to_string()),
+                    dry_run: result.as_ref().is_ok_and(|v| v["dry_run"] == true),
+                    change_count: changes.len(),
+                    changes: changes.into_iter().take(AUDIT_CHANGES).collect(),
                 })
             };
             let result: Result<Value, RpcError> = match request.method.as_str() {
@@ -645,9 +773,8 @@ mod server {
                                 at_ms: now_ms(),
                                 client: c.name.clone(),
                                 what: "hello".into(),
-                                kind: None,
                                 ok: true,
-                                code: None,
+                                ..AuditEntry::default()
                             });
                             client = Some(c);
                             Ok(out)
@@ -655,11 +782,9 @@ mod server {
                         None => {
                             control.record(AuditEntry {
                                 at_ms: now_ms(),
-                                client: String::new(),
                                 what: "hello".into(),
-                                kind: None,
-                                ok: false,
                                 code: Some("unauthorized".into()),
+                                ..AuditEntry::default()
                             });
                             send(&Response::err(
                                 Some(id),
@@ -705,12 +830,21 @@ mod server {
                             "invalid",
                             format!("bad invoke params: {e}"),
                         )),
+                        Ok(call) if call.kind == Kind::Action && call.id.starts_with("ui.") => {
+                            let r = ui_command(app, c.scope, &call);
+                            audit(&call.id, Some(call.kind), &r);
+                            r
+                        }
                         Ok(call) => {
                             let caller = Caller::Client(c.scope);
+                            let options = commands::InvokeOptions {
+                                dry_run: call.dry_run,
+                                confirmed: call.confirmed,
+                            };
                             let r = app
                                 .state::<Plugins>()
                                 .with_host(|host| {
-                                    commands::invoke(
+                                    commands::invoke_with(
                                         host,
                                         caller,
                                         call.kind,
@@ -718,6 +852,7 @@ mod server {
                                         call.space.as_deref(),
                                         &call.args,
                                         cfg!(desktop),
+                                        options,
                                     )
                                 })
                                 .unwrap_or_else(|| {
@@ -726,9 +861,10 @@ mod server {
                                         "The plugin host is unavailable.",
                                     ))
                                 })
+                                .map(|outcome| json!(outcome))
                                 .map_err(|e| RpcError::command(&e.code, e.message));
                             audit(&call.id, Some(call.kind), &r);
-                            if r.is_ok() && call.kind == Kind::Action {
+                            if r.is_ok() && call.kind == Kind::Action && !call.dry_run {
                                 let event = if call.id.starts_with("space.") {
                                     "spaces-changed"
                                 } else {
