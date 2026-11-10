@@ -23,6 +23,7 @@ startup-profiling = []
 terrarium-core = { path = "../../../crates/core" }
 terrarium-runtime = { path = "../../../crates/runtime" }
 terrarium-sync = { path = "../../../crates/sync" }
+terrarium-control-proto = { path = "../../../crates/control-proto" }
 base64 = "0.22"
 getrandom = "0.2"
 if-addrs = "0.13"

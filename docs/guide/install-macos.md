@@ -64,6 +64,9 @@ xattr -dr com.apple.quarantine /Applications/Terrarium.app
 On first launch Terrarium creates the **Personal** space and installs the
 bundled plugins. Continue with [first steps](first-steps.md).
 
+The app also contains the `terrarium` command line; see
+[command line](command-line.md).
+
 ## Updating
 
 Pull both repositories, then repeat step 3 with a new output folder (for

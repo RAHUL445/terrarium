@@ -571,15 +571,18 @@ fn plugin_commands(m: &Manifest) -> impl Iterator<Item = CommandInfo> + '_ {
 
 // ---- Registry ---------------------------------------------------------------
 
-/// Every command `caller` may see: host commands first, then each plugin's
-/// actions and queries.
+/// Every command `caller` may run: host commands first, then each
+/// plugin's actions and queries. The app sees hidden commands too; a
+/// read-only client sees only `read` commands.
 pub fn describe(host: &PluginHost, caller: Caller) -> Vec<CommandInfo> {
     let mut out: Vec<CommandInfo> = HOST_COMMANDS.iter().map(HostCommand::info).collect();
     for m in host.manifests() {
         out.extend(plugin_commands(m));
     }
-    if caller != Caller::App {
-        out.retain(|c| !c.hidden);
+    match caller {
+        Caller::App => {}
+        Caller::Client(Scope::Change) => out.retain(|c| !c.hidden),
+        Caller::Client(Scope::Read) => out.retain(|c| !c.hidden && c.effect == Effect::Read),
     }
     out
 }

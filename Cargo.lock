@@ -5468,10 +5468,28 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-opener",
  "tempfile",
+ "terrarium-control-proto",
  "terrarium-core",
  "terrarium-runtime",
  "terrarium-sync",
  "time",
+]
+
+[[package]]
+name = "terrarium-cli"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "terrarium-control-proto",
+]
+
+[[package]]
+name = "terrarium-control-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

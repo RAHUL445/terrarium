@@ -3,6 +3,7 @@
 //! developer storage inspector over a built-in test plugin.
 
 mod ai;
+mod control;
 mod install;
 mod jobs;
 mod plugins;
@@ -406,6 +407,8 @@ pub fn run() {
             sync::Sync::start(app.handle().clone());
             jobs::start(app.handle().clone(), data_dir.join("jobs-state.json"));
             ai::start(app.handle().clone());
+            app.manage(control::Control::open(&app_data));
+            control::start(app.handle());
             // Development aid: start pairing at launch and log the code.
             if cfg!(debug_assertions) && std::env::var_os("TERRA_DEV_PAIR").is_some() {
                 match app.state::<sync::Sync>().begin_pairing() {
@@ -458,6 +461,10 @@ pub fn run() {
             plugins::run_action,
             plugins::command,
             plugins::describe_commands,
+            control::control_state,
+            control::control_set_enabled,
+            control::control_add_client,
+            control::control_remove_client,
             plugins::list_spaces,
             plugins::create_space,
             plugins::rename_space,

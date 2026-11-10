@@ -16,6 +16,7 @@ for an overview.
 | [Plugins](guide/plugins.md) | Install, review, update, roll back and remove plugins |
 | [AI, schedules and voice](guide/ai-and-schedules.md) | AI provider, scheduled runs, reminders, local transcription |
 | [Appearance](guide/appearance.md) | Light and dark mode, themes, app icons, workspace layout |
+| [Command line](guide/command-line.md) | Read your data from the `terrarium` command line or an agent |
 | [Troubleshooting](guide/troubleshooting.md) | Build errors, sync problems, conflicts, starting over |
 
 ## Develop
@@ -26,6 +27,7 @@ for an overview.
 | [Writing a plugin](develop/plugin-authoring.md) | Manifest, storage, queries, templates, permissions, schedules, signing |
 | [Making a theme](develop/themes.md) | Theme file format, tokens and contrast checks |
 | [Building from source](develop/building-from-source.md) | Debug builds, checks, plugin bundle lock, SDK export |
+| [Design: command-line control](design/cli-control.md) | The command registry, control socket and CLI, by phase |
 
 The recommended plugins live in
 [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins), with their

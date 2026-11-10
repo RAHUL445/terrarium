@@ -113,7 +113,7 @@ fn code(r: Result<Value, CommandError>) -> String {
 fn describe_lists_host_and_plugin_commands() {
     let data = TempDir::new().unwrap();
     let host = host(&data);
-    let all = commands::describe(&host, READ);
+    let all = commands::describe(&host, CHANGE);
     let find = |kind, id: &str| all.iter().find(|c| c.kind == kind && c.id == id);
 
     for id in [
@@ -138,6 +138,14 @@ fn describe_lists_host_and_plugin_commands() {
     // because the operation is marked `cli: false`.
     assert!(find(Kind::Query, "todo.note_settings").is_some());
     assert!(find(Kind::Action, "todo.note_settings").is_none());
+
+    // A read-only client is shown only what it can run.
+    let read = commands::describe(&host, READ);
+    assert!(read
+        .iter()
+        .all(|c| c.effect == terrarium_runtime::Effect::Read));
+    assert!(read.iter().any(|c| c.id == "todo.tasks"));
+    assert!(!read.iter().any(|c| c.id == "todo.create"));
 
     let app = commands::describe(&host, Caller::App);
     assert!(app

@@ -431,6 +431,32 @@
             
         
 
+        <div class="card" id="control-card" hidden>
+          <h2>Command-line control</h2>
+          <p class="muted">Let the <code>terrarium</code> command line, and agents that use it, read your data on this computer. Each client gets its own token. Nothing listens until this is on.</p>
+          <label class="pp-checkbox"><input type="checkbox" id="control-enabled"> Allow command-line control on this computer</label>
+          <p class="muted small" id="control-socket"></p>
+          <p class="muted small" id="control-cli" hidden>The command-line tool is at <code id="control-cli-path"></code>. To run it as <code>terrarium</code>, link it into a folder on your PATH, for example: <code id="control-cli-link"></code></p>
+          <p id="control-error" class="error" role="alert" hidden></p>
+          <h3 class="pp-section-title">Clients</h3>
+          <ul class="pp-list" id="control-clients"></ul>
+          <form id="control-add" class="inline-form">
+            <label for="control-name" class="sr-only">Client name</label>
+            <input id="control-name" type="text" placeholder="Client name, e.g. Claude" maxlength="40" autocomplete="off">
+            <button type="submit">Add read-only client</button>
+          </form>
+          <div id="control-token" hidden>
+            <p>Copy this token now. It is not shown again. Run <code>terrarium login</code> and paste it.</p>
+            <p><code id="control-token-value" class="mono"></code></p>
+            <div class="card-foot">
+              <button type="button" class="pp-button" id="control-token-copy">Copy</button>
+              <button type="button" class="pp-button" id="control-token-done">Done</button>
+            </div>
+          </div>
+          <h3 class="pp-section-title">Recent activity</h3>
+          <ul class="pp-list" id="control-audit"></ul>
+        </div>
+
         <div class="chips" aria-label="Merge rules">
           <span class="chip"><code>lww</code> last writer wins</span>
           <span class="chip"><code>counter</code> increments add up</span>

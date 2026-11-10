@@ -1,0 +1,17 @@
+[package]
+name = "terrarium-cli"
+description = "terrarium: control the running Terrarium app from the command line"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "terrarium"
+path = "src/main.rs"
+
+[dependencies]
+terrarium-control-proto = { path = "../control-proto" }
+serde_json.workspace = true

@@ -329,6 +329,45 @@ command, and `terra preview` gets the same commands for free.
 - The recommended plugins don't describe their commands yet. That work
   happens in `terrarium-plugins` and needs a new pinned bundle.
 
+### Phase 2 as built
+
+- `crates/control-proto` holds the message format: newline-delimited
+  JSON-RPC 2.0 with `hello`, `status`, `describe`, `invoke` and `subscribe`,
+  4 MiB per message, the token hash, and where the socket is
+  (`TERRA_SOCKET`, else `control.sock` in the data folder, which honours
+  `TERRA_PROFILE_DIR`).
+- `apps/tauri/src-tauri/src/control.rs` runs the socket on desktop builds
+  only. It binds with mode `0600`, refuses to start if another copy of the
+  app is already listening, replaces a stale socket left by a crash, and
+  refuses paths longer than macOS allows (103 bytes). It allows at most 16
+  connections.
+- Settings live in `control.json` (owner-only, this device only):
+  `enabled` and the clients with name, scope, token hash, created and last
+  used times. Tokens are `trm_` plus 32 random bytes, shown once.
+- `describe` shows a read-only client only `read` commands, so
+  `terrarium commands` lists what it can actually run.
+- A connection must say `hello` first. Every later request checks that the
+  client still exists and control is still on. Turning control off, or
+  removing a client, shuts its connections down.
+- The audit log is `control-audit.jsonl` (owner-only), trimmed to the last
+  200 entries past 512 KB. It records `hello`, `describe`, `subscribe` and
+  each `invoke` (command id, kind, ok or error code), never arguments.
+- Actions a client runs emit `data-changed` (or `spaces-changed`) so open
+  windows refresh. App events are forwarded to `subscribe` connections.
+- Settings → Developer → **Command-line control**: the on/off switch, the
+  clients with Remove, **Add read-only client** (shows the token once with
+  Copy), the bundled CLI's path with a symlink command, and recent activity.
+  Only read-only clients can be added in this phase.
+- `crates/control-cli` builds `terrarium`: `login`, `logout`, `status`,
+  `commands`, `query`, `search`, `watch`. Flags are typed from `describe`.
+  Output is a table on a terminal and JSON otherwise, and the exit codes
+  are listed in the [command-line guide](../guide/command-line.md).
+- The macOS bundle copies `target/release/terrarium` into
+  `Contents/MacOS` (`bundle.macOS.files`), built by `beforeBundleCommand`.
+  Instead of an "Install command-line tool" button that writes to
+  `/usr/local/bin` (which usually needs admin rights), Settings shows the
+  path and a `ln -s` command for `~/.local/bin`.
+
 ## 4. Decisions
 
 Settled on 2026-11-10.

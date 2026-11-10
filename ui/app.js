@@ -2087,6 +2087,99 @@ async function showView(name) {
   window.scrollTo(0, 0);
 }
 
+// ---- Settings → Developer → Command-line control ----
+
+function controlError(message) {
+  $("control-error").textContent = message || "";
+  $("control-error").hidden = !message;
+}
+
+async function controlCall(command, args) {
+  try {
+    controlError("");
+    return await call(command, args);
+  } catch (e) {
+    controlError(String(e));
+    return null;
+  }
+}
+
+function renderControl(state) {
+  $("control-card").hidden = !state.available;
+  if (!state.available) return;
+  $("control-enabled").checked = state.enabled;
+  $("control-socket").textContent = state.enabled
+    ? (state.listening ? `Listening at ${state.socket}` : "Not listening.")
+    : "Off. The terrarium command line can't reach this app.";
+  if (state.error) controlError(state.error);
+  $("control-cli").hidden = !state.cli_path;
+  if (state.cli_path) {
+    $("control-cli-path").textContent = state.cli_path;
+    $("control-cli-link").textContent = `ln -s "${state.cli_path}" ~/.local/bin/terrarium`;
+  }
+  const clients = state.clients.map((c) => el("li", { class: "pp-list-item sched-row" },
+    el("div", { class: "grow" },
+      el("div", {}, c.name),
+      el("div", { class: "muted small" }, [c.scope === "read" ? "Read only" : "Read and change",
+        `added ${when(c.created_ms)}`, c.last_used_ms ? `last used ${when(c.last_used_ms)}` : "never used"].join(" · "))),
+    el("button", { type: "button", class: "pp-button pp-danger", onclick: async () => {
+      if (!await window.terrariumConfirm(`Remove “${c.name}”? Its token stops working at once.`)) return;
+      const st = await controlCall("control_remove_client", { id: c.id });
+      if (st) renderControl(st);
+    } }, "Remove")));
+  $("control-clients").replaceChildren(...(clients.length ? clients : [el("li", { class: "pp-empty" }, "No clients yet.")]));
+  const audit = state.audit.map((a) => el("li", { class: "pp-list-item sched-row" },
+    el("div", { class: "grow" },
+      el("div", {}, a.what, a.kind ? el("span", { class: "muted" }, ` · ${a.kind}`) : null),
+      el("div", { class: "muted small" }, [when(a.at_ms), a.client || "unknown client"].join(" · "))),
+    statusChip(a.ok ? "done" : "failed"),
+    a.ok ? null : el("span", { class: "muted small" }, a.code || "")));
+  $("control-audit").replaceChildren(...(audit.length ? audit : [el("li", { class: "pp-empty" }, "Nothing yet.")]));
+}
+
+async function loadControl() {
+  const state = await controlCall("control_state");
+  if (state) renderControl(state);
+}
+
+$("control-enabled").addEventListener("change", async (e) => {
+  const st = await controlCall("control_set_enabled", { enabled: e.target.checked });
+  if (st) {
+    renderControl(st);
+    return;
+  }
+  // Put the checkbox back without hiding the error just shown.
+  try {
+    renderControl(await call("control_state"));
+  } catch (_) {}
+});
+
+$("control-add").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("control-name").value.trim();
+  if (!name) return;
+  const out = await controlCall("control_add_client", { name });
+  if (!out) return;
+  $("control-name").value = "";
+  $("control-token-value").textContent = out.token;
+  $("control-token").hidden = false;
+  renderControl(out.state);
+});
+
+$("control-token-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText($("control-token-value").textContent);
+    toast("Token copied");
+  } catch (_) {
+    getSelection().selectAllChildren($("control-token-value"));
+  }
+});
+
+$("control-token-done").addEventListener("click", () => {
+  $("control-token-value").textContent = "";
+  $("control-token").hidden = true;
+});
+
 function showSettings(section) {
   settingsSection = section;
   showView("settings");
@@ -2095,7 +2188,10 @@ function showSettings(section) {
 function showSection(section) {
   renderWorkspace();
   for (const s of document.querySelectorAll(".settings-section")) s.hidden = s.id !== `settings-${section}`;
-  if (section === "developer") refresh().catch((e) => showError(String(e)));
+  if (section === "developer") {
+    refresh().catch((e) => showError(String(e)));
+    loadControl();
+  }
   if (section === "devices") loadSyncStatus();
   if (section === "spaces") loadSpaces();
   if (section === "backups") loadBackups();

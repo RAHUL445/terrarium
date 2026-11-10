@@ -7,6 +7,7 @@ Trust boundaries:
 - Untrusted plugin manifests/templates/WASM → host storage, interop, AI, speech and scheduler APIs.
 - Package files/Git/uploads/synced blobs → parser → install consent → executable cache.
 - Paired network peers → sync ingestion → local stores and plugin set.
+- Local command-line clients → control socket → command registry (desktop only, off by default).
 - Build dependencies/CI → signed desktop and Android releases.
 
 Assume malicious plugins, tampered archives, compromised peers, and malformed IPC/network input. A signed plugin identifies its publisher; it does not establish that its behavior is safe. Same-user native malware and compromised OS are not fully contained by a WASM sandbox. The shell is privileged: main-window ACL alone does not isolate individual plugins rendered inside it. Plugin templates must remain declarative and Rust must enforce every plugin API boundary.
@@ -22,6 +23,13 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 - Sync batches are encrypted and signed; peer HTTP requests carry a device proof
   and single-use challenge ([details](peer-http-authentication.md)).
 - Speech workspaces are private and cleaned up ([details](private-audio.md)).
+- Command-line control is off until turned on in Settings. The socket is a
+  `0600` file in the data folder, not a network port. Each client has its own
+  token (only its SHA-256 is stored), a read-only scope in this release, and
+  every command it runs is audited without arguments. Outside callers'
+  arguments are checked against the command's declared parameters before any
+  plugin code runs, and the recovery phrase, AI keys, pairing and backup
+  restore have no commands ([design](../design/cli-control.md)).
 - Dependency advisories are tracked with exposure guards
   ([review](dependency-advisory-review.md)).
 

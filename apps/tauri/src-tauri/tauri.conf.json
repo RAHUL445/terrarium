@@ -5,7 +5,8 @@
   "identifier": "io.github.rahul445.terrarium",
   "build": {
     "frontendDist": "../../../ui",
-    "beforeBuildCommand": ""
+    "beforeBuildCommand": "",
+    "beforeBundleCommand": "cargo build --locked --release -p terrarium-cli"
   },
   "app": {
     "withGlobalTauri": true,
@@ -29,7 +30,10 @@
     ],
     "macOS": {
       "hardenedRuntime": true,
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "files": {
+        "MacOS/terrarium": "../../../target/release/terrarium"
+      }
     }
   }
 }
