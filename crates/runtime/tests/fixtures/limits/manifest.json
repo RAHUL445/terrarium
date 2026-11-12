@@ -30,7 +30,13 @@
     "forbidden_op": {},
     "make_then_fail": {},
     "oversized_reply": {},
-    "oversized_writes": {}
+    "oversized_writes": {},
+    "note": {},
+    "mark": {
+      "bulk": true,
+      "bulk_op": "mark_many"
+    },
+    "mark_many": {}
   },
   "queries": {
     "all": {

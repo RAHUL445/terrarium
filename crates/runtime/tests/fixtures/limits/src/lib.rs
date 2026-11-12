@@ -6,8 +6,24 @@ use serde_json::{json, Map, Value};
 struct Limits;
 
 impl Plugin for Limits {
-    fn handle(operation: &str, _args: Args) -> Result<Value> {
+    fn handle(operation: &str, args: Args) -> Result<Value> {
         match operation {
+            "note" => {
+                let id = storage::insert("notes", &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                Ok(json!({"id": id}))
+            }
+            "mark" => {
+                storage::update("notes", args.str("id")?, &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                Ok(Value::Null)
+            }
+            "mark_many" => {
+                let ids = args.get("ids").and_then(Value::as_array).ok_or_else(|| Error::invalid("`ids` must be a list"))?;
+                for id in ids {
+                    let id = id.as_str().ok_or_else(|| Error::invalid("`ids` must be a list"))?;
+                    storage::update("notes", id, &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                }
+                Ok(json!({"marked": ids.len()}))
+            }
             "ok" => Ok(json!({ "ok": true })),
             "oversized_reply" => {
                 storage::insert("notes", &json!({"note":"must roll back"}).as_object().unwrap().clone())?;

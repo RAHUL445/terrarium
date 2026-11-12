@@ -1036,6 +1036,61 @@ fn finished_tasks_keep_notes_in_the_tasks_project() {
 }
 
 #[test]
+fn todo_add_tag_keeps_other_tags() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let task = host
+        .call("todo", "create", &json!({"title": "Plan #work"}))
+        .unwrap();
+    let id = task["id"].as_str().unwrap().to_string();
+    let tagged = host
+        .call("todo", "add_tag", &json!({"id": id, "tag": "#Home"}))
+        .unwrap();
+    assert_eq!(tagged["tags"], json!("work, home"));
+    let rows = host
+        .query("todo", "task", &params(json!({"id": task["id"]})))
+        .unwrap();
+    assert_eq!(rows[0]["tags"], json!("work, home"));
+
+    let tagged_again = host
+        .call("todo", "add_tag", &json!({"id": task["id"], "tag": "home"}))
+        .unwrap();
+    assert_eq!(tagged_again["tags"], json!("work, home"));
+    let rows = host
+        .query("todo", "task", &params(json!({"id": task["id"]})))
+        .unwrap();
+    assert_eq!(rows[0]["tags"], json!("work, home"));
+
+    let err = host
+        .call("todo", "add_tag", &json!({"id": task["id"], "tag": "a, b"}))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RuntimeError::Plugin { ref code, .. } if code == "invalid"
+    ));
+}
+
+#[test]
+fn real_todo_bulk_ops_run() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let a = host.call("todo", "create", &json!({"title": "A"})).unwrap()["id"].clone();
+    let b = host.call("todo", "create", &json!({"title": "B"})).unwrap()["id"].clone();
+    let c = host.call("todo", "create", &json!({"title": "C"})).unwrap()["id"].clone();
+    let out = terrarium_runtime::commands::invoke(
+        &mut host,
+        terrarium_runtime::commands::Caller::App,
+        terrarium_runtime::commands::Kind::Action,
+        "plugin.run_bulk",
+        None,
+        &json!({"plugin":"todo","op":"add_tag","ids":[a,b,c],"args":{"tag":"x"}}),
+        true,
+    )
+    .unwrap();
+    assert_eq!(out["done"], json!(3));
+}
+
+#[test]
 fn ai_reports_use_skills_chosen_data_and_schedules() {
     let data = TempDir::new().unwrap();
     let mut host = host(&data);

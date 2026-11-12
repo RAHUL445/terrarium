@@ -72,6 +72,12 @@ pub struct AuditEntry {
     /// How many changes there were in all.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub change_count: usize,
+    /// Items a bulk command ran on (`plugin.run_bulk`, `space.import`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub items: usize,
+    /// The action a bulk command ran, e.g. `todo.toggle`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -729,6 +735,23 @@ mod server {
                     .ok()
                     .and_then(|v| v["changes"].as_array().cloned())
                     .unwrap_or_default();
+                let (items, target) = if what == "plugin.run_bulk" {
+                    let total = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|v| v["result"]["total"].as_u64())
+                        .unwrap_or(0) as usize;
+                    let target = result.as_ref().ok().and_then(|v| {
+                        Some(format!(
+                            "{}.{}",
+                            v["result"]["plugin"].as_str()?,
+                            v["result"]["op"].as_str()?
+                        ))
+                    });
+                    (total, target)
+                } else {
+                    (0, None)
+                };
                 control.record(AuditEntry {
                     at_ms: now_ms(),
                     client: current.as_ref().map(|c| c.name.clone()).unwrap_or_default(),
@@ -742,6 +765,8 @@ mod server {
                     dry_run: result.as_ref().is_ok_and(|v| v["dry_run"] == true),
                     change_count: changes.len(),
                     changes: changes.into_iter().take(AUDIT_CHANGES).collect(),
+                    items,
+                    target,
                 })
             };
             let result: Result<Value, RpcError> = match request.method.as_str() {
@@ -894,5 +919,20 @@ mod server {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_entries_without_items_still_parse() {
+        let parsed = serde_json::from_str::<AuditEntry>(
+            r#"{"at_ms":1,"client":"c","what":"hello","ok":true}"#,
+        );
+        let parsed = parsed.expect("old audit entry should parse");
+        assert_eq!(parsed.items, 0);
+        assert!(parsed.target.is_none());
     }
 }

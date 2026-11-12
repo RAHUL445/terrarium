@@ -559,6 +559,24 @@
       }
     }
 
+    async undoSelected(undo, ids, scope) {
+      const s = { ...scope, count: ids.length };
+      try {
+        const report = await this.bridge.bulk(undo.op, ids, resolve(undo.args || {}, s));
+        if (!this.disposed) {
+          const message = report.failed
+            ? report.message
+            : (resolve(undo.success, { ...s, result: report }) || report.message);
+          this.bridge.toast(message, report.failed ? "error" : "ok");
+        }
+        this.bridge.changed();
+        return report.failed === 0;
+      } catch (e) {
+        this.bridge.toast(String(e), "error");
+        return false;
+      }
+    }
+
     // Builds with fresh list and watcher registries, so a part of the view
     // that comes and goes (a sheet, a conditional) owns what it created.
     region(build) {
@@ -2115,6 +2133,174 @@
       const board = ["board", "matrix"].includes(spec.layout);
       const node = el("ul", `pp-list${board ? ` pp-board pp-board-${spec.layout}` : ""}${spec.layout === "chips" ? " pp-list-chips" : spec.layout === "plain" ? " pp-list-plain" : ""}`);
       if (spec.layout === "board") node.style.setProperty("--pp-lanes", String((spec.columns || []).length));
+      const selectable = !!(spec.select && Array.isArray(spec.select.actions) && this.bridge.bulk);
+      const wrap = selectable ? el("div", "pp-select-list") : null;
+      const bar = selectable ? el("div", "pp-select-bar") : null;
+      let selecting = false;
+      let running = false;
+      const selected = new Set();
+      let currentRows = [];
+      let rowNodes = new Map();
+      let anchor = null;
+      let suppressClickId = null;
+      const runSelected = async (action, ids, args, s) => {
+        running = true;
+        drawBar();
+        let report;
+        try {
+          report = await this.bridge.bulk(action.op, ids, args);
+        } catch (e) {
+          running = false;
+          drawBar();
+          this.bridge.toast(String(e), "error");
+          return;
+        }
+        if (this.disposed) {
+          this.bridge.changed();
+          return;
+        }
+        running = false;
+        const message = report.failed
+          ? report.message
+          : (resolve(action.success, { ...s, result: report }) || report.message);
+        const canUndo = !!action.undo?.op && !report.dry_run && report.done > 0;
+        const okIds = canUndo
+          ? (report.items || []).filter((item) => item.ok).map((item) => item.id)
+          : [];
+        if (report.failed === 0) {
+          setSelecting(false);
+        } else {
+          setSelecting(true);
+          selected.clear();
+          for (const item of report.items || []) if (!item.ok && (typeof item.id === "string" || typeof item.id === "number")) selected.add(String(item.id));
+          syncRows();
+          drawBar();
+        }
+        this.bridge.toast(message, report.failed ? "error" : "ok", canUndo ? {
+          label: "Undo",
+          run: () => this.undoSelected(action.undo, okIds, s),
+        } : null);
+        this.bridge.changed();
+      };
+      if (selectable) {
+        wrap.dataset.selecting = "false";
+        wrap.append(bar, node);
+      }
+      const validId = (row) => row && (typeof row.id === "string" || typeof row.id === "number");
+      const toggle = (id, on) => {
+        if (on == null) {
+          if (selected.has(id)) selected.delete(id);
+          else selected.add(id);
+          return;
+        }
+        if (on) selected.add(id);
+        else selected.delete(id);
+      };
+      const setSelecting = (on) => {
+        selecting = !!on;
+        wrap.dataset.selecting = String(selecting);
+        if (!selecting) {
+          selected.clear();
+          anchor = null;
+        }
+        syncRows();
+        drawBar();
+      };
+      const syncRows = () => {
+        for (const [id, refs] of rowNodes) {
+          const on = selected.has(id);
+          refs.check.checked = on;
+          refs.check.hidden = !selecting;
+          refs.item.dataset.ppSelected = String(on);
+        }
+      };
+      const drawBar = () => {
+        if (!selectable) return;
+        bar.replaceChildren();
+        bar.setAttribute("role", "toolbar");
+        bar.setAttribute("aria-label", "Selection");
+        if (!selecting) {
+          const select = el("button", "pp-button pp-ghost", "Select");
+          select.type = "button";
+          select.setAttribute("aria-label", resolve(spec.select.label || "Select items", scope));
+          select.addEventListener("click", () => {
+            setSelecting(true);
+          });
+          bar.append(select);
+          return;
+        }
+        bar.append(el("span", "pp-select-count", `${selected.size} selected`));
+        const selectAll = el("button", "pp-button pp-ghost", "Select all");
+        selectAll.type = "button";
+        selectAll.disabled = running;
+        selectAll.addEventListener("click", () => {
+          selected.clear();
+          for (const row of currentRows) if (validId(row)) selected.add(String(row.id));
+          syncRows();
+          drawBar();
+        });
+        bar.append(selectAll);
+        for (const action of spec.select.actions) {
+          const button = el("button", `pp-button${action.variant === "danger" ? " pp-danger" : ""}`, resolve(action.label, scope));
+          button.type = "button";
+          if (action.icon && ICONS[action.icon]) button.prepend(icon(action.icon));
+          button.disabled = running || selected.size === 0 || selected.size > 500;
+          button.addEventListener("click", async () => {
+            const ids = [...selected];
+            const count = ids.length;
+            let s = { ...scope, count };
+            let askedValue = null;
+            const ask = action.ask && typeof action.ask === "object" ? action.ask : null;
+            if (ask) {
+              if (!window.terrariumAsk) {
+                this.bridge.toast("This action needs a newer app.", "error");
+                return;
+              }
+              askedValue = await (window.terrariumAsk?.(resolve(ask.title, s), {
+                label: resolve(ask.label, s),
+                confirm: resolve(action.label, s),
+              }) ?? null);
+              if (askedValue == null) return;
+              s = { ...s, value: askedValue };
+            }
+            if (action.confirm) {
+              const question = resolve(action.confirm, s);
+              const ok = window.terrariumConfirm
+                ? await window.terrariumConfirm(question, { confirm: resolve(action.label, s), danger: action.variant === "danger" })
+                : window.confirm(question);
+              if (!ok) return;
+            }
+            const args = resolve(action.args || {}, s);
+            if (ask && typeof ask.name === "string" && ask.name) args[ask.name] = askedValue;
+            await runSelected(action, ids, args, s);
+          });
+          bar.append(button);
+        }
+        const cancel = el("button", "pp-button pp-ghost", "Cancel");
+        cancel.type = "button";
+        cancel.disabled = running;
+        cancel.addEventListener("click", () => {
+          setSelecting(false);
+        });
+        bar.append(cancel);
+        if (selected.size > 500) bar.append(el("p", "pp-select-note", "Select up to 500 items at a time."));
+      };
+      if (selectable) {
+        wrap.addEventListener("keydown", (event) => {
+          const key = String(event.key || "");
+          if (key === "Escape" && selecting) {
+            event.preventDefault?.();
+            setSelecting(false);
+            return;
+          }
+          if (!(event.metaKey || event.ctrlKey) || key.toLowerCase() !== "a" || !selecting) return;
+          event.preventDefault?.();
+          selected.clear();
+          for (const row of currentRows) if (validId(row)) selected.add(String(row.id));
+          syncRows();
+          drawBar();
+        });
+      }
       node.setAttribute("aria-busy", "true");
       if (board) node.setAttribute("aria-label", resolve(spec.label || "Board", scope));
       node.append(el("li", "pp-empty", "Loading…"));
@@ -2187,10 +2373,19 @@
         }
         if (seq !== sequence) return;
         if (spec.limit) rows = rows.slice(0, Number(spec.limit));
+        if (selectable) {
+          currentRows = rows;
+          const visible = new Set(rows.filter(validId).map((row) => String(row.id)));
+          for (const id of [...selected]) if (!visible.has(id)) selected.delete(id);
+        }
         // Always query fresh data, but keep unchanged controls (and drafts)
         // in place. Include state because row templates may reference it.
         const signature = JSON.stringify([rows, this.state]);
         if (signature === rendered) {
+          if (selectable) {
+            syncRows();
+            drawBar();
+          }
           await Promise.all(region.lists.map((load) => load()));
           if (seq === sequence) node.setAttribute("aria-busy", "false");
           return;
@@ -2200,6 +2395,7 @@
         this.release(region);
         node.replaceChildren();
         region = { lists: [], watchers: [] };
+        rowNodes = new Map();
         if (rows.length === 0 && emptyText(spec, scope)) node.append(el("li", "pp-empty", resolve(emptyText(spec, scope), scope)));
         // All lanes share one result set, so filters and row limits are
         // identical to the list. Empty lanes remain visible for orientation.
@@ -2386,6 +2582,109 @@
                 });
                 item.append(handle);
               }
+              if (selectable && validId(row)) {
+                const id = String(row.id);
+                item.dataset.ppId = id;
+                item.dataset.ppSelected = String(selected.has(id));
+                const check = el("input", "pp-select-check");
+                check.type = "checkbox";
+                check.checked = selected.has(id);
+                check.hidden = !selecting;
+                check.setAttribute("aria-label", `Select ${row.title ?? id}`);
+                check.addEventListener("change", () => {
+                  if (check.checked) selected.add(id);
+                  else selected.delete(id);
+                  anchor = id;
+                  syncRows();
+                  drawBar();
+                });
+                let longPressTimer = null;
+                let longPressX = 0;
+                let longPressY = 0;
+                let longPressed = false;
+                const clearLongPress = () => {
+                  if (longPressTimer == null) return;
+                  this.cancel(longPressTimer);
+                  longPressTimer = null;
+                };
+                const movedTooFar = (event) => {
+                  const dx = (event.clientX ?? 0) - longPressX;
+                  const dy = (event.clientY ?? 0) - longPressY;
+                  return Math.sqrt(dx * dx + dy * dy) > 10;
+                };
+                item.addEventListener("pointerdown", (event) => {
+                  if (event.pointerType !== "touch") return;
+                  longPressX = event.clientX ?? 0;
+                  longPressY = event.clientY ?? 0;
+                  longPressed = false;
+                  clearLongPress();
+                  longPressTimer = this.schedule(() => {
+                    longPressTimer = null;
+                    longPressed = true;
+                    suppressClickId = id;
+                    setSelecting(true);
+                    toggle(id, true);
+                    anchor = id;
+                    syncRows();
+                    drawBar();
+                    if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") navigator.vibrate(10);
+                  }, 500);
+                });
+                item.addEventListener("pointermove", (event) => {
+                  if (longPressTimer == null) return;
+                  if (movedTooFar(event)) clearLongPress();
+                });
+                item.addEventListener("pointerup", () => clearLongPress());
+                item.addEventListener("pointercancel", () => clearLongPress());
+                item.addEventListener("contextmenu", (event) => {
+                  if (selecting || longPressed) event.preventDefault?.();
+                });
+                item.addEventListener("click", (event) => {
+                  if (suppressClickId === id) {
+                    suppressClickId = null;
+                    longPressed = false;
+                    event.preventDefault?.();
+                    event.stopPropagation?.();
+                    return;
+                  }
+                  longPressed = false;
+                  const mod = !!(event.metaKey || event.ctrlKey);
+                  if (!selecting && !mod) return;
+                  if (event.target === check) {
+                    anchor = id;
+                    return;
+                  }
+                  event.preventDefault?.();
+                  event.stopPropagation?.();
+                  if (!selecting && mod) {
+                    setSelecting(true);
+                    toggle(id, true);
+                    anchor = id;
+                    syncRows();
+                    drawBar();
+                    return;
+                  }
+                  if (event.shiftKey && anchor != null) {
+                    const ids = currentRows.filter(validId).map((row) => String(row.id));
+                    const start = ids.indexOf(String(anchor));
+                    const end = ids.indexOf(id);
+                    if (start >= 0 && end >= 0) {
+                      const [from, to] = start <= end ? [start, end] : [end, start];
+                      for (let i = from; i <= to; i++) selected.add(ids[i]);
+                    } else {
+                      toggle(id);
+                      anchor = id;
+                    }
+                  } else {
+                    toggle(id);
+                    anchor = id;
+                  }
+                  syncRows();
+                  drawBar();
+                }, true);
+                item.prepend(check);
+                rowNodes.set(id, { item, check });
+              }
               const child = this.node(spec.item, { ...scope, row });
               if (child) item.append(child);
               if (board) lanes.get(String(row[spec.column]))?.items.append(item);
@@ -2402,10 +2701,12 @@
         if (seq !== sequence) return;
         rendered = signature;
         await Promise.all(region.lists.map((load) => load()));
+        if (selectable) drawBar();
         if (seq === sequence) node.setAttribute("aria-busy", "false");
       };
       this.lists.push(load);
-      return node;
+      drawBar();
+      return selectable ? wrap : node;
     },
 
     /**

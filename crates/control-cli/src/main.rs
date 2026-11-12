@@ -25,6 +25,7 @@ const USAGE: &str = "usage: terrarium <command> [options]
   commands [prefix]             commands this client can run
   query <id> [--param value]... run a query, e.g. terrarium query todo.tasks --filter upcoming
   run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
+  run <id> --ids a,b | --where <query> [--where-params json]   run a bulk action on many items (at most 500)
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   watch                         print app events as data changes
   mcp                           serve these commands as MCP tools on stdin/stdout, for agents
@@ -100,6 +101,9 @@ struct Options {
     socket: Option<PathBuf>,
     space: Option<String>,
     args: Option<String>,
+    ids: Option<String>,
+    where_query: Option<String>,
+    where_params: Option<String>,
     /// Positional words after the command.
     words: Vec<String>,
     /// `--name value` pairs not recognised above, in order.
@@ -131,6 +135,9 @@ fn parse(args: &[String]) -> Result<Options, Failure> {
             "socket" => o.socket = Some(PathBuf::from(value("socket")?)),
             "space" => o.space = Some(value("space")?),
             "args" => o.args = Some(value("args")?),
+            "ids" => o.ids = Some(value("ids")?),
+            "where" => o.where_query = Some(value("where")?),
+            "where-params" => o.where_params = Some(value("where-params")?),
             _ => {
                 // A flag's value is the next word unless that is another flag.
                 let v = inline.or_else(|| it.next_if(|next| !next.starts_with("--")).cloned());
@@ -139,6 +146,75 @@ fn parse(args: &[String]) -> Result<Options, Failure> {
         }
     }
     Ok(o)
+}
+
+fn parse_ids(text: &str) -> Result<Vec<String>, Failure> {
+    let text = match text.strip_prefix('@') {
+        Some(file) => {
+            std::fs::read_to_string(file).map_err(|e| Failure::usage(format!("{file}: {e}")))?
+        }
+        None => text.to_string(),
+    };
+    let ids: Vec<String> = text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    if ids.is_empty() {
+        return Err(Failure::usage("--ids needs at least one id"));
+    }
+    Ok(ids)
+}
+
+fn parse_json_object(text: &str, flag: &str) -> Result<Map<String, Value>, Failure> {
+    let text = match text.strip_prefix('@') {
+        Some(file) => {
+            std::fs::read_to_string(file).map_err(|e| Failure::usage(format!("{file}: {e}")))?
+        }
+        None => text.to_string(),
+    };
+    match serde_json::from_str(&text) {
+        Ok(Value::Object(map)) => Ok(map),
+        _ => Err(Failure::usage(format!("{flag} must be a JSON object"))),
+    }
+}
+
+fn bulk_request(o: &Options, info: &Value, mut args: Value) -> Result<Value, Failure> {
+    if o.ids.is_some() && o.where_query.is_some() {
+        return Err(Failure::usage("use --ids or --where, not both"));
+    }
+    if info["bulk"] != true {
+        let id = info["id"].as_str().unwrap_or_default();
+        return Err(Failure::new(
+            "invalid",
+            format!("`{id}` can't run on many items"),
+        ));
+    }
+    if let Some(map) = args.as_object_mut() {
+        map.remove("id");
+    }
+    let id = info["id"]
+        .as_str()
+        .ok_or_else(|| Failure::new("failed", "The command has no id."))?;
+    let (plugin, op) = id
+        .split_once('.')
+        .ok_or_else(|| Failure::new("failed", format!("`{id}` is not a plugin action id")))?;
+    let mut request = Map::new();
+    request.insert("plugin".into(), json!(plugin));
+    request.insert("op".into(), json!(op));
+    request.insert("args".into(), args);
+    if let Some(text) = &o.ids {
+        request.insert("ids".into(), json!(parse_ids(text)?));
+    } else if let Some(query) = &o.where_query {
+        let params = match &o.where_params {
+            Some(text) => parse_json_object(text, "--where-params")?,
+            None => Map::new(),
+        };
+        request.insert("where".into(), json!({ "query": query, "params": params }));
+    } else {
+        return Err(Failure::usage("use --ids or --where"));
+    }
+    Ok(Value::Object(request))
 }
 
 fn human(o: &Options) -> bool {
@@ -693,11 +769,18 @@ fn cmd_run(o: &Options) -> Outcome {
     let all = conn.call("describe", json!({}))?;
     let info = find_command(&all, "action", &id).ok_or_else(|| missing_action(&hello, &id))?;
     let args = build_args(o, info)?;
+    if o.ids.is_some() || o.where_query.is_some() {
+        let request = bulk_request(o, info, args)?;
+        let count = request["ids"].as_array().map(Vec::len);
+        let confirmed = confirm(o, info, count)?;
+        let outcome = conn.invoke(o, "action", "plugin.run_bulk", request, confirmed)?;
+        return print_bulk_outcome(o, &outcome);
+    }
     act(o, &mut conn, info, args)
 }
 
 /// Asks before a destructive action unless `--yes` or `--dry-run`.
-fn confirm(o: &Options, info: &Value) -> Result<bool, Failure> {
+fn confirm(o: &Options, info: &Value, count: Option<usize>) -> Result<bool, Failure> {
     if info["effect"] != "destructive" || o.dry_run {
         return Ok(false);
     }
@@ -708,6 +791,10 @@ fn confirm(o: &Options, info: &Value) -> Result<bool, Failure> {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| format!("`{}` removes or hides data.", cell(&info["id"])));
+    let question = match count {
+        Some(n) => format!("{question} ({n} items)"),
+        None => question,
+    };
     if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
         return Err(Failure::new(
             "needs-confirmation",
@@ -733,7 +820,7 @@ fn confirm(o: &Options, info: &Value) -> Result<bool, Failure> {
 /// Runs an action and prints its result and changes.
 fn act(o: &Options, conn: &mut Conn, info: &Value, args: Value) -> Outcome {
     let id = info["id"].as_str().unwrap_or_default().to_string();
-    let confirmed = confirm(o, info)?;
+    let confirmed = confirm(o, info, None)?;
     let outcome = conn.invoke(o, "action", &id, args, confirmed)?;
     if !human(o) {
         print_json(&outcome);
@@ -765,6 +852,40 @@ fn act(o: &Options, conn: &mut Conn, info: &Value, args: Value) -> Outcome {
         Value::Null => {}
         Value::Bool(true) if changes.is_empty() => println!("Done."),
         result => print_value(result),
+    }
+    Ok(())
+}
+
+fn print_bulk_outcome(o: &Options, outcome: &Value) -> Outcome {
+    if !human(o) {
+        print_json(outcome);
+        return Ok(());
+    }
+    if outcome["dry_run"] == true {
+        println!("Dry run: nothing was kept.");
+    }
+    let failed_rows: Vec<Vec<String>> = outcome["result"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["ok"] != true)
+        .map(|item| {
+            vec![
+                cell(&item["id"]),
+                cell(&item["error"]["code"]),
+                cell(&item["error"]["message"]),
+            ]
+        })
+        .collect();
+    if !failed_rows.is_empty() {
+        print_table(&["id", "code", "message"].map(String::from), &failed_rows);
+    }
+    let message = outcome["result"]["message"]
+        .as_str()
+        .unwrap_or("Bulk command finished.");
+    println!("{message}");
+    if outcome["result"]["failed"].as_u64().unwrap_or(0) > 0 {
+        return Err(Failure::new("failed", message));
     }
     Ok(())
 }
@@ -1069,6 +1190,61 @@ mod tests {
             build_args(&o, &untyped).unwrap(),
             json!({"filter": "all", "q": "x"})
         );
+    }
+
+    #[test]
+    fn ids_are_split_and_checked() {
+        assert_eq!(parse_ids("a, b\nc").unwrap(), ["a", "b", "c"]);
+        assert_eq!(parse_ids(" , ").unwrap_err().code, "usage");
+    }
+
+    #[test]
+    fn bulk_flags_are_options() {
+        let o = opts(&[
+            "todo.toggle",
+            "--ids",
+            "a,b",
+            "--where",
+            "tasks",
+            "--where-params",
+            "{}",
+            "--done",
+            "true",
+        ]);
+        assert_eq!(o.ids.as_deref(), Some("a,b"));
+        assert_eq!(o.where_query.as_deref(), Some("tasks"));
+        assert_eq!(o.where_params.as_deref(), Some("{}"));
+        assert_eq!(o.flags, [("done".to_string(), Some("true".to_string()))]);
+    }
+
+    #[test]
+    fn bulk_request_with_ids_and_bulk_check() {
+        let info = json!({
+            "id": "todo.toggle",
+            "bulk": true,
+        });
+        let request = bulk_request(
+            &opts(&["todo.toggle", "--ids", "a,b"]),
+            &info,
+            json!({ "done": true, "id": "ignored" }),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            json!({
+                "plugin": "todo",
+                "op": "toggle",
+                "ids": ["a", "b"],
+                "args": { "done": true }
+            })
+        );
+        let not_bulk = bulk_request(
+            &opts(&["todo.toggle", "--ids", "a"]),
+            &json!({ "id": "todo.toggle", "bulk": false }),
+            json!({}),
+        )
+        .unwrap_err();
+        assert_eq!(not_bulk.code, "invalid");
     }
 
     #[test]

@@ -80,7 +80,13 @@ fn described_todo(root: &Path) -> PathBuf {
     m["operations"]["delete"]["effect"] = json!("destructive");
     m["operations"]["delete"]["params"] = json!({ "id": { "type": "id", "required": true } });
     m["operations"]["note_settings"]["cli"] = json!(false);
+    m["queries"]["tasks"]["types"] = json!({
+        "filter": { "type": "enum", "values": ["today", "upcoming", "all", "done"] }
+    });
+    m["queries"]["badge"]["cli"] = json!(false);
     m["queries"]["search"]["types"] = json!({ "q": { "type": "string", "required": true } });
+    m["operations"]["toggle"]["bulk"] = json!(true);
+    m["operations"]["delete"]["bulk"] = json!(true);
     m["open"] = json!({ "page": "main" });
     std::fs::write(&path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
     to
@@ -143,6 +149,7 @@ fn describe_lists_host_and_plugin_commands() {
     let create = find(Kind::Action, "todo.create").unwrap();
     assert!(create.params.as_ref().unwrap()["title"].required);
     assert!(create.summary.starts_with("Create a task."));
+    assert!(serde_json::to_value(create).unwrap().get("bulk").is_none());
     // Untyped operations say so with no params.
     assert!(find(Kind::Action, "todo.update").unwrap().params.is_none());
     // Undeclared effects: delete-like names are destructive, others write.
@@ -705,4 +712,307 @@ fn ui_commands_need_the_app() {
     );
     let read = commands::describe(&host, READ);
     assert!(!read.iter().any(|c| c.id.starts_with("ui.")));
+}
+
+fn limits_dir() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/limits");
+            build_plugin(&dir).unwrap();
+            dir
+        })
+        .clone()
+}
+
+fn bulk(
+    host: &mut PluginHost,
+    caller: Caller,
+    args: Value,
+    dry_run: bool,
+    confirmed: bool,
+) -> Result<commands::Outcome, CommandError> {
+    commands::invoke_with(
+        host,
+        caller,
+        Kind::Action,
+        "plugin.run_bulk",
+        None,
+        &args,
+        true,
+        commands::InvokeOptions { dry_run, confirmed },
+    )
+}
+
+#[test]
+fn bulk_runs_once_per_id_with_per_item_results() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap()["id"].clone();
+    let b = run(&mut h, CHANGE, "todo.create", json!({"title":"B"})).unwrap()["id"].clone();
+    run(&mut h, CHANGE, "todo.create", json!({"title":"C"})).unwrap();
+    let out = bulk(
+        &mut h,
+        Caller::App,
+        json!({"plugin":"todo","op":"toggle","ids":[a,b,"missing"],"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(out.result["total"], 3);
+    assert_eq!(out.result["done"], 2);
+    assert_eq!(out.result["failed"], 1);
+    assert_eq!(out.result["message"], "2 done, 1 failed");
+    assert_eq!(out.result["items"][2]["error"]["code"], "not-found");
+    assert!(out.changes.is_empty());
+    let rows = query(&mut h, READ, "todo.tasks", json!({"filter":"all"})).unwrap();
+    for row in rows.as_array().unwrap() {
+        assert_eq!(row["done"], json!(if row["title"] == "C" { 0 } else { 1 }));
+    }
+}
+
+#[test]
+fn bulk_refuses_bad_input() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    for (patch, message) in [
+        (json!({"op":"create"}), "can't run on many"),
+        (json!({"ids":[]}), "at least one"),
+        (json!({"ids":"a"}), "list of item ids"),
+        (json!({"ids":[""]}), "list of item ids"),
+        (json!({"ids":[1]}), "list of item ids"),
+        (
+            json!({"ids":(0..501).map(|i|format!("x{i}")).collect::<Vec<_>>()}),
+            "at most 500",
+        ),
+        (json!({"args":{"id":"x"}}), "must not contain"),
+        (json!({"args":{"ids":[]}}), "must not contain"),
+        (json!({"args":true}), "must be an object"),
+    ] {
+        let mut args = json!({"plugin":"todo","op":"toggle","ids":["a"]});
+        args.as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let e = bulk(&mut h, Caller::App, args, false, false).unwrap_err();
+        assert_eq!(e.code, "invalid");
+        assert!(e.message.contains(message), "{}", e.message);
+    }
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap()["id"].clone();
+    assert_eq!(
+        bulk(
+            &mut h,
+            Caller::App,
+            json!({"plugin":"todo","op":"toggle","ids":[a,a]}),
+            false,
+            false
+        )
+        .unwrap()
+        .result["total"],
+        1
+    );
+    let desc = commands::describe(&h, CHANGE);
+    assert_eq!(
+        desc.iter()
+            .find(|c| c.id == "plugin.run_bulk")
+            .unwrap()
+            .params
+            .as_ref()
+            .unwrap()
+            .len(),
+        6
+    );
+}
+
+#[test]
+fn bulk_destructive_needs_confirmation_with_count() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap()["id"].clone();
+    let b = run(&mut h, CHANGE, "todo.create", json!({"title":"B"})).unwrap()["id"].clone();
+    let args = json!({"plugin":"todo","op":"delete","ids":[a,b]});
+    let e = bulk(&mut h, CHANGE, args.clone(), false, false).unwrap_err();
+    assert_eq!(e.code, "needs-confirmation");
+    assert!(e.message.ends_with("This applies to 2 items."));
+    let out = bulk(&mut h, CHANGE, args.clone(), true, false).unwrap();
+    assert!(out.dry_run);
+    assert_eq!(out.changes.iter().filter(|c| c.op == "delete").count(), 2);
+    assert_eq!(task_titles(&mut h).len(), 2);
+    bulk(&mut h, CHANGE, args, false, true).unwrap();
+    assert!(task_titles(&mut h).is_empty());
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"C"})).unwrap()["id"].clone();
+    assert_eq!(
+        bulk(
+            &mut h,
+            Caller::App,
+            json!({"plugin":"todo","op":"delete","ids":[a]}),
+            false,
+            false
+        )
+        .unwrap()
+        .result["done"],
+        1
+    );
+}
+
+#[test]
+fn bulk_read_client_is_forbidden() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    assert_eq!(
+        bulk(
+            &mut h,
+            READ,
+            json!({"plugin":"todo","op":"toggle","ids":["x"]}),
+            false,
+            false
+        )
+        .unwrap_err()
+        .code,
+        "forbidden"
+    );
+}
+
+#[test]
+fn bulk_dry_run_in_args_works_for_the_app() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap()["id"].clone();
+    let out = bulk(
+        &mut h,
+        Caller::App,
+        json!({"plugin":"todo","op":"delete","ids":[a],"dry_run":true}),
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(out.dry_run);
+    assert_eq!(
+        out.result["message"],
+        "Dry run: 1 would be done. Nothing was kept."
+    );
+    assert_eq!(out.changes.len(), 1);
+    assert_eq!(task_titles(&mut h), vec!["A"]);
+}
+
+#[test]
+fn bulk_op_runs_once_for_all_ids() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    h.load(&limits_dir()).unwrap();
+    let a = run(&mut h, Caller::App, "limits.note", json!({"text":"a"})).unwrap()["id"].clone();
+    let b = run(&mut h, Caller::App, "limits.note", json!({"text":"b"})).unwrap()["id"].clone();
+    let args = json!({"plugin":"limits","op":"mark","ids":[a,b],"args":{"text":"x"}});
+    let out = bulk(&mut h, CHANGE, args, false, false).unwrap();
+    assert_eq!(out.result["done"], 2);
+    assert_eq!(out.result["items"][0]["result"]["marked"], 2);
+    assert!(out.result["items"][1].get("result").is_none());
+    let out = bulk(
+        &mut h,
+        Caller::App,
+        json!({"plugin":"limits","op":"mark","ids":[a,"missing"],"args":{"text":"y"}}),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(out.result["failed"], 2);
+    let rows = query(&mut h, READ, "limits.all", json!({})).unwrap();
+    assert!(rows.as_array().unwrap().iter().all(|r| r["note"] == "x"));
+}
+
+#[test]
+fn bulk_where_uses_query_rows() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let a = run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap()["id"].clone();
+    run(&mut h, CHANGE, "todo.create", json!({"title":"B"})).unwrap();
+    run(&mut h, CHANGE, "todo.toggle", json!({"id":a, "done":true})).unwrap();
+    let out = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"tasks","params":{"filter":"all"}},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(out.result["total"], 1);
+    assert_eq!(out.result["query"], "tasks");
+    let rows = query(&mut h, READ, "todo.tasks", json!({"filter":"all"})).unwrap();
+    for row in rows.as_array().unwrap() {
+        assert_eq!(row["done"], json!(1));
+    }
+}
+
+#[test]
+fn bulk_where_is_checked() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap();
+
+    let both = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","ids":["x"],"where":{"query":"tasks"},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(both.code, "invalid");
+
+    let missing = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"nope"},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(missing.code, "not-found");
+
+    let bad_params = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"tasks","params":{"filter":3}},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(bad_params.code, "invalid");
+
+    let no_match = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"tasks","params":{"filter":"all","q":"zzz-no-match"}},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(no_match.code, "invalid");
+    assert!(no_match.message.contains("matches nothing"));
+}
+
+#[test]
+fn bulk_where_hidden_query_is_not_found_for_clients() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    run(&mut h, CHANGE, "todo.create", json!({"title":"A"})).unwrap();
+
+    let hidden = bulk(
+        &mut h,
+        CHANGE,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"badge"},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_eq!(hidden.code, "not-found");
+
+    let app = bulk(
+        &mut h,
+        Caller::App,
+        json!({"plugin":"todo","op":"toggle","where":{"query":"badge"},"args":{"done":true}}),
+        false,
+        false,
+    )
+    .unwrap_err();
+    assert_ne!(app.code, "not-found");
 }

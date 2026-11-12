@@ -185,6 +185,15 @@ pub struct OperationDef {
     /// command line, agents). The UI, schedules and interop still reach it.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub cli: bool,
+    /// The operation works on one item named by `id`, and the host may run
+    /// it on many items, once per id (`plugin.run_bulk`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bulk: bool,
+    /// A declared operation that does the same for many items in one call:
+    /// it takes `ids` (a list of ids) plus the same other arguments, and
+    /// commits all or nothing. Needs `bulk: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulk_op: Option<String>,
 }
 
 impl Default for OperationDef {
@@ -197,6 +206,8 @@ impl Default for OperationDef {
             result: None,
             examples: Vec::new(),
             cli: true,
+            bulk: false,
+            bulk_op: None,
         }
     }
 }
@@ -726,6 +737,38 @@ impl Manifest {
             if op.confirm.as_ref().is_some_and(|c| c.trim().is_empty()) {
                 return bad(format!("operation `{name}`: `confirm` must not be empty"));
             }
+            if op.bulk_op.is_some() && !op.bulk {
+                return bad(format!("operation `{name}`: `bulk_op` needs `bulk: true`"));
+            }
+            if op.bulk && op.effect_of(name) == Effect::Read {
+                return bad(format!(
+                    "operation `{name}`: a read-only operation can't be bulk"
+                ));
+            }
+            if op.bulk && op.params.as_ref().is_some_and(|p| !p.contains_key("id")) {
+                return bad(format!("operation `{name}`: a bulk operation takes `id`"));
+            }
+            if let Some(many) = &op.bulk_op {
+                if many == name {
+                    return bad(format!(
+                        "operation `{name}`: `bulk_op` must name another operation"
+                    ));
+                }
+                let Some(target) = self.operations.get(many) else {
+                    return bad(format!(
+                        "operation `{name}`: bulk_op `{many}` is not a declared operation"
+                    ));
+                };
+                if target
+                    .params
+                    .as_ref()
+                    .is_some_and(|p| !p.get("ids").is_some_and(|spec| spec.ty == ParamType::Json))
+                {
+                    return bad(format!(
+                        "operation `{many}`: takes `ids` (type json) as the bulk_op of `{name}`"
+                    ));
+                }
+            }
         }
         for (name, query) in &self.queries {
             for (param, spec) in &query.types {
@@ -884,12 +927,20 @@ mod tests {
         json!({
             "id": "sample", "name": "Sample", "version": "1.0.0", "api": API_VERSION,
             "storage": {"version": 1, "tables": [
-                {"name": "items", "columns": [{"name": "title", "type": "text"}]},
+                {"name": "items", "columns": [
+                    {"name": "title", "type": "text"},
+                    {"name": "text", "type": "text"}
+                ]},
                 {"name": "steps", "columns": [{"name": "item_id", "type": "text"}]}
             ]},
             "queries": {
                 "index_items": {"sql": "SELECT id, title FROM items WHERE _deleted IS NULL AND id IN (SELECT value FROM json_each(?1))", "params": ["ids"]},
                 "all": {"sql": "SELECT id FROM items", "params": []}
+            },
+            "operations": {
+                "ok": {},
+                "mark": { "params": { "id": { "type": "id", "required": true } } },
+                "mark_many": { "params": { "ids": { "type": "json", "required": true } } }
             }
         })
     }
@@ -1073,7 +1124,7 @@ mod tests {
     }
 
     fn check(edit: impl FnOnce(&mut Value)) -> Option<String> {
-        let mut manifest = fixture();
+        let mut manifest = base();
         edit(&mut manifest);
         let bytes = serde_json::to_vec(&manifest).unwrap();
         match Manifest::parse(&bytes) {
@@ -1349,5 +1400,115 @@ mod tests {
                 serde_json::json!({"types":["text/plain"],"op":"ok","arg":"text","extra":"x"});
         })
         .is_some());
+    }
+
+    #[test]
+    fn old_manifests_still_load() {
+        assert_eq!(check(|_| {}), None);
+        let m = Manifest::parse(&serde_json::to_vec(&base()).unwrap()).unwrap();
+        assert!(!m.operations["mark"].bulk);
+        assert!(m.operations["mark"].bulk_op.is_none());
+        let default = OperationDef::default();
+        assert!(!default.bulk);
+        assert!(default.bulk_op.is_none());
+        let value = serde_json::to_value(m).unwrap();
+        assert!(value["operations"]["mark"].get("bulk").is_none());
+        assert!(value["operations"]["mark"].get("bulk_op").is_none());
+    }
+
+    #[test]
+    fn bulk_fields_load() {
+        assert_eq!(
+            check(|m| {
+                m["operations"]["mark"]["bulk"] = json!(true);
+                m["operations"]["mark"]["bulk_op"] = json!("mark_many");
+            }),
+            None
+        );
+        let mut value = base();
+        value["operations"]["mark"]["bulk"] = json!(true);
+        value["operations"]["mark"]["bulk_op"] = json!("mark_many");
+        let m = Manifest::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let value = serde_json::to_value(m).unwrap();
+        assert_eq!(value["operations"]["mark"]["bulk"], true);
+        assert_eq!(value["operations"]["mark"]["bulk_op"], "mark_many");
+    }
+
+    #[test]
+    fn bulk_fields_are_checked() {
+        let cases = [
+            (
+                json!({"bulk_op": "mark_many"}),
+                "`bulk_op` needs `bulk: true`",
+            ),
+            (
+                json!({"bulk": true, "effect": "read"}),
+                "a read-only operation can't be bulk",
+            ),
+            (
+                json!({"bulk": true, "params": {"text": {"type": "string"}}}),
+                "a bulk operation takes `id`",
+            ),
+            (
+                json!({"bulk": true, "bulk_op": "mark"}),
+                "`bulk_op` must name another operation",
+            ),
+            (
+                json!({"bulk": true, "bulk_op": "nope"}),
+                "bulk_op `nope` is not a declared operation",
+            ),
+        ];
+        for (fields, expected) in cases {
+            let error = check(|m| {
+                for (key, value) in fields.as_object().unwrap() {
+                    m["operations"]["mark"][key] = value.clone();
+                }
+            })
+            .unwrap();
+            assert!(
+                error.contains(&format!("operation `mark`: {expected}")),
+                "{error}"
+            );
+        }
+        for params in [json!({"ids": {"type": "string"}}), json!({})] {
+            let error = check(|m| {
+                m["operations"]["mark"]["bulk"] = json!(true);
+                m["operations"]["mark"]["bulk_op"] = json!("mark_many");
+                m["operations"]["mark_many"]["params"] = params.clone();
+            })
+            .unwrap();
+            assert!(
+                error.contains(
+                    "operation `mark_many`: takes `ids` (type json) as the bulk_op of `mark`"
+                ),
+                "{error}"
+            );
+        }
+        assert!(check(|m| m["operations"]["mark"]["bulk"] = json!("yes")).is_some());
+    }
+
+    #[test]
+    fn untyped_bulk_operations_load() {
+        assert_eq!(
+            check(|m| {
+                m["operations"]["mark"]["bulk"] = json!(true);
+                m["operations"]["mark"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("params");
+            }),
+            None
+        );
+        assert_eq!(
+            check(|m| {
+                m["operations"]["mark"]["bulk"] = json!(true);
+                m["operations"]["mark"]["bulk_op"] = json!("mark_many");
+                m["operations"]["mark_many"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("params");
+            }),
+            None
+        );
     }
 }

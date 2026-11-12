@@ -32,6 +32,21 @@ To change a page, choose **Edit page**:
 as the To-do list, board and matrix views. Pin the apps you use most so they
 stay in the sidebar.
 
+## Select many items
+
+Lists that support bulk actions show a **Select** button. In select mode:
+
+- Click **Select**, then click rows to mark them.
+- On desktop, use **⌘/Ctrl-click** to start selecting from a row.
+- Use **Shift-click** to select a range.
+- Use **⌘A/Ctrl+A** to select all visible rows in that list.
+- Press **Escape** to leave select mode.
+- On a phone, long-press a row to start select mode.
+
+Bulk actions run up to 500 items at a time. If an action reports
+"10 done, 2 failed", those two failed rows stay selected so you can retry or
+change the action. When available, the toast shows **Undo** for ten seconds.
+
 ## Search and commands
 
 Press **⌘K** (Ctrl+K on other keyboards), or choose **Search**, to find items

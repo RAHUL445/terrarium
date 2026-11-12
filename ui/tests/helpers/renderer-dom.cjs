@@ -20,6 +20,12 @@ function rendererHarness(environment = {}) {
       else { node.parent = this; this.children.push(node); }
     } }
     get childNodes() { return this.children; }
+    prepend(...nodes) {
+      for (const node of nodes.reverse()) {
+        node.parent = this;
+        this.children.unshift(node);
+      }
+    }
     replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
     setAttribute(name, value) { this.attrs[name] = value; }
     removeAttribute(name) { delete this.attrs[name]; }

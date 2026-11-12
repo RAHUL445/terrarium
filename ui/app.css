@@ -624,6 +624,13 @@ select.pp-input { padding: 0 8px; }
 .pp-group { list-style: none; padding: 14px 16px 6px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); }
 .pp-group:first-child { padding-top: 10px; }
 .pp-group.pp-tone-danger { color: var(--danger); }
+.pp-select-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 0 8px; }
+.pp-select-list[data-selecting="true"] > .pp-select-bar { position: sticky; top: 0; z-index: 2; background: var(--surface); border-bottom: 1px solid var(--border); padding: 8px; }
+.pp-select-count { font-weight: 600; margin-right: auto; }
+.pp-select-note { flex-basis: 100%; margin: 0; color: var(--muted); font-size: .875rem; }
+.pp-list-item:has(> .pp-select-check) { display: flex; align-items: flex-start; }
+.pp-select-check { flex: none; width: 20px; height: 20px; margin: 16px 0 0 12px; }
+.pp-list-item[data-pp-selected="true"] { background: var(--accent-soft); }
 .pp-list-item:has(> .pp-item) { padding: 0; }
 .pp-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px; min-height: 52px; }
 input.pp-item-check { appearance: none; -webkit-appearance: none; display: grid; place-content: center; margin: 1px 0 0; width: 20px; height: 20px; flex: none; border: 1.5px solid var(--check-color, var(--muted)); border-radius: 6px; background: var(--surface); cursor: pointer; }

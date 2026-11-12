@@ -314,6 +314,7 @@ command, and `terra preview` gets the same commands for free.
   internal job targets (`habits.plan_reminders`,
   `voice.transcribe_pending`) `"cli": false` instead.
 - Host commands so far: `app.describe`, `plugin.list`,
+  `plugin.run_bulk`,
   `space.list/create/rename/remove/restore`,
   `page.list/get/widgets/create/update/save/remove`, `search.query`,
   `schedule.list/runs/run_now/enable/disable`. `page.place/move/unplace`,
@@ -493,6 +494,44 @@ clients, tokens, scopes and audit log.
   come back, as on any restart.
 - **Must be turned on.** Serve exits if command-line control is off. It
   can't turn it on: that stays a choice made in the app.
+
+### Bulk operations as built
+
+- `plugin.run_bulk` runs one plugin action on many items (max 500).
+- It supports two selection modes:
+  - `ids`: explicit item ids.
+  - `where`: a declared query of the same plugin; the host uses each
+    returned row's `id`.
+- The target action must declare `bulk: true`.
+- Execution path:
+  - Without `bulk_op`: one operation call per item id, each with its own
+    commit and per-item success/error in the report.
+  - With `bulk_op`: one operation call for the whole set (`ids`), one
+    commit for all items.
+- Limits stay host-level:
+  - 500 items per bulk command.
+  - 5,000 host calls per operation invocation; a single bulk-op run must
+    stay within that budget.
+- Confirmation and dry run:
+  - Outside callers still need confirmation for destructive target actions.
+  - Confirmation text includes the item count when known.
+  - Dry runs keep nothing and report what would succeed/fail.
+- CLI surface:
+  - `terrarium run <plugin.op> --ids ...`
+  - `terrarium run <plugin.op> --where <query> [--where-params ...]`
+  - Bulk commands report failed items and return exit code 1 when any item
+    fails.
+- MCP surface:
+  - `plugin.run_bulk` appears as `plugin_run_bulk`.
+  - Its schema exposes `ids` as a bounded string array and `where` as
+    `{query, params}`.
+  - Destructive checks use the target action (`todo.delete`, and so on),
+    not `plugin.run_bulk` itself.
+- Audit:
+  - Recent activity stores one entry per bulk run, with target action and
+    item count.
+  - Changed rows are still recorded as normal row-level change summaries.
+- No WIT, sync format, or storage schema changes were required for bulk.
 
 ## 4. Decisions
 

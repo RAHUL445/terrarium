@@ -95,6 +95,9 @@ pub struct CommandInfo {
     /// Only the app itself can see or call it.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// It can run on many items at once through `plugin.run_bulk`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub bulk: bool,
 }
 
 /// A failed command: a stable `code` and a message for people.
@@ -114,11 +117,11 @@ impl CommandError {
         }
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         CommandError::new("invalid", message)
     }
 
-    fn not_found(kind: Kind, id: &str) -> Self {
+    pub(crate) fn not_found(kind: Kind, id: &str) -> Self {
         let kind = match kind {
             Kind::Query => "query",
             Kind::Action => "action",
@@ -193,7 +196,7 @@ fn service(
         .map_err(failed)
 }
 
-fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, CommandError> {
+pub(crate) fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a str, CommandError> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| CommandError::invalid(format!("`{key}` must be text")))
@@ -310,6 +313,23 @@ const HOST_COMMANDS: &[HostCommand] = &[
                 }))
                 .collect::<Vec<_>>()))
         },
+    },
+    HostCommand {
+        id: "plugin.run_bulk",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Run one plugin action on many items, at most 500. Give the items as `ids`, or as `where`: a query of the same plugin whose rows' ids are used. The action must be marked bulk; each item gets the same arguments plus its id. Returns how many were done and what failed for each item.",
+        confirm: None,
+        params: &[
+            ("plugin", ParamType::String, true, "Plugin id, e.g. todo"),
+            ("op", ParamType::String, true, "A bulk action of that plugin, e.g. toggle"),
+            ("ids", ParamType::Json, false, "Item ids, a list of at most 500"),
+            ("where", ParamType::Json, false, "Instead of ids: {\"query\": name, \"params\": {...}} — a query of the same plugin whose rows' ids are used"),
+            ("args", ParamType::Json, false, "Other arguments, the same for every item"),
+            ("dry_run", ParamType::Boolean, false, "Report what it would change and keep nothing"),
+        ],
+        run: |_, _, _, _| unreachable!("answered by invoke"),
     },
     HostCommand {
         id: "space.list",
@@ -739,6 +759,7 @@ impl HostCommand {
             space: self.space,
             examples: Vec::new(),
             hidden: false,
+            bulk: false,
         }
     }
 }
@@ -749,7 +770,7 @@ impl HostCommand {
 /// callbacks (named `on_…`). Job targets stay visible: some, like Reports'
 /// `generate`, are also things people run themselves; a plugin marks the
 /// purely internal ones `cli: false`.
-fn operation_hidden(m: &Manifest, op: &str) -> bool {
+pub(crate) fn operation_hidden(m: &Manifest, op: &str) -> bool {
     m.operations.get(op).is_some_and(|d| !d.cli) || op.starts_with("on_")
 }
 
@@ -770,10 +791,11 @@ fn operation_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
         space: true,
         examples: op.examples.clone(),
         hidden: operation_hidden(m, name),
+        bulk: op.bulk,
     })
 }
 
-fn query_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
+pub(crate) fn query_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
     let q = m.queries.get(name)?;
     let context: Vec<String> = q
         .params
@@ -810,6 +832,7 @@ fn query_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
         space: true,
         examples: Vec::new(),
         hidden: !q.cli,
+        bulk: false,
     })
 }
 
@@ -850,7 +873,7 @@ fn find(host: &PluginHost, kind: Kind, id: &str) -> Option<CommandInfo> {
 }
 
 /// Checks outside callers' arguments against `params`.
-fn check_args(
+pub(crate) fn check_args(
     params: &BTreeMap<String, ParamSpec>,
     context: &[String],
     args: &Map<String, Value>,
@@ -935,7 +958,7 @@ fn check_value(name: &str, spec: &ParamSpec, v: &Value) -> Result<(), CommandErr
 }
 
 /// Fills in the clock parameters a query takes and the caller left out.
-fn fill_context(host: &PluginHost, context: &[String], values: &mut Map<String, Value>) {
+pub(crate) fn fill_context(host: &PluginHost, context: &[String], values: &mut Map<String, Value>) {
     let now = now_ms();
     let tz = host.timezone().to_string();
     for name in context {
@@ -1053,6 +1076,9 @@ pub fn invoke_with(
         changes: Vec::new(),
         dry_run: false,
     };
+    if kind == Kind::Action && id == crate::bulk::BULK_COMMAND {
+        return crate::bulk::invoke(host, caller, space, &args, options);
+    }
     if options.dry_run && kind == Kind::Action && info.owner == Owner::Host {
         return Err(CommandError::invalid(
             "A dry run works only for plugin actions.",
@@ -1450,5 +1476,34 @@ mod tests {
     #[test]
     fn empty_sources_give_nothing() {
         assert_eq!(merge_fair(vec![], "x", 10), (vec![], false));
+    }
+
+    #[test]
+    fn command_info_only_serializes_bulk_for_bulk_operations() {
+        let manifest = Manifest::parse(
+            &serde_json::to_vec(&json!({
+                "id": "items", "name": "Items", "version": "0.1.0",
+                "api": crate::manifest::API_VERSION,
+                "storage": { "version": 1, "tables": [
+                    { "name": "items", "columns": [{ "name": "text", "type": "text" }] }
+                ] },
+                "operations": {
+                    "mark": { "bulk": true },
+                    "create": {}
+                },
+                "queries": { "all": { "sql": "SELECT * FROM items" } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let bulk = serde_json::to_value(operation_info(&manifest, "mark").unwrap()).unwrap();
+        assert_eq!(bulk["bulk"], true);
+        for command in [
+            operation_info(&manifest, "create").unwrap(),
+            query_info(&manifest, "all").unwrap(),
+            HOST_COMMANDS[0].info(),
+        ] {
+            assert!(serde_json::to_value(command).unwrap().get("bulk").is_none());
+        }
     }
 }

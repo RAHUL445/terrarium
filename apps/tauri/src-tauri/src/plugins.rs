@@ -262,7 +262,7 @@ pub fn command(
     if kind == Kind::Action {
         if id.starts_with("space.") {
             let _ = app.emit("spaces-changed", ());
-        } else if id.starts_with("schedule.") {
+        } else if id.starts_with("schedule.") || id == "plugin.run_bulk" {
             let _ = app.emit("data-changed", ());
         }
     }

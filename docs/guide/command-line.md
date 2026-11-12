@@ -100,6 +100,9 @@ terrarium run todo.create --title "Call Sam tomorrow 6pm #work"
 terrarium run todo.update --id <id> --priority 2
 terrarium run todo.create --title "Try it" --dry-run   # show what would change, keep nothing
 terrarium run todo.delete --id <id>                    # asks first; --yes to skip the question
+terrarium run todo.toggle --done true --ids a,b,c
+terrarium run todo.toggle --done true --ids @todo-ids.txt
+terrarium run todo.toggle --done true --where tasks --where-params '{"filter":"today"}'
 
 terrarium page list
 terrarium page create Planning
@@ -141,6 +144,12 @@ stops with exit code 7; pass `--yes` only after approving that removal.
 - **Destructive actions** (deleting, removing, clearing) ask you to confirm.
   Without a terminal to ask in, they stop with exit code 7 unless you add
   `--yes`. Run with `--dry-run` first to see what would happen.
+- **Bulk actions** use `--ids` or `--where` (never both). `--ids` may be a
+  comma list, whitespace-separated text, or `@file.txt`. `--where` runs one
+  declared query and uses the `id` from each row, up to 500 items.
+- **Partial bulk failures** still print the failed item ids and errors. The
+  summary line is the command result, and the command exits with code 1 when
+  any item fails.
 
 ## Use it from an AI agent (MCP)
 
@@ -181,6 +190,10 @@ Without `TERRA_TOKEN` it uses the token `terrarium login` saved.
   the agent can ask you directly, Terrarium asks through it. Otherwise the
   agent has to ask you and then pass `confirmed: true`; the agent's own
   permission prompt is the place to say no.
+- **Bulk tool**: `plugin_run_bulk` runs one bulk-capable plugin action on
+  many items (`ids`) or on query matches (`where`). If the target action is
+  destructive, it needs confirmation the same way destructive single-item
+  tools do.
 - **Changes** to installed plugins update the agent's tool list while it
   runs. If you quit Terrarium, the tools report that the app isn't open
   and work again once it is.
@@ -233,9 +246,10 @@ terrarium serve          # runs until the app opens; Ctrl-C stops it
 
 **Settings → Developer → Recent activity** lists what clients did: when,
 which client, the command, whether it worked, whether it was a dry run, and
-how many rows it changed. The log keeps the changed rows (plugin, table,
-row and operation) but never the arguments or values. The list and the
-client settings stay on this Mac; they don't sync.
+how many rows it changed. A bulk run appears as one entry with the bulk
+target (for example `todo.toggle`) and item count. The log keeps the changed
+rows (plugin, table, row and operation) but never the arguments or values.
+The list and the client settings stay on this Mac; they don't sync.
 
 ## Security
 

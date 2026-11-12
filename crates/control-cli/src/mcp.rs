@@ -63,6 +63,7 @@ struct Tool {
     takes_space: bool,
     takes_dry_run: bool,
     takes_confirmed: bool,
+    bulk_ops: Vec<String>,
 }
 
 impl Tool {
@@ -83,6 +84,11 @@ fn tools_from(all: &Value, elicit: bool) -> BTreeMap<String, Tool> {
         .filter(|c| c["kind"] == "action")
         .map(|c| base(c))
         .collect();
+    let bulk_ops: Vec<String> = commands
+        .iter()
+        .filter(|c| c["kind"] == "action" && c["bulk"] == true)
+        .filter_map(|c| c["id"].as_str().map(str::to_string))
+        .collect();
     let mut tools = BTreeMap::new();
     for c in commands {
         let id = c["id"].as_str().unwrap_or_default();
@@ -98,10 +104,19 @@ fn tools_from(all: &Value, elicit: bool) -> BTreeMap<String, Tool> {
         let tool = Tool {
             takes_space: c["space"] == true && !declared("space"),
             takes_dry_run: kind == "action" && c["owner"] == "plugin" && !declared("dry_run"),
-            takes_confirmed: c["effect"] == "destructive" && !elicit && !declared("confirmed"),
+            takes_confirmed: if id == "plugin.run_bulk" {
+                !elicit
+            } else {
+                c["effect"] == "destructive" && !elicit && !declared("confirmed")
+            },
             kind,
             id: id.to_string(),
             info: c.clone(),
+            bulk_ops: if id == "plugin.run_bulk" {
+                bulk_ops.clone()
+            } else {
+                Vec::new()
+            },
         };
         tools.insert(name, tool);
     }
@@ -161,6 +176,36 @@ fn input_schema(tool: &Tool) -> Value {
             required.push(json!(name));
         }
     }
+    if tool.id == "plugin.run_bulk" {
+        properties.insert(
+            "ids".into(),
+            json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "maxItems": 500,
+                "description": "Item ids to run on, up to 500.",
+            }),
+        );
+        properties.insert(
+            "where".into(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "params": { "type": "object" }
+                },
+                "required": ["query"],
+                "description": "Select items from a declared query.",
+            }),
+        );
+        properties.insert(
+            "args".into(),
+            json!({
+                "type": "object",
+                "description": "Arguments for each action call.",
+            }),
+        );
+    }
     if tool.takes_space {
         properties.insert(
             "space".into(),
@@ -218,6 +263,17 @@ fn description(tool: &Tool) -> String {
                  dry_run: true shows what it would change.",
             );
         }
+    }
+    if tool.id == "plugin.run_bulk" {
+        let listed = if tool.bulk_ops.is_empty() {
+            "none".to_string()
+        } else {
+            tool.bulk_ops.join(", ")
+        };
+        text.push_str(&format!("\n\nBulk actions: {listed}."));
+        text.push_str(
+            " If the action is destructive, ask the user first and pass confirmed: true only if they agree.",
+        );
     }
     if let Some(example) = info["examples"].as_array().and_then(|e| e.first()) {
         text.push_str(&format!("\n\nExample arguments: {example}"));
@@ -417,12 +473,41 @@ impl Session {
             // A command that declares `confirmed` itself keeps it.
             false => args.get("confirmed") == Some(&Value::Bool(true)),
         };
+        let mut destructive = tool.destructive();
+        let mut question = tool.info["confirm"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Run `{}`? It removes or hides data.", tool.id));
+        if tool.id == "plugin.run_bulk" {
+            if let (Some(plugin), Some(op)) = (
+                args.get("plugin").and_then(Value::as_str),
+                args.get("op").and_then(Value::as_str),
+            ) {
+                let target = format!("{plugin}.{op}");
+                if let Some(target_tool) = self
+                    .tools
+                    .values()
+                    .find(|candidate| candidate.kind == "action" && candidate.id == target)
+                {
+                    destructive = target_tool.destructive();
+                    if destructive {
+                        question = target_tool.info["confirm"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| {
+                                format!("Run `{target}`? It removes or hides data.")
+                            });
+                        if let Some(count) = args.get("ids").and_then(Value::as_array).map(Vec::len)
+                        {
+                            let noun = if count == 1 { "item" } else { "items" };
+                            question.push_str(&format!(" This applies to {count} {noun}."));
+                        }
+                    }
+                }
+            }
+        }
         let mut confirmed = false;
-        if tool.destructive() && !dry_run {
-            let question = tool.info["confirm"]
-                .as_str()
-                .map(str::to_string)
-                .unwrap_or_else(|| format!("Run `{}`? It removes or hides data.", tool.id));
+        if destructive && !dry_run {
             if self.elicit {
                 match self.ask(&question, &tool.id) {
                     Ok(true) => confirmed = true,
@@ -653,8 +738,19 @@ mod tests {
               "examples": [{ "title": "Call Sam" }] },
             { "id": "todo.delete", "kind": "action", "owner": "plugin", "effect": "destructive", "space": true,
               "confirm": "Move this task to the trash?",
+              "bulk": true,
               "params": { "id": { "type": "id", "required": true } } },
             { "id": "notes.loose", "kind": "action", "owner": "plugin", "effect": "write", "space": true },
+            { "id": "plugin.run_bulk", "kind": "action", "owner": "host", "effect": "write", "space": true,
+              "description": "Run one plugin action on many items.",
+              "params": {
+                  "plugin": { "type": "string", "required": true },
+                  "op": { "type": "string", "required": true },
+                  "ids": { "type": "json" },
+                  "where": { "type": "json" },
+                  "args": { "type": "json" },
+                  "dry_run": { "type": "boolean" }
+              } },
             { "id": "page.create", "kind": "action", "owner": "host", "effect": "write", "space": true,
               "params": { "title": { "type": "string", "required": true } } }
         ])
@@ -669,6 +765,7 @@ mod tests {
             [
                 "notes_loose",
                 "page_create",
+                "plugin_run_bulk",
                 "space_list",
                 "todo_create",
                 "todo_delete",
@@ -729,6 +826,21 @@ mod tests {
         assert!(delete["inputSchema"]["properties"]
             .get("confirmed")
             .is_none());
+    }
+
+    #[test]
+    fn bulk_tool_schema() {
+        let tools = tools_from(&describe(), false);
+        assert!(tools["plugin_run_bulk"].takes_confirmed);
+        let bulk = tool_json("plugin_run_bulk", &tools["plugin_run_bulk"]);
+        let schema = &bulk["inputSchema"];
+        assert_eq!(schema["properties"]["ids"]["type"], "array");
+        assert_eq!(schema["properties"]["ids"]["maxItems"], 500);
+        assert_eq!(schema["properties"]["where"]["type"], "object");
+        assert_eq!(schema["properties"]["args"]["type"], "object");
+        let text = bulk["description"].as_str().unwrap();
+        assert!(text.contains("Bulk actions: todo.delete"));
+        assert!(text.contains("pass confirmed: true"));
     }
 
     // ---- A session against a fake app ----
@@ -913,6 +1025,37 @@ mod tests {
         assert_eq!(invokes[0]["args"], json!({ "title": "Call Sam" }));
         assert_eq!(invokes[1]["confirmed"], true);
         assert_eq!(invokes[1]["args"], json!({ "id": "t1" }));
+    }
+
+    #[test]
+    fn bulk_destructive_needs_confirmation() {
+        let invokes = Arc::new(Mutex::new(Vec::new()));
+        let out = session(
+            &[
+                json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                        "params": { "protocolVersion": "2025-06-18", "capabilities": {} } }),
+                json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": { "name": "plugin_run_bulk",
+                                    "arguments": { "plugin": "todo", "op": "delete", "ids": ["t1", "t2"] } } }),
+                json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": { "name": "plugin_run_bulk",
+                                    "arguments": { "plugin": "todo", "op": "delete", "ids": ["t1", "t2"], "confirmed": true } } }),
+            ],
+            invokes.clone(),
+        );
+        assert_eq!(
+            by_id(&out, 2)["result"]["structuredContent"]["error"]["code"],
+            "needs-confirmation"
+        );
+        assert_eq!(by_id(&out, 3)["result"]["isError"], false);
+        let invokes = invokes.lock().unwrap();
+        assert_eq!(
+            invokes.len(),
+            1,
+            "unconfirmed bulk delete never reached the app"
+        );
+        assert_eq!(invokes[0]["id"], "plugin.run_bulk");
+        assert_eq!(invokes[0]["confirmed"], true);
     }
 
     #[test]

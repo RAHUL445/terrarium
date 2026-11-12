@@ -68,6 +68,7 @@ More components and keys:
 | `action.copy` | `{"copy": "{{row.copy_text}}", "success": "Copied"}`: puts the text on the clipboard |
 | `stat.note`, `stat.tone` | A line under the number, e.g. "▲ 3 vs last week"; `tone` `good` (green) or `bad` (red) |
 | `bar.layout: "columns"` | Vertical columns instead of horizontal bars (e.g. tasks per day). `bar` also takes `value_label` (a column shown instead of the number), `title` (a column used as tooltip and spoken label) and `empty` |
+| `list.select` | Bulk selection bar for list rows: `{label, actions: [{label, icon, variant, op, args, ask, confirm, success, undo}]}`. `{{count}}` is the number of selected rows; `{{value}}` is the value typed through `ask`. Actions are disabled above 500 selected rows. Rows need an `id` column (string or number) to be selectable. |
 | `list.layout: "plain"` | No box or row dividers, e.g. one featured card or lines of text |
 | `list.layout: "board"` / `"matrix"` | Groups one query result into three columns / two columns. Supply `column` (row key), `columns: [{value, label, description?}]` and an accessible `label`. Every row must match a declared column value. Empty columns retain their headings and counts; both layouts stack on narrow screens. Filtering, limits, actions and refresh use the normal list contract. |
 | `list.move` (board/matrix) | `{op, args, success, undo}`. Dragging a card (mouse, touch or pen) or using arrow keys on the card handle runs the operation; `{{value}}` is the lane value the card moved to. If the operation fails, the card snaps back. |
@@ -345,8 +346,12 @@ Every operation and query is also a command that the command line and agents can
 | `params` / `types` | Argument types: `string`, `text`, `integer`, `number`, `boolean`, `date` (`YYYY-MM-DD`), `time` (`HH:MM`), `id`, `enum` (with `values`), `json`. `required`, `description`, and `min`/`max` for numbers. An empty string is accepted for optional fields, meaning "clear". |
 | `result` | Fields of the returned object. |
 | `cli` | `false` keeps an operation or query away from outside callers. The UI, schedules and interop still reach it. |
+| `bulk` | `true` means the host may run this operation on many rows through `plugin.run_bulk`, once per id. The operation must take `id`. |
+| `bulk_op` | Name of another operation that runs the same change for many rows at once, taking `ids` and the same other arguments. The host enforces at most 5,000 host calls per operation, so keep this under roughly 10 storage calls per item at 500 items. |
 
 Outside callers can't pass arguments you didn't declare, and their types and required fields are checked before your code runs. Your own UI templates aren't checked, so a template can still pass extra fields.
+
+Read-only operations cannot be bulk. Plugins that use `bulk` or `bulk_op` need a host version that supports bulk operations; older hosts reject those manifest fields.
 
 The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup`, `ui`, `ref` and `link` are reserved for host commands.
 
@@ -432,6 +437,19 @@ Query result requirements:
 - The query must return `id`.
 - The query must return every key declared in `columns`.
 
+Example selection block from the To-do plugin:
+
+```json
+"select": {
+  "label": "Select tasks",
+  "actions": [
+    { "label": "Complete", "icon": "check", "op": "toggle", "args": { "done": true }, "success": "{{count}} tasks completed" },
+    { "label": "Add tag", "icon": "tag", "op": "add_tag", "ask": { "name": "tag", "label": "Tag", "title": "Add a tag to {{count}} tasks" }, "success": "Tagged {{count}} tasks" },
+    { "label": "Delete", "icon": "trash", "variant": "danger", "op": "delete", "confirm": "Move {{count}} tasks to the trash?", "success": "Moved {{count}} tasks to the trash", "undo": { "op": "restore", "success": "Restored {{count}} tasks" } }
+  ]
+}
+```
+
 ## Home and search entry
 
 Widget templates may set `home: {order: 10, collapsed: true}`. Lower order appears first (default 100); collapsed history stays available through a native disclosure. Existing templates retain their normal behavior.
@@ -459,6 +477,8 @@ A field or group can use `if: "{{form.period == custom}}"`. Conditions update on
 Mounted views expose asynchronous `flush()`, which drains autosave requests (including edits made while a request was running) and returns false when a save fails. Host navigation waits for it; closing a sheet with a failed save reopens the editor. `form.autosave` reports local save state and offers Retry save. Background flushing is best effort; native operating-system termination is not guaranteed to wait for it.
 
 A successful action may declare `undo: {op: "restore", args: {id: "{{row.id}}"}, success: "Restored"}`. The toast offers Undo for ten seconds. Undo uses the original item's arguments and original space bridge; plugins must supply a supported reversal operation. Trash remains available after the toast expires.
+
+Selection actions may also declare `undo`. After a bulk run, Undo runs one bulk call on the items that succeeded. The undo operation must also be bulk-capable, and `undo.args` is resolved once per run, so `{{row.*}}` is not available there.
 
 ## Pages and widget grid
 

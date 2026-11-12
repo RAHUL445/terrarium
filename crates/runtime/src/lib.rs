@@ -57,3 +57,4 @@ pub use terrarium_scheduler as scheduler;
 pub use theme::{contrast, Theme, THEME_EXT, THEME_FONTS, THEME_TOKENS};
 
 pub use refs::{ItemRef, MAX_RESOLVE};
+mod bulk;

@@ -337,6 +337,7 @@ function bridge(plugin) {
     },
     query: (name, params) => call("run_query", { space, plugin, name, params }),
     action: (op, args) => call("run_action", { space, plugin, op, args }),
+    bulk: (op, ids, args) => call("command", { kind: "action", id: "plugin.run_bulk", space, args: { plugin, op, ids, args } }),
     toast,
     aiStatus: async () => {
       const state = await call("service", { name: "ai_settings" });
@@ -2179,8 +2180,9 @@ function renderControl(state) {
   $("control-clients").replaceChildren(...(clients.length ? clients : [el("li", { class: "pp-empty" }, "No clients yet.")]));
   const audit = state.audit.map((a) => el("li", { class: "pp-list-item sched-row" },
     el("div", { class: "grow" },
-      el("div", {}, a.what, a.kind ? el("span", { class: "muted" }, ` · ${a.kind}`) : null),
+      el("div", {}, a.target || a.what, a.kind ? el("span", { class: "muted" }, ` · ${a.kind}`) : null),
       el("div", { class: "muted small" }, [when(a.at_ms), a.client || "unknown client",
+        a.items ? `${a.items} ${a.items === 1 ? "item" : "items"}` : null,
         a.dry_run ? "dry run, nothing kept" : null,
         a.change_count ? `${a.change_count} ${a.change_count === 1 ? "change" : "changes"}` : null].filter(Boolean).join(" · "))),
     statusChip(a.ok ? "done" : "failed"),
