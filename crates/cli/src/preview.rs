@@ -38,7 +38,11 @@ pub fn run(dirs: Vec<PathBuf>, port: u16, data: PathBuf) -> Result<(), String> {
         speech: None,
     })
     .map_err(|e| e.to_string())?;
-    host.set_ai_sealer(preview_sealer(&data)?);
+    let root = preview_root(&data)?;
+    host.set_ai_sealer(terrarium_runtime::ai::Sealer::new("device", &root));
+    // Mirrors the desktop: attachments are sealed with a key derived from the
+    // same root, so preview can store and show files without pairing.
+    host.set_blob_key(terrarium_runtime::blobs::BlobKey::new("device", &root));
     host.set_automation_context(true);
     host.enable_http()?;
     let mut stamps = vec![0u128; dirs.len()];
@@ -103,7 +107,7 @@ fn now_ms() -> u64 {
 }
 
 /// The preview's data folder keeps its own sealing root.
-fn preview_sealer(data: &Path) -> Result<terrarium_runtime::ai::Sealer, String> {
+fn preview_root(data: &Path) -> Result<[u8; 32], String> {
     let path = data.join("preview-secrets.key");
     let root: [u8; 32] = match std::fs::read(&path) {
         Ok(bytes) if bytes.len() == 32 => bytes.try_into().expect("32 bytes"),
@@ -114,7 +118,7 @@ fn preview_sealer(data: &Path) -> Result<terrarium_runtime::ai::Sealer, String> 
             root
         }
     };
-    Ok(terrarium_runtime::ai::Sealer::new("device", &root))
+    Ok(root)
 }
 
 /// Runs queued AI requests inline (the preview has one thread).

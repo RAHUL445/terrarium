@@ -3,7 +3,7 @@ use crate::plugins::Plugins;
 use serde_json::Value;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
-use terrarium_net::oauth::{authorize, Cancel, OAuthConfig};
+use terrarium_runtime::net::oauth::{authorize, Cancel, OAuthConfig};
 
 #[derive(Default)]
 pub struct Pending(pub Mutex<Option<Cancel>>);
@@ -102,7 +102,7 @@ pub async fn vault_sign_in(
             {
                 Ok(())
             } else {
-                Err(terrarium_net::NetError {
+                Err(terrarium_runtime::net::NetError {
                     code: "cancelled".into(),
                     message: "Sign-in was cancelled.".into(),
                     temporary: false,

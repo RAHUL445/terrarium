@@ -60,6 +60,7 @@ pub async fn export_space(
             "space.export",
             Some(space),
             json!({"path": path, "include_trash": include_trash}),
+            Some(&app),
         )?;
         serde_json::from_value(result).map_err(err)
     })

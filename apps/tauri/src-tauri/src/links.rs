@@ -112,12 +112,7 @@ fn parse_share(url: &tauri::Url) -> Result<Link, String> {
     if url.as_str().len() > 40_000 {
         return Err("link is too long".into());
     }
-    let segments = url
-        .path_segments()
-        .ok_or_else(|| "link path is invalid".to_string())?
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    if !segments.is_empty() {
+    if !url.path().trim_matches('/').is_empty() {
         return Err("share path must be empty".into());
     }
     let mut text = None::<String>;
@@ -331,10 +326,32 @@ mod tests {
             "terrarium://share?type=text/plain",
             "terrarium://share?text=%20%20%20&type=text/plain",
             "terrarium://share?text=ok&type=image%2Fpng",
+            "terrarium://share/todo?text=ok",
+            "terrarium://share/%2F?text=ok",
             &text_10001,
         ] {
             let url = tauri::Url::parse(raw).expect("url parses");
             assert!(parse(&url).is_err(), "{raw} should be rejected");
+        }
+    }
+
+    #[test]
+    fn shares_allow_empty_and_slash_only_paths() {
+        for raw in [
+            "terrarium://share?text=ok",
+            "terrarium://share/?text=ok",
+            "terrarium://share//?text=ok",
+        ] {
+            let url = tauri::Url::parse(raw).expect("url parses");
+            assert_eq!(
+                parse(&url).expect("link parses"),
+                Link::Share {
+                    text: "ok".into(),
+                    subject: None,
+                    kind: "text/plain".into(),
+                },
+                "{raw} should be accepted"
+            );
         }
     }
 

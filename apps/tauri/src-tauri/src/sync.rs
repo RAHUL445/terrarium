@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, Manager, State};
 use terrarium_core::DeviceId;
@@ -330,7 +331,7 @@ impl Sync {
                 stores.push(("Google Drive".into(), Box::new(DriveStore::new(creds))));
             }
             let transport = MultiStore::new(stores);
-            let (result, blobs) = plugins
+            let result = plugins
                 .with_host(|host| {
                     let report = member.engine.sync(host, &transport).map_err(err)?;
                     let local = host.blob_store();

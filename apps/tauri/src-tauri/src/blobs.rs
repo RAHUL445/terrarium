@@ -70,7 +70,7 @@ pub fn blob_save(
             return Ok(());
         };
         std::fs::write(path, bytes).map_err(|e| e.to_string())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(desktop))]
     {
