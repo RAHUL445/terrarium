@@ -568,7 +568,9 @@
       const weekday = (new Date(`${today}T12:00:00`).getDay() + 6) % 7;
       // Add to a UTC ms timestamp to get local wall-clock ms (for SQL dates).
       const offset = -new Date().getTimezoneOffset() * 60000;
-      return { state: this.state, $today: today, $weekday: weekday, $utc_offset_ms: offset, $config: this.config, $size: this.options.size || "regular", $page: this.page, ...extra };
+      const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
+      const phone = typeof navigator !== "undefined" ? /Android|iPhone|iPad/.test(navigator.userAgent || "") : touch;
+      return { state: this.state, $gesture: touch ? "Tap" : "Click", $remind_on: phone ? "phone" : "desktop", $today: today, $weekday: weekday, $utc_offset_ms: offset, $config: this.config, $size: this.options.size || "regular", $page: this.page, ...extra };
     }
 
     setState(path, value) {
@@ -605,7 +607,9 @@
     async act(action, scope) {
       if (!action || this.disposed) return false;
       if (action.navigate) {
-        await this.bridge.openItem?.(String(resolve(action.navigate.item, scope) || ""));
+        const target = resolve(action.navigate, scope);
+        if (target.plugin) await this.bridge.openPluginItem?.(String(target.plugin), String(target.item || ""));
+        else await this.bridge.openItem?.(String(target.item || ""));
         return true;
       }
       // Opens the host's History dialog for an item in this plugin.
@@ -650,8 +654,12 @@
         const result = await this.bridge.action(action.op, args);
         if (this.disposed) { this.bridge.changed(); return true; }
         const after = { ...scope, result };
+        const followup = action.followup;
+        const offer = followup && (followup.if === undefined || truthy(resolve(followup.if, after)));
         if (action.success) this.bridge.toast(resolve(action.success, after), "ok", action.undo ? {
           label: "Undo", run: () => this.act(resolve(action.undo, after), after),
+        } : offer ? {
+          label: resolve(followup.label, after), run: () => this.act(resolve(followup.action, after), after),
         } : null);
         // State changes once the operation succeeded, e.g. closing a sheet.
         for (const [path, value] of Object.entries(action.then || {})) this.setState(path, resolve(value, after));
@@ -965,7 +973,10 @@
         if (!spec.label) node.classList.add("pp-icon-button");
       }
       node.type = "button";
-      if (spec.aria_label) node.setAttribute("aria-label", resolve(spec.aria_label, scope));
+      if (spec.aria_label) {
+        node.setAttribute("aria-label", resolve(spec.aria_label, scope));
+        node.title = resolve(spec.aria_label, scope);
+      }
       node.addEventListener("click", async () => {
         if (spec.action?.confirm) {
           const question = resolve(spec.action.confirm, scope);
@@ -1132,6 +1143,7 @@
         loadDefaults();
       }
       if (spec.autosave) {
+        form.dataset.ppAutosave = "true";
         // Saves quietly a moment after typing stops, and when the form is
         // flushed (its sheet closes). No button, no toast.
         submit.hidden = true;
@@ -1492,7 +1504,17 @@
     },
 
     date(spec, scope) {
-      return field.call(this, spec, scope, "input", "date");
+      const node = field.call(this, spec, scope, "input", "date");
+      const input = node.querySelector("input");
+      const sync = () => {
+        input.type = input.value || document.activeElement === input ? "date" : "text";
+        input.placeholder = "No date";
+      };
+      input.addEventListener("focus", () => { input.type = "date"; });
+      input.addEventListener("blur", sync);
+      input.addEventListener("pp-value", sync);
+      sync();
+      return node;
     },
 
     time(spec, scope) {
@@ -1630,8 +1652,14 @@
         main.addEventListener("click", () => this.act(spec.action, scope));
       }
       main.append(el("span", "pp-item-title", title));
+      if (flag) main.append(el("span", "pp-meta", `${["", "Low", "Medium", "High"][Math.min(flag, 3)]} priority`));
       const subtitle = resolve(spec.subtitle, scope);
-      if (truthy(subtitle)) main.append(el("span", "pp-item-subtitle", subtitle));
+      // Snippets may end inside a blob reference after query truncation.
+      // Only display text is cleaned; markdown bodies retain their images.
+      const preview = typeof subtitle === "string" ? subtitle
+        .replace(/!?\[([^\]]*)\]\(terrarium:blob\/[^)]*(?:\)|$)/g, (_, name) => `📎 ${name || "Attachment"}`)
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, (_, name) => `[image: ${name || "Image"}]`) : subtitle;
+      if (truthy(preview)) main.append(el("span", "pp-item-subtitle", preview));
       const chips = (spec.chips || [])
         .map((c) => ({ text: resolve(c.text, scope), tone: resolve(c.tone, scope), icon: resolve(c.icon, scope) }))
         .filter((c) => truthy(c.text));
@@ -2309,7 +2337,7 @@
         button.setAttribute("aria-label", "Stop and save");
         button.replaceChildren(icon("stop"));
         title.textContent = "Recording 0:00";
-        status.textContent = `Tap to stop and save · up to ${clock(max * 1000)}`;
+        status.textContent = `${this.scope().$gesture} to stop and save · up to ${clock(max * 1000)}`;
         timer = this.schedule(() => {
           const ms = Date.now() - started;
           title.textContent = `Recording ${clock(ms)}`;
@@ -2417,6 +2445,7 @@
         bar.setAttribute("role", "toolbar");
         bar.setAttribute("aria-label", "Selection");
         if (!selecting) {
+          if (!currentRows.length) return;
           const select = el("button", "pp-button pp-ghost", "Select");
           select.type = "button";
           select.setAttribute("aria-label", resolve(spec.select.label || "Select items", scope));

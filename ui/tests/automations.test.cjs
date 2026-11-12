@@ -79,7 +79,7 @@ test('review shows transfer, condition-only fields, fixed values and remote guid
   const h = harness(); h.state.rules = [rule({ approved: false })]; await h.render();
   await button(h, 'Review').fire('click');
   const message = h.confirms[0].message;
-  for (const expected of ['Passed from To-do to Habits: day', 'Used only for conditions: tags', '"habit":"gym"', 'Review again on the device that runs automations']) assert.ok(message.includes(expected));
+  for (const expected of ['Passed from To-do to Habits: day', 'Used only for conditions: tags', 'habit = "gym"', 'Review again on the device that runs automations']) assert.ok(message.includes(expected));
   assert.equal(h.requests.find(r => r.name === 'rule_approve').args.digest, 'review-digest');
   h.requests.length = 0; h.answer = false; await button(h, 'Review').fire('click');
   assert.equal(h.requests.some(r => r.name === 'rule_approve'), false);
@@ -331,4 +331,22 @@ test('example fills a new draft, requires a habit id, and saves through review',
 test('example chooser is absent without available examples', async () => {
   const h = harness(); await openNew(h);
   assert.equal(control(h, 'Start from an example'), undefined);
+});
+
+
+test('consent renders conditions and fixed values as lines with editor labels', () => {
+  const h = harness();
+  h.state.events[0].description = 'Task done.';
+  h.state.operations[0].description = 'Check in.';
+  const message = h.run(`consentText(${JSON.stringify(rule())}, ${JSON.stringify(h.state)}, {
+    conditions: [{field: 'tags', op: 'contains', value: 'gym'}, {field: 'status', op: 'ne', value: 'done'}, {field: 'day', op: 'exists', value: false}],
+    fixed_args: {status: 'done', count: 2}, device: 'local'
+  })`);
+  assert.match(message, /^When To-do: Task done, Habits will Check in\./);
+  assert.doesNotMatch(message, /\.\./);
+  assert.ok(message.includes('Conditions: tags contains "gym"\nstatus is not "done"\nday is not set'));
+  assert.ok(message.includes('Fixed values: status = "done"\ncount = 2'));
+  const empty = h.run(`consentText(${JSON.stringify(rule())}, {}, {})`);
+  assert.ok(empty.includes('Conditions: None'));
+  assert.ok(empty.includes('Fixed values: None'));
 });

@@ -190,7 +190,7 @@ pub fn toggle(app: &AppHandle) {
         return;
     }
 
-    let window =
+    let mut builder =
         tauri::WebviewWindowBuilder::new(app, "quick", tauri::WebviewUrl::App("quick.html".into()))
             .title("Quick capture")
             .inner_size(520.0, 210.0)
@@ -198,8 +198,17 @@ pub fn toggle(app: &AppHandle) {
             .always_on_top(true)
             .skip_taskbar(true)
             .center()
-            .visible(false)
-            .build();
+            .visible(false);
+    if let Ok(profile) = crate::storage::profile_dir() {
+        if let Some(id) = crate::storage::webview_id(profile.as_deref(), cfg!(debug_assertions)) {
+            if let Ok(root) = crate::storage::root(app) {
+                builder = builder
+                    .data_directory(root.join("webview"))
+                    .data_store_identifier(id);
+            }
+        }
+    }
+    let window = builder.build();
     let Ok(window) = window else {
         return;
     };

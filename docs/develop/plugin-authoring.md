@@ -1238,3 +1238,29 @@ hosts reject these packages. Omitted `kind` still means Wasm with the existing
 `terrarium:plugin@0.1.0` API. To upgrade a simple plugin to Wasm, preserve its
 id and storage schema, increase its version, use the Wasm API, remove `do`
 bodies and ship a real component. Schema changes remain additive only.
+
+
+### Input wording and optional toast actions
+
+`{{$gesture}}` resolves to `Tap` for a coarse primary pointer and `Click`
+otherwise. `{{$remind_on}}` resolves to `phone` on Android/iOS and `desktop`
+on desktop; use it for a new reminder's device default, preserving the
+stored value when editing. Both are host-rendered values; plugins remain JSON.
+
+An action can offer a non-interrupting next step after success:
+
+```json
+{"op":"toggle","args":{"id":"{{row.id}}","done":true},"success":"Task updated",
+ "followup":{"label":"Add note","if":"{{result.ask_note}}",
+             "action":{"set":{"state.note_for":"{{result.ask_note}}"}}}}
+```
+
+`followup.if` is optional. It uses the operation's result and original scope.
+Undo takes precedence when both are declared. A followup action may navigate
+with `{ "navigate": { "plugin": "notes", "item": "{{result.id}}" } }`;
+omitting `plugin` retains navigation within the current plugin. The host
+opens only an installed plugin's first page, using the original space.
+
+Upgrade policy: install the updated host before these templates. Older hosts
+ignore `followup` (the save still works without a toast action), and lack the
+new wording/default bindings. No manifest, WIT or database schema changed.

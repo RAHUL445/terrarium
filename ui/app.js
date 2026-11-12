@@ -161,11 +161,11 @@ let settingsSection = "spaces";
 let spaces = [];
 let currentSpace = "personal";
 try {
-  currentSpace = localStorage.getItem("space") || "personal";
+  currentSpace = (window.terrariumStorage || localStorage).getItem("space") || "personal";
 } catch (_) {}
 let currentPage = null; // { plugin, page }
 let sessionStorageSafe;
-try { sessionStorageSafe = localStorage; } catch (_) { sessionStorageSafe = { getItem() { return null; }, setItem() {} }; }
+try { sessionStorageSafe = (window.terrariumStorage || localStorage); } catch (_) { sessionStorageSafe = { getItem() { return null; }, setItem() {} }; }
 const workspaceSession = new window.TerrariumSession(sessionStorageSafe);
 const locationKey = (plugin, page) => `${currentSpace}/page/${plugin}/${page}`;
 function rememberWorkspace() {
@@ -378,6 +378,11 @@ function bridge(plugin) {
     },
     today: localToday,
     open: (url) => call("open_external", { url }).catch((e) => toast(String(e), "error")),
+    openPluginItem: (target, item) => {
+      if (space !== currentSpace) return;
+      const page = pluginList.plugins.find(p => p.id === target)?.pages[0];
+      if (page) return openPage(target, page.id, { item });
+    },
     openItem: (item) => {
       if (space !== currentSpace) return;
       rails?.closeDrawer();
@@ -391,20 +396,26 @@ function bridge(plugin) {
 }
 
 // ---- History ----
+function historyFieldVisible(name) {
+  return !name.startsWith("_") && !["id", "task_key", "series"].includes(name);
+}
+function historyFieldLabel(name) {
+  return ({ created_at: "Created", updated_at: "Last edited", completed_at: "Completed", body: "Note", done_note: "Completion note" })[name] || name.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+}
 function historyLabel(version, thisDevice, now = Date.now(), previous = null) {
   const date = new Date(version.at_ms), today = new Date(now);
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
   const day = date.toDateString() === today.toDateString() ? "Today"
     : date.toDateString() === yesterday.toDateString() ? "Yesterday" : date.toLocaleDateString();
-  const columns = (version.columns || []).map((name) => name.replace(/_/g, " "));
+  const columns = (version.columns || []).filter(historyFieldVisible).map(historyFieldLabel);
   const changed = columns.slice(0, 4).join(", ") + (columns.length > 4 ? ` and ${columns.length - 4} more` : "");
   return {
     when: `${day} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`,
     who: version.device === thisDevice ? "This device" : "Another device",
     what: version.created ? "Created" : version.trashed ? "Moved to trash"
       : version.restored ? (previous?.in_trash ? "Restored from trash" : "Restored an earlier version")
-      : `Changed ${changed}`,
+      : changed ? `Changed ${changed}` : "Updated",
   };
 }
 
@@ -464,9 +475,11 @@ async function openHistory(plugin, space, { table, id, title }) {
       const changed = new Set(version.columns || []);
       const entries = Object.entries(result.values).sort(([a], [b]) => Number(changed.has(b)) - Number(changed.has(a)));
       for (const [name, value] of entries) {
-        const text = value == null || value === "" ? "—" : typeof value === "boolean" ? value ? "Yes" : "No" : String(value);
+        if (!historyFieldVisible(name)) continue;
+        const label = historyFieldLabel(name);
+        const text = value == null || value === "" ? "—" : /_at$/.test(name) && Number.isFinite(Number(value)) ? new Date(Number(value)).toLocaleString() : typeof value === "boolean" ? value ? "Yes" : "No" : String(value);
         const content = el("div", { class: "history-value" }, text.length > 2000 ? `${text.slice(0, 2000)}…` : text);
-        const row = el("div", { class: "history-field" }, el("strong", {}, name.replace(/_/g, " ")), content);
+        const row = el("div", { class: "history-field" }, el("strong", {}, label), content);
         if (text.length > 2000) {
           const show = el("button", { type: "button", onclick: () => { content.textContent = text; show.hidden = true; } }, "Show all");
           row.append(show);
@@ -558,7 +571,7 @@ function renderWorkspace() {
     $("workspace-context").removeAttribute("role");
     $("workspace-context").removeAttribute("aria-level");
   }
-  $("workspace-context").textContent = plugin ? `${plugin.name}${plugin.pages.length > 1 && page ? ` / ${page.title}` : ""}` : currentView === "home" ? pages?.title() || "Home" : currentView === "settings" ? `Settings / ${settingsSection[0].toUpperCase() + settingsSection.slice(1)}` : "Apps";
+  $("workspace-context").textContent = plugin ? `${plugin.name}${plugin.pages.length > 1 && page ? ` / ${page.title}` : ""}` : currentView === "home" ? pages?.title() || "Home" : currentView === "settings" ? `Settings / ${({ ai: "AI", devices: "Devices and sync" })[settingsSection] || settingsSection[0].toUpperCase() + settingsSection.slice(1)}` : "Apps";
   const actions = plugin?.quick_actions || [];
   const make = (action, primary) => el("button", { type: "button", class: primary ? "workspace-primary" : "", onclick: () => {
     $("workspace-actions").querySelector("details")?.removeAttribute("open");
@@ -585,8 +598,8 @@ async function refreshBackgroundStatus() {
 function updateWorkspaceStatus() {
   const put = (id, text) => { if ($(id).textContent !== text) $(id).textContent = text; };
   const status = backgroundStatus.space === currentSpace ? backgroundStatus : { active: 0, failed: 0 };
-  const unsaved = [...document.querySelectorAll('form[data-pp-unsaved="true"]')].some(form => form.getClientRects().length);
-  put("workspace-work", document.querySelector('.pp-recorder[data-state="recording"]') ? "Recording…" : document.querySelector('form[aria-busy="true"]') ? "Saving…" : unsaved ? "Unsaved changes" : "");
+  const unsaved = [...document.querySelectorAll('form[data-pp-unsaved="true"]:not([data-pp-autosave])')].some(form => form.getClientRects().length);
+  put("workspace-work", document.querySelector('.pp-recorder[data-state="recording"]') ? "Recording…" : document.querySelector('form[aria-busy="true"]:not([data-pp-autosave])') ? "Saving…" : unsaved ? "Unsaved changes" : "");
   const ai = rails?.conversations.get(currentSpace)?.pending ? 1 : 0;
   const jobs = [status.active ? `${status.active} ${status.active === 1 ? "job" : "jobs"} in progress` : "", ai ? "AI reply pending" : ""].filter(Boolean).join(" · ");
   put("workspace-jobs", jobs);
@@ -1660,7 +1673,7 @@ function renderAi(state, refill = true) {
   status.className = `ai-status ${st.ready ? "ok" : "warn"}`;
   status.textContent = st.ready
     ? `Ready · ${state.config.model}${st.queued || st.running ? ` · ${st.running} running, ${st.queued} waiting` : ""}`
-    : st.reason;
+    : st.reason === "Choose a model in Settings → AI." ? "Choose a model below." : st.reason;
   $("ai-key-set").hidden = !st.key_set;
   $("ai-key-hint").textContent = st.key_unreadable ? `${st.key_hint || "Key"} (not readable on this device yet)` : (st.key_hint || "");
   $("ai-key-save").textContent = st.key_set ? "Replace key" : "Save key";
@@ -1941,7 +1954,7 @@ function ruleSentence(rule, state) {
   const pluginName = id => pluginList.plugins.find(p => p.id === id)?.name || id;
   const trigger = state.events?.find(e => e.plugin === rule.trigger.plugin && e.event === rule.trigger.event);
   const action = state.operations?.find(o => o.plugin === rule.action.plugin && o.operation === rule.action.operation);
-  return `When ${pluginName(rule.trigger.plugin)}: ${trigger?.description || rule.trigger.event}${rule.filter?.length ? " (with conditions)" : ""} → ${pluginName(rule.action.plugin)}: ${action?.description || rule.action.operation}`;
+  return `When ${pluginName(rule.trigger.plugin)}: ${String(trigger?.description || rule.trigger.event).trim().replace(/\.+$/, "")}${rule.filter?.length ? " (with conditions)" : ""} → ${pluginName(rule.action.plugin)}: ${action?.description || rule.action.operation}`;
 }
 
 async function autoMutate(action) {
@@ -1974,17 +1987,27 @@ function ruleFromForm(form) {
     enabled: form.enabled };
 }
 
+const AUTO_CONDITION_OPS = [["eq", "is"], ["ne", "is not"], ["contains", "contains"], ["has_tag", "has tag"], ["gt", "is more than"], ["lt", "is less than"], ["exists", "is set"]];
+
 function consentText(rule, state, c) {
   const trigger = state.events?.find(e => e.plugin === rule.trigger.plugin && e.event === rule.trigger.event);
   const action = state.operations?.find(o => o.plugin === rule.action.plugin && o.operation === rule.action.operation);
   const source = autoPluginName(rule.trigger.plugin), target = autoPluginName(rule.action.plugin);
   const fields = values => values?.length ? [...new Set(values)].join(", ") : "None";
+  const description = value => String(value).trim().replace(/\.+$/, "");
+  const valueText = value => Array.isArray(value) ? value.map(valueText).join(", ") :
+    value && typeof value === "object" ? Object.entries(value).map(([key, v]) => `${key} = ${valueText(v)}`).join(", ") :
+    typeof value === "string" ? JSON.stringify(value) : String(value);
+  const conditions = (c.conditions || []).map(({ field, op, value }) => op === "exists"
+    ? `${field} ${value === false ? "is not set" : "is set"}`
+    : `${field} ${AUTO_CONDITION_OPS.find(([key]) => key === op)?.[1] || op} ${valueText(value)}`);
+  const fixed = Object.entries(c.fixed_args || {}).map(([field, value]) => `${field} = ${valueText(value)}`);
   return [
-    `When ${source}: ${trigger?.description || rule.trigger.event}, ${target} will ${action?.description || rule.action.operation}.`,
+    `When ${source}: ${description(trigger?.description || rule.trigger.event)}, ${target} will ${description(action?.description || rule.action.operation)}.`,
     `Passed from ${source} to ${target}: ${fields(c.passed_fields)}`,
-    `Used only for conditions: ${fields((c.condition_fields || []).filter(f => !c.passed_fields.includes(f)))}`,
-    `Conditions: ${JSON.stringify(c.conditions || [])}`,
-    `Fixed values: ${JSON.stringify(c.fixed_args || {})}`,
+    `Used only for conditions: ${fields((c.condition_fields || []).filter(f => !(c.passed_fields || []).includes(f)))}`,
+    `Conditions: ${conditions.length ? conditions.join("\n") : "None"}`,
+    `Fixed values: ${fixed.length ? fixed.join("\n") : "None"}`,
     `It runs on ${c.device ? autoDeviceName(c.device) : "No device chosen"}.`,
     ...(c.warnings || []),
     c.device !== autoLocalDevice ? "Review again on the device that runs automations. Approval here applies only to this device." : "Approval applies only to this device.",
@@ -2042,7 +2065,7 @@ function automationEditor(rule, state, example = null) {
   let rows = [], args = [];
   const event = () => state.events?.find(e => key(e) === trigger.value);
   const operation = () => state.operations?.find(o => key(o) === action.value);
-  const ops = [["eq", "is"], ["ne", "is not"], ["contains", "contains"], ["has_tag", "has tag"], ["gt", "is more than"], ["lt", "is less than"], ["exists", "is set"]];
+  const ops = AUTO_CONDITION_OPS;
   const add = el("button", { type: "button", class: "pp-button", onclick: () => addCondition() }, "Add condition");
   function addCondition(c = {}) {
     const fields = Object.entries(event()?.payload || {});
@@ -2262,7 +2285,9 @@ function describeRestore(r) {
 
 async function loadBackups() {
   try {
-    const backups = await call("list_backups");
+    backupError("");
+    const listing = await call("list_backups");
+    const backups = listing.entries;
     const latest = backups.reduce((newest, backup) => !newest || backup.created_ms > newest.created_ms ? backup : newest, null);
     $("backup-health").textContent = latest
       ? `Latest backup: ${ago(latest.created_ms)}. Keep a copy outside this device and keep your recovery phrase separately.`
@@ -2271,15 +2296,24 @@ async function loadBackups() {
       ? backups.map((b) => el("li", { class: "pp-list-item widget-head" },
         el("span", {}, new Date(b.created_ms).toLocaleString(), el("span", { class: "muted" }, ` · ${formatSize(b.size)}`)),
         el("button", { type: "button", class: "pp-button", onclick: () => restore({ path: b.path }) }, "Restore")))
-      : [el("li", { class: "pp-empty" }, "No backups yet.")]));
-    $("backup-dir").textContent = backups[0] ? `Saved in ${backups[0].path.replace(/[\\/][^\\/]+$/, "")}` : "";
+      : []));
+    $("backup-dir").textContent = `${listing.notice || ""} Saved in ${listing.directory}`.trim();
   } catch (e) {
-    syncError(String(e));
+    $("backup-health").textContent = "";
+    $("backup-dir").textContent = "";
+    $("backup-list").replaceChildren();
+    backupError(String(e));
   }
 }
 
+function backupError(message) {
+  const box = $("backup-error");
+  box.textContent = message;
+  box.hidden = !message;
+}
+
 async function restore(source) {
-  syncError("");
+  backupError("");
   const phrase = $("restore-phrase").value;
   if (!await window.terrariumConfirm("Merge this backup into this device? Newer changes are kept.")) return;
   try {
@@ -2290,21 +2324,21 @@ async function restore(source) {
     refreshPluginViews();
     await loadSyncStatus();
   } catch (e) {
-    syncError(String(e));
+    backupError(String(e));
   }
 }
 
 $("backup-create").addEventListener("click", async () => {
   const button = $("backup-create");
   button.disabled = true;
-  syncError("");
+  backupError("");
   try {
     const b = await call("create_backup");
     toast(`Backup saved (${formatSize(b.size)})`);
     await loadBackups();
     await loadSyncStatus();
   } catch (e) {
-    syncError(String(e));
+    backupError(String(e));
   } finally {
     button.disabled = false;
   }
@@ -2314,7 +2348,7 @@ $("restore-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const file = $("restore-file").files[0];
   if (!file) {
-    syncError("Choose a backup file.");
+    backupError("Choose a backup file.");
     return;
   }
   await restore({ data: await readFileBase64(file) });
@@ -2512,7 +2546,7 @@ async function setSpace(id, { reload = true } = {}) {
   badges = {};
   renderAppNav();
   try {
-    localStorage.setItem("space", id);
+    (window.terrariumStorage || localStorage).setItem("space", id);
   } catch (_) {}
   if (reload) {
     renderSpaceChrome();
@@ -2744,7 +2778,7 @@ async function updatePalette() {
     });
   } else {
     const lower = q.toLowerCase();
-    for (const p of pluginList.plugins) {
+    for (const p of pluginList.plugins.slice().sort((a, b) => Number(b.id === "todo") - Number(a.id === "todo"))) {
       for (const a of p.quick_actions) {
         items.push({
           group: "Add", label: q ? `${a.label} “${q}”` : a.label, sub: p.name, tile: appTile(p, "xs"),
@@ -2926,6 +2960,10 @@ function renderControl(state) {
   $("control-cli").hidden = !state.cli_path;
   if (state.cli_path) {
     $("control-cli-path").textContent = state.cli_path;
+    $("control-cli-copy").onclick = async () => {
+      try { await navigator.clipboard.writeText(state.cli_path); toast("Path copied"); }
+      catch (_) { toast("Couldn’t copy path", "error"); }
+    };
     $("control-cli-link").textContent = `ln -s "${state.cli_path}" ~/.local/bin/terrarium`;
   }
   const clients = state.clients.map((c) => el("li", { class: "pp-list-item sched-row" },
@@ -3037,7 +3075,7 @@ function showShare(link) {
   const type = String(link?.type || "text/plain");
   let last = null;
   try {
-    last = localStorage.getItem("share-target");
+    last = (window.terrariumStorage || localStorage).getItem("share-target");
   } catch (_) {}
   const targets = shareTargets(pluginList.plugins, type, last);
   $("share-error").hidden = true;
@@ -3068,7 +3106,7 @@ function showShare(link) {
                   $("share-dialog").close();
                   toast(`Saved to ${plugin.name}`);
                   try {
-                    localStorage.setItem("share-target", plugin.id);
+                    (window.terrariumStorage || localStorage).setItem("share-target", plugin.id);
                   } catch (_) {}
                   refreshPluginViews();
                 } catch (error) {

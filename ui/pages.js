@@ -5,6 +5,7 @@
   "use strict";
   const GAP = 16;
   const ROW = 72;
+  const PACK_ROW = 4;
   const ARROWS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
   const MAX_PLACEMENTS = 40;
   const BUILT_IN = { id: "_host", name: "Built in", pages: [], widgets: [], icon: "layers", color: "#64748B" };
@@ -114,7 +115,7 @@
     seed() {
       const entries = [...this.catalog.values()].sort((a, b) => (a.template?.home?.order ?? 100) - (b.template?.home?.order ?? 100));
       const ids = entries.map((entry) => `${entry.plugin.id}/${entry.widget.id}`);
-      const defaults = entries.filter((entry) => !entry.template?.home?.hidden && !entry.error).map((entry) => `${entry.plugin.id}/${entry.widget.id}`);
+      const defaults = entries.filter((entry) => !entry.template?.home?.hidden && !entry.error && !(entry.builtIn && ["text", "link", "view"].includes(entry.widget.id))).map((entry) => `${entry.plugin.id}/${entry.widget.id}`);
       const legacy = this.o.legacyHome?.() || { home: null, homeWide: [] };
       const chosen = window.TerrariumLayout.selected(legacy.home, ids, defaults);
       const placed = [];
@@ -350,6 +351,9 @@
         body.append(time, date);
       } else if (placement.widget === "view") {
         return this.viewWidget(body, placement, config);
+      }
+      if ((placement.widget === "text" && !config.text?.trim()) || (placement.widget === "link" && !config.url)) {
+        body.append(this.el("button", { type: "button", class: "pp-button", onclick: () => { this.edit(); this.openSettings(placement.id); } }, "Set up widget"));
       }
       return view;
     }
@@ -876,11 +880,36 @@
         if (down) down.disabled = order.get(placement.id) === last;
       }
       root.classList.toggle("editing", this.editing);
+      this.pack();
       // Spare rows below the last widget give room to drag into.
       root.style.minHeight = this.editing && list.length ? `${(this.grid.bottom(list) + 2) * (ROW + GAP) - GAP}px` : "";
       const empty = list.length === 0;
       this.$("home-layout-empty").hidden = !empty;
       this.$("home-layout-hint").hidden = !this.editing || empty;
+    }
+
+    // Viewing on a wide screen: each card takes its content height and the
+    // next card in its columns starts right below it (no row-aligned gaps).
+    pack() {
+      const root = this.$("widgets");
+      const on = !this.editing && !this.narrow.matches;
+      root.classList.toggle("packed", on);
+      if (!this.packer && typeof ResizeObserver === "function") {
+        this.packer = new ResizeObserver(() => this.spans());
+      }
+      if (!this.packer) return;
+      this.packer.disconnect();
+      if (!on) return;
+      for (const card of this.cards.values()) this.packer.observe(card);
+      this.spans();
+    }
+
+    spans() {
+      if (!this.$("widgets").classList.contains("packed")) return;
+      for (const card of this.cards.values()) {
+        const span = Math.max(1, Math.ceil((card.offsetHeight + GAP) / PACK_ROW));
+        if (card.style.getPropertyValue("--pack-span") !== String(span)) card.style.setProperty("--pack-span", String(span));
+      }
     }
 
     chrome() {
@@ -1131,7 +1160,16 @@
         this.pages = await this.service("pages_list", { space: this.space });
         await this.o.show(page.id);
         this.edit();
+        this.$("page-title-input").focus();
         this.$("page-title-input").select();
+        const space = this.space;
+        this.o.toast("Page created. Give it a name.", "ok", { label: "Undo", run: async () => {
+          await this.service("page_remove", { page: page.id });
+          if (this.space !== space) return;
+          if (this.page?.id === page.id) this.draft = null;
+          this.pages = await this.service("pages_list", { space });
+          await this.o.show(this.home?.id);
+        } });
       } catch (error) {
         this.o.toast(String(error), "error");
       }

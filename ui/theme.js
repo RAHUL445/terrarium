@@ -18,12 +18,12 @@
   if (sheet) document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
 
   function read(key) {
-    try { return localStorage.getItem(key); } catch (_) { return null; }
+    try { return (window.terrariumStorage || localStorage).getItem(key); } catch (_) { return null; }
   }
   function write(key, value) {
     try {
-      if (value == null) localStorage.removeItem(key);
-      else localStorage.setItem(key, value);
+      if (value == null) (window.terrariumStorage || localStorage).removeItem(key);
+      else (window.terrariumStorage || localStorage).setItem(key, value);
     } catch (_) {}
   }
 

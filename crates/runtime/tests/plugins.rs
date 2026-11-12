@@ -1834,8 +1834,13 @@ fn todo_emits_task_done_once() {
         .unwrap()["id"]
         .clone();
     for done in [true, true, false, false] {
-        h.call("todo", "toggle", &json!({"id":id,"done":done}))
+        let result = h
+            .call("todo", "toggle", &json!({"id":id,"done":done}))
             .unwrap();
+        assert_eq!(
+            result["message"],
+            if done { "Task done" } else { "Task reopened" }
+        );
     }
     let events = h.pending_events(50).unwrap();
     assert_eq!(events.len(), 1);
@@ -1862,6 +1867,7 @@ fn repeating_task_done_emits_once() {
         .call("todo", "toggle", &json!({"id":id,"done":true}))
         .unwrap();
     assert!(result["next"]["id"].is_string());
+    assert_eq!(result["message"], "Task done");
     h.call("todo", "toggle", &json!({"id":id,"done":true}))
         .unwrap();
     assert_eq!(h.pending_events(50).unwrap().len(), 1);

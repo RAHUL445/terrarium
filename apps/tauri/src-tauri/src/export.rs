@@ -14,16 +14,55 @@ use crate::err;
 use crate::plugins::Plugins;
 
 fn exports_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = if cfg!(desktop) {
-        app.path()
-            .document_dir()
-            .map_err(err)?
-            .join("Terrarium Exports")
-    } else {
-        app.path().app_data_dir().map_err(err)?.join("exports")
-    };
+    let dir = export_destination(crate::storage::profile_dir()?, || {
+        if cfg!(desktop) {
+            Ok(app
+                .path()
+                .document_dir()
+                .map_err(err)?
+                .join("Terrarium Exports"))
+        } else {
+            Ok(app.path().app_data_dir().map_err(err)?.join("exports"))
+        }
+    })?;
     fs::create_dir_all(&dir).map_err(err)?;
     Ok(dir)
+}
+
+fn export_destination(
+    profile: Option<PathBuf>,
+    default: impl FnOnce() -> Result<PathBuf, String>,
+) -> Result<PathBuf, String> {
+    match profile {
+        Some(profile) => Ok(profile.join("exports")),
+        None => default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_exports_do_not_resolve_the_real_user_folder() {
+        let profile = PathBuf::from("/synthetic/profile");
+        let path =
+            export_destination(Some(profile.clone()), || panic!("profile must win")).unwrap();
+        assert_eq!(path, profile.join("exports"));
+    }
+
+    #[test]
+    fn default_exports_keep_the_existing_location() {
+        let existing = PathBuf::from("/synthetic/Documents/Terrarium Exports");
+        assert_eq!(
+            export_destination(None, || Ok(existing.clone())).unwrap(),
+            existing
+        );
+        assert_eq!(
+            export_destination(None, || Err("unavailable".into())),
+            Err("unavailable".into())
+        );
+    }
 }
 
 #[derive(Serialize, Deserialize)]

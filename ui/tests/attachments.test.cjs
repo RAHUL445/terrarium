@@ -235,3 +235,20 @@ test('paste_inserts_reference_at_cursor', async () => {
   assert.equal(called, 1);
   assert.match(area.value, new RegExp(`!\\[pic\\.png\\]\\(terrarium:blob/${BLOB_ID}\\)`));
 });
+
+
+test('list subtitles label complete and truncated attachment references without changing bodies', async () => {
+  for (const [snippet, expected] of [
+    [`Before ![photo](terrarium:blob/${BLOB_ID}) after`, 'Before 📎 photo after'],
+    [`[report.pdf](terrarium:blob/${BLOB_ID})`, '📎 report.pdf'],
+    ['![photo](terrarium:blob/b1-truncated', '📎 photo'],
+    ['![cover](https://example.test/image.png)', '[image: cover]'],
+    ['Ordinary text [link](https://example.test)', 'Ordinary text [link](https://example.test)'],
+  ]) {
+    const { renderer, root, bridge } = loadRenderer();
+    const view = renderer.mount(root, { body: { type: 'item', title: 'Note', subtitle: snippet } }, bridge);
+    await view.ready;
+    assert.equal(text(root.querySelectorAll('.pp-item-subtitle')[0]), expected);
+    view.dispose();
+  }
+});

@@ -1453,28 +1453,41 @@ fn blob_put_then_get_round_trip() {
     let data = TempDir::new().unwrap();
     let mut host = host(&data);
     host.set_blob_key(BlobKey::new("space", &[9u8; 32]));
-    let payload = b"hello attachments";
-    let put = services::invoke(
-        &mut host,
-        "blob.put",
-        &json!({
-            "name": "hello.txt",
-            "mime": "text/plain",
-            "data_base64": B64.encode(payload),
-        }),
-        true,
-    )
-    .unwrap()
-    .unwrap();
-    let file: terrarium_core::FileRef = serde_json::from_str(put.as_str().unwrap()).unwrap();
-    let get = services::invoke(&mut host, "blob.get", &json!({"blob": file.blob}), true)
+    let png = B64.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9s7f2xgAAAAASUVORK5CYII=").unwrap();
+    for (payload, mime) in [
+        (png.as_slice(), "image/png"),
+        (b"\xff\xd8\xffimage".as_slice(), "image/jpeg"),
+        (b"GIF87aimage".as_slice(), "image/gif"),
+        (b"GIF89aimage".as_slice(), "image/gif"),
+        (b"RIFF\x04\0\0\0WEBPimage".as_slice(), "image/webp"),
+        (b"%PDF-1.7\nexample".as_slice(), "application/pdf"),
+        (b"hello attachments".as_slice(), "application/octet-stream"),
+        (b"RIFF\x04\0\0\0WAVE".as_slice(), "application/octet-stream"),
+        (b"\x89PNG".as_slice(), "application/octet-stream"),
+    ] {
+        let put = services::invoke(
+            &mut host,
+            "blob.put",
+            &json!({"name": "attachment", "mime": mime, "data_base64": B64.encode(payload)}),
+            true,
+        )
         .unwrap()
         .unwrap();
-    assert_eq!(get["mime"], "application/octet-stream");
-    assert_eq!(
-        B64.decode(get["data_base64"].as_str().unwrap()).unwrap(),
-        payload
-    );
+        let file: terrarium_core::FileRef = serde_json::from_str(put.as_str().unwrap()).unwrap();
+        assert_eq!(file.mime, mime);
+        let get = services::invoke(&mut host, "blob.get", &json!({"blob": file.blob}), true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(get["mime"], mime);
+        assert_eq!(
+            B64.decode(get["data_base64"].as_str().unwrap()).unwrap(),
+            payload
+        );
+        let blobs = host.blob_store();
+        let store = blobs.lock().unwrap();
+        assert_ne!(store.get_sealed(&file.blob).unwrap(), payload);
+        assert_eq!(store.get(&file.blob).unwrap(), payload);
+    }
 }
 
 #[test]

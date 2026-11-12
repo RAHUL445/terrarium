@@ -21,7 +21,7 @@
         });
       }
     }
-    return out;
+    return out.sort((a, b) => Number(b.plugin === "todo") - Number(a.plugin === "todo"));
   }
 
   function argsFor(action, text) {
@@ -30,7 +30,7 @@
 
   function storageGet(key) {
     try {
-      return localStorage.getItem(key);
+      return (window.terrariumStorage || localStorage).getItem(key);
     } catch (_) {
       return null;
     }
@@ -38,7 +38,7 @@
 
   function storageSet(key, value) {
     try {
-      localStorage.setItem(key, value);
+      (window.terrariumStorage || localStorage).setItem(key, value);
     } catch (_) {}
   }
 

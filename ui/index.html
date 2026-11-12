@@ -265,6 +265,7 @@
             <button type="button" id="backup-create">Back up now</button>
           </div>
           <p class="muted">A backup holds every plugin's data and the plugin list, encrypted with the recovery phrase. Restoring merges it in: newer changes are kept.</p>
+          <p id="backup-error" class="error" role="alert" hidden></p>
           <p class="muted" id="backup-health" role="status"></p>
           <p class="muted" id="backup-dir"></p>
           <ul class="pp-list" id="backup-list"></ul>
@@ -443,14 +444,14 @@
           <button type="button" role="tab" aria-selected="false" aria-controls="registry-browse" data-plugin-tab="browse">Browse</button>
         </div>
         <div id="registry-browse" role="tabpanel" hidden>
-          <label class="pp-label" for="registry-search">Search plugins</label>
+          <label id="registry-search-label" class="pp-label" for="registry-search">Search plugins</label>
           <input id="registry-search" class="pp-input" type="search" autocomplete="off">
           <p id="registry-message" role="status"></p>
           <div class="card-foot"><button type="button" id="registry-check">Check now</button><button type="button" id="registry-cancel" hidden>Cancel</button></div>
           <ul id="registry-list" class="pp-list"></ul>
         </div>
-        <label class="pp-checkbox"><input id="registry-automatic" type="checkbox" checked> Check for plugin updates automatically</label>
-        <p class="muted">The server sees your IP address and check times. Plugins download only when you choose to install.</p>
+        <label id="registry-update-settings" class="pp-checkbox"><input id="registry-automatic" type="checkbox" checked> Check for plugin updates automatically</label>
+        <p id="registry-privacy" class="muted">The server sees your IP address and check times. Plugins download only when you choose to install.</p>
         <p id="plugins-error" class="error" role="alert" hidden></p>
 
         <div id="plugins-installed" role="tabpanel">
@@ -533,7 +534,7 @@
       
           </section>
           <section class="settings-section" id="settings-developer" hidden>
-            <div class="page-head"><h2 class="section-title">Developer</h2><p class="muted">The storage inspector writes through the host like any plugin. Rows belong to the built-in <code>inspector-test</code> plugin.</p></div>
+            <div class="page-head"><h2 class="section-title">Developer</h2><p class="muted">Connect command-line tools and manage access to Terrarium on this computer.</p></div>
             
         
 
@@ -542,7 +543,13 @@
           <p class="muted">Let the <code>terrarium</code> command line, and agents that use it, work with your data on this computer. Each client gets its own token and can read only, or read and change. Nothing listens until this is on.</p>
           <label class="pp-checkbox"><input type="checkbox" id="control-enabled"> Allow command-line control on this computer</label>
           <p class="muted small" id="control-socket"></p>
-          <p class="muted small" id="control-cli" hidden>The command-line tool is at <code id="control-cli-path"></code>. To run it as <code>terrarium</code>, link it into a folder on your PATH, for example: <code id="control-cli-link"></code></p>
+          <div class="muted small" id="control-cli" hidden>
+            <p>The command-line tool is at:</p>
+            <code id="control-cli-path"></code>
+            <button type="button" id="control-cli-copy">Copy path</button>
+            <p>To run it as <code>terrarium</code>, link it into a folder on your PATH, for example:</p>
+            <code id="control-cli-link"></code>
+          </div>
           <p id="control-error" class="error" role="alert" hidden></p>
           <h3 class="pp-section-title">Clients</h3>
           <ul class="pp-list" id="control-clients"></ul>
@@ -650,7 +657,7 @@
       <form id="rail-assistant-form" class="pp-form"><label class="pp-checkbox"><input id="rail-attach-tasks" type="checkbox"> Include Today’s task list</label><p class="muted rail-session-note">Up to 100 open tasks from Today. Titles and due dates only; #private excluded.</p><details id="rail-context" hidden><summary>Review attached task titles</summary><p id="rail-context-status" class="muted"></p><ul id="rail-context-list" class="plain"></ul></details><label class="pp-field"><span class="pp-label">Message</span><textarea id="rail-message" class="pp-input" rows="3" maxlength="8000" required placeholder="Ask or think out loud…"></textarea></label><button type="submit" class="primary" id="rail-send">Send</button></form>
       <p class="muted" id="rail-reply-state" role="status" hidden></p><p id="rail-assistant-error" class="error" role="alert" hidden></p><button type="button" id="rail-assistant-retry" hidden>Retry last message</button><button type="button" class="link-button" id="rail-chat-clear">Clear conversation</button>
     </section>
-    <section id="rail-activity-panel" data-rail-panel="activity" role="tabpanel" aria-labelledby="rail-activity-tab" hidden><h3>Your activity</h3><p id="rail-activity-error" class="error" role="alert" hidden></p><div id="rail-activity-list"></div><button type="button" class="link-button" id="rail-activity-refresh">Refresh activity</button><button type="button" class="link-button" data-rail-settings="scheduled">Manage schedules</button></section>
+    <section id="rail-activity-panel" data-rail-panel="activity" role="tabpanel" aria-labelledby="rail-activity-tab" hidden><h3>Your activity</h3><p id="rail-activity-error" class="error" role="alert" hidden></p><div id="rail-activity-list"><p class="muted">No activity yet. Completed actions in this session and scheduled runs in this space appear here.</p></div><button type="button" class="link-button" id="rail-activity-refresh">Refresh activity</button><button type="button" class="link-button" data-rail-settings="scheduled">Manage schedules</button></section>
     <section data-rail-panel="customize" aria-label="Customize workspace" hidden><h3>Customize workspace.</h3><p id="rail-layout-scope" class="muted">Personal · this device</p><div class="rail-modes" role="group" aria-label="What to customize"><button type="button" data-rail-mode="nav" aria-pressed="false">Left rail</button><button type="button" data-rail-mode="widgets" aria-pressed="true">Widgets</button><button type="button" data-rail-mode="actions" aria-pressed="false">Actions</button></div><p id="rail-layout-preview" class="muted" role="status"></p><div id="rail-custom-list"></div><div class="rail-custom-footer"><button type="button" id="rail-reset">Restore defaults</button><button type="button" id="rail-custom-cancel">Cancel</button><button type="button" class="primary" id="rail-custom-done">Apply</button></div></section>
 
   </aside>

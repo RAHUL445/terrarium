@@ -16,6 +16,23 @@ use terrarium_scheduler::{Repeat, Settings};
 use crate::pages::{clean_config, clean_host_config, host_widgets, Placement, HOST_WIDGETS};
 use crate::registry::{PluginHost, ViewKind};
 
+// Detect after decryption, preserving the existing encrypted blob format.
+fn blob_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else if bytes.starts_with(b"%PDF-") {
+        "application/pdf"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -248,7 +265,7 @@ pub fn invoke(
                 .map_err(|_| "blob store is unavailable".to_string())?;
             match store.get(&blob) {
                 Ok(bytes) => Ok(json!({
-                    "mime": "application/octet-stream",
+                    "mime": blob_mime(&bytes),
                     "data_base64": B64.encode(bytes),
                 })),
                 Err(BlobError::NotFound) => Ok(json!({"missing": true})),

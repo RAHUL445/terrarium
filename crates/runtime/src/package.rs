@@ -358,7 +358,8 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
             format!("events:{name}:{hash}"),
             format!(
                 "Sync {}: {} for automations",
-                manifest.name, event.description
+                manifest.name,
+                event.description.trim_end_matches(['.', '!', '?'])
             ),
         );
     }

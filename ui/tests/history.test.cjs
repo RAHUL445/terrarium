@@ -55,7 +55,7 @@ test('history labels use local days, device labels and readable change summaries
   const h = harness(reply), label = h.context.historyLabel;
   const created = label({ device: 'd1', at_ms: now - 60000, created: true, columns: ['title'] }, 'd1', now);
   assert.equal(created.who, 'This device'); assert.equal(created.what, 'Created'); assert.match(created.when, /^Today 14:01/);
-  assert.equal(label({ device: 'd2', at_ms: now, columns: ['title', 'completed_at', 'a', 'b', 'c'] }, 'd1', now).what, 'Changed title, completed at, a, b and 1 more');
+  assert.equal(label({ device: 'd2', at_ms: now, columns: ['title', 'completed_at', 'a', 'b', 'c'] }, 'd1', now).what, 'Changed Title, Completed, A, B and 1 more');
   assert.equal(label(versions[1], 'd1', now).who, 'Another device');
   const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
   assert.match(label({ at_ms: yesterday.getTime(), trashed: true }, '', now).when, /^Yesterday/);
@@ -87,7 +87,7 @@ test('dialog loads scoped versions and safely renders values with changed fields
   assert.match(h.versions()[0].children[0].children[0], /Current/);
   assert.equal(h.button('Restore this version'), undefined);
   const fields = h.get('history-detail').children.filter(n => n.attrs?.class === 'history-field');
-  assert.deepEqual(fields.map(n => n.children[0].children[0]), ['title', 'other field', 'body', 'done', 'empty', 'no']);
+  assert.deepEqual(fields.map(n => n.children[0].children[0]), ['Title', 'Other field', 'Note', 'Done', 'Empty', 'No']);
   assert.equal(fields[0].children[1].children[0], '<img src=x>');
   assert.equal(fields[3].children[1].children[0], 'Yes');
   assert.equal(fields[4].children[1].children[0], '—');
@@ -190,4 +190,14 @@ test('retention explains an expired Current without requesting its values', asyn
   assert.match(h.get('history-detail').children[0].children[0], /preview is unavailable/);
   assert.equal(h.button('Restore this version'), undefined);
   assert.equal(h.calls.length, 1);
+});
+
+
+test('history hides internal keys and formats stored timestamps in previews and summaries', async () => {
+  const h = harness(args => args.args.version ? { values: { title: 'A note', task_key: 'private-internal-id', _deleted: null, created_at: now, updated_at: now }, in_trash: false } : { versions, this_device: 'd1' });
+  await h.open();
+  const fields = h.get('history-detail').children.filter(n => n.attrs?.class === 'history-field');
+  assert.deepEqual(fields.map(n => n.children[0].children[0]), ['Title', 'Created', 'Last edited']);
+  assert.equal(fields[1].children[1].children[0], new Date(now).toLocaleString());
+  assert.equal(h.context.historyLabel({ columns: ['task_key', '_deleted', 'updated_at'], at_ms: now }, 'd1', now).what, 'Changed Last edited');
 });

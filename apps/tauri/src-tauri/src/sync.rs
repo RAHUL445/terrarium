@@ -991,20 +991,6 @@ pub struct RestoreSummary {
     adopted_space: bool,
 }
 
-/// Desktop: `~/Documents/Terrarium Backups`; phone: app data.
-fn backups_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = if cfg!(desktop) {
-        app.path()
-            .document_dir()
-            .map_err(err)?
-            .join("Terrarium Backups")
-    } else {
-        app.path().app_data_dir().map_err(err)?.join("backups")
-    };
-    fs::create_dir_all(&dir).map_err(err)?;
-    Ok(dir)
-}
-
 fn entry(path: &Path) -> Option<BackupEntry> {
     let bytes = fs::read(path).ok()?;
     let info = Backup::info(&bytes).ok()?;
@@ -1055,7 +1041,7 @@ pub async fn create_backup(app: AppHandle) -> Result<BackupEntry, String> {
             stamp.minute(),
             stamp.second()
         );
-        let path = backups_dir(&app)?.join(name);
+        let path = crate::storage::backup_location(&app)?.directory.join(name);
         write_private(&path, &sealed).map_err(err)?;
         entry(&path).ok_or_else(|| "backup was written but cannot be read back".to_string())
     })
@@ -1063,18 +1049,31 @@ pub async fn create_backup(app: AppHandle) -> Result<BackupEntry, String> {
     .map_err(err)?
 }
 
+#[derive(Serialize)]
+pub struct BackupListing {
+    entries: Vec<BackupEntry>,
+    #[serde(flatten)]
+    location: crate::storage::BackupLocation,
+}
+
 #[tauri::command]
-pub fn list_backups(app: AppHandle) -> Result<Vec<BackupEntry>, String> {
-    let dir = backups_dir(&app)?;
-    let mut out: Vec<BackupEntry> = fs::read_dir(&dir)
-        .map_err(err)?
+pub fn list_backups(app: AppHandle) -> Result<BackupListing, String> {
+    let location = crate::storage::backup_location(&app)?;
+    let dir = &location.directory;
+    let mut out: Vec<BackupEntry> = fs::read_dir(dir)
+        .map_err(|_| {
+            "Terrarium can't list backups. Check the backup folder's permissions.".to_string()
+        })?
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == BACKUP_EXT))
         .filter_map(|p| entry(&p))
         .collect();
     out.sort_by_key(|b| std::cmp::Reverse(b.created_ms));
-    Ok(out)
+    Ok(BackupListing {
+        entries: out,
+        location,
+    })
 }
 
 /// Merges a backup into this device: from a file path (desktop) or an

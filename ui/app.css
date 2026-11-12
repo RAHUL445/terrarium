@@ -201,13 +201,21 @@ button.primary { display: inline-flex; align-items: center; gap: 8px; }
 .quick-row span:nth-of-type(2) { flex: 1; }
 
 /* Settings */
-.settings { flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 32px; max-width: 1200px; }
+.settings { flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 32px; max-width: 1200px; container-type: inline-size; }
 .settings-nav { flex: 0 0 220px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 32px; }
 .settings-nav h1 { margin: 0 10px 8px; font-size: 22px; }
 .settings-nav .nav-label { margin-top: 12px; }
 .settings-body { flex: 999 1 480px; min-width: 0; display: flex; flex-direction: column; gap: 16px; max-width: 860px; }
 .settings-section { display: flex; flex-direction: column; gap: 16px; }
 .settings-section[hidden] { display: none; }
+/* Nav and body no longer fit side by side (220 + 32 + 480): show the nav as a
+   non-sticky pill row above the body, as on phones, so content never scrolls under it. */
+@container (max-width: 731px) {
+  .settings-nav { position: static; flex: 1 1 100%; flex-direction: row; flex-wrap: nowrap; overflow-x: auto; gap: 6px; padding-bottom: 4px; }
+  .settings-nav h1, .settings-nav .nav-label { display: none; }
+  .settings-nav .nav-item { flex: none; width: auto; border: 1px solid var(--border); border-radius: 999px; padding: 0 14px; }
+  .settings-nav .nav-item .icon { display: none; }
+}
 .section-title { font-size: 24px; }
 
 /* Overlays */
@@ -598,8 +606,7 @@ select.pp-input { padding: 0 8px; }
 
 /* Inline form: one field and its button on a line. */
 .pp-form-inline { flex-direction: row; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
-.pp-form-feedback { line-height: 1.4; }
-.pp-form-feedback:empty { display: none; }
+.pp-form-feedback { line-height: 1.4; min-height: 1.4em; }
 .pp-required { color: var(--muted); font-size: 12px; font-weight: 400; }
 .pp-form-inline > .pp-form-feedback { flex-basis: 100%; }
 .pp-form-inline > .pp-field { flex: 1; min-width: 0; }
@@ -629,7 +636,9 @@ select.pp-input { padding: 0 8px; }
 .pp-select-count { font-weight: 600; margin-right: auto; }
 .pp-select-note { flex-basis: 100%; margin: 0; color: var(--muted); font-size: .875rem; }
 .pp-list-item:has(> .pp-select-check) { display: flex; align-items: flex-start; }
-.pp-select-check { flex: none; width: 20px; height: 20px; margin: 16px 0 0 12px; }
+.pp-select-check { flex: none; align-self: flex-start; width: 20px; height: 20px; min-height: 0; margin: 0 10px 0 0; }
+.pp-list-item:has(> .pp-item) > .pp-select-check { margin: 12px 0 0 12px; }
+.pp-list-item:has(> .pp-select-check) > .pp-item { flex: 1; min-width: 0; }
 .pp-list-item[data-pp-selected="true"] { background: var(--accent-soft); }
 .pp-list-item:has(> .pp-item) { padding: 0; }
 .pp-item { display: flex; align-items: flex-start; gap: 10px; padding: 12px; min-height: 52px; }
@@ -1253,3 +1262,17 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 @media (max-width: 760px) {
   .history-content { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Desktop test polish: stable feedback and compact cards. */
+#page-edit { display: inline-flex; align-items: center; gap: 6px; }
+.page-grid:not(.editing) { grid-auto-rows: auto; align-items: start; }
+.page-grid:not(.editing) > .page-widget { grid-row: auto !important; max-height: none; overflow: visible; }
+/* Packed view: 4px rows, each card spans its own height plus the gap. */
+.page-grid.packed { grid-auto-rows: 4px; row-gap: 0; grid-auto-flow: row dense; }
+.page-grid.packed > .page-widget { grid-row: auto / span var(--pack-span, 1) !important; }
+.page-grid:not(.editing) > .page-widget > .widget-body { flex: none; overflow: visible; }
+[data-plugin-tab][aria-selected="true"] { background: var(--accent); color: var(--on-accent, white); border-color: var(--accent); font-weight: 600; }
+#backup-card > p { margin: 0; }
+#backup-health:empty, #backup-dir:empty { display: none; }
+#control-cli-path, #control-cli-link { display: block; white-space: pre; overflow-x: auto; padding: 10px; background: var(--surface); user-select: all; }
+.pp-sheet-modal .pp-sheet-body > .pp-button { width: auto; align-self: start; }

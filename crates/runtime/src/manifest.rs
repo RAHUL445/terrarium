@@ -2164,7 +2164,7 @@ mod event_tests {
         new.events.insert(
             "pinged".into(),
             EventDef {
-                description: "Ping".into(),
+                description: "Ping.".into(),
                 payload: BTreeMap::from([("n".into(), ParamSpec::new(ParamType::Integer))]),
             },
         );

@@ -29,6 +29,26 @@ for p in ../terrarium-plugins/packages/*/; do ./target/debug/terra build "$p"; d
 
 Open <http://localhost:8767>.
 
+## Isolated native test profiles
+
+Set `TERRA_PROFILE_DIR` to an absolute, throwaway directory before launching the
+native app. Host data, backups (`backups/`) and exports (`exports/`) stay in that
+profile. Without a profile, release builds keep their usual storage locations.
+If Documents is unavailable, backups fall back to the app data `backups/` folder;
+Settings → Backups shows the active folder and how to allow Documents access.
+
+Profile runs and debug builds also use separate WebView storage, shared between
+the main window and Quick capture. The pinned Tauri 2.12.5 supports a
+[`data_store_identifier`](https://docs.rs/tauri/2.12.5/tauri/webview/struct.WebviewWindowBuilder.html#method.data_store_identifier)
+on macOS 14 and later; WebKit manages the physical location of these stores.
+Windows and Linux use the profile's `webview/` directory (app data `webview/`
+for debug runs without a profile). On older macOS, WebKit uses its default data
+store, so UI preferences use keys prefixed by a stable profile ID exposed as
+`window.terrariumProfileId`. All native profile/debug runs use that prefix,
+including theme, space, saved views and layout preferences. Release builds
+without a profile retain their existing keys. This older-macOS fallback isolates
+UI preferences; it does not isolate WebKit cookies or caches.
+
 ## Build the desktop app
 
 The app embeds an imported, digest-pinned bundle of the recommended plugins:

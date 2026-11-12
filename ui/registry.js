@@ -18,8 +18,9 @@
     function warningFor(id) { return state.plugins.find(p => p.id === id)?.warning; }
     function render() {
       const valid = fresh();
-      $("registry-message").textContent = busy ? "Checking for plugins…" : phone ? "Plugin downloads are available on desktop." : state.fresh && !valid ? "This list is out of date." : state.message || "";
+      $("registry-message").textContent = busy ? "Checking for plugins…" : phone ? "Plugin downloads are available on desktop." : state.fresh && !valid ? "This list is out of date." : state.configured ? state.message || "" : "No plugin list is set up. Install from a .terrapkg file in Installed.";
       $("registry-check").disabled = busy || !state.configured || phone;
+      for (const id of ["registry-check", "registry-search-label", "registry-search", "registry-update-settings", "registry-privacy", "registry-list"]) $(id).hidden = !state.configured;
       $("registry-cancel").hidden = !busy;
       $("registry-automatic").checked = state.automatic_checks;
       $("registry-automatic").disabled = phone;

@@ -244,7 +244,10 @@ fn invoke(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value, Strin
         "snapshot" => {
             json!({ "items": [], "changes": [], "conflicts": [], "notices": [], "device": "terra-preview" })
         }
-        "trusted_signers" | "list_backups" => json!([]),
+        "trusted_signers" => json!([]),
+        "list_backups" => {
+            json!({ "entries": [], "directory": "Preview (backups unavailable)", "notice": null })
+        }
         "open_external" | "profile_startup" => Value::Null,
         "list_themes" => json!(host
             .packages()

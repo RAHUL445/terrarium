@@ -82,3 +82,16 @@ test('a stale missing-note response cannot clear the newer selection', async () 
   assert.equal(ui.view.state.open, 'b');
   assert.equal(ui.dialog.open, true);
 });
+
+test('autosave uses one status indicator through edits and save completion', async () => {
+  const ui = await editor(async () => ({}));
+  assert.equal(ui.form().dataset.ppAutosave, 'true');
+  assert.equal(ui.form().querySelectorAll('.pp-save-status').length, 1);
+  assert.equal(ui.form().querySelectorAll('.pp-form-feedback').length, 0);
+  ui.input().value = 'Updated'; ui.form().dispatchEvent({ type: 'input' });
+  assert.equal(ui.form().querySelector('.pp-save-status').textContent, 'Changes waiting to save…');
+  assert.equal(await ui.view.flush(), true);
+  assert.equal(ui.form().querySelector('.pp-save-status').textContent, 'Saved on this device');
+  assert.equal(ui.form().dataset.ppUnsaved, 'false');
+  ui.view.dispose();
+});

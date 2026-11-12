@@ -12,7 +12,7 @@
       this.catalog = { nav: [], widgets: [], actions: [], home: [] };
       this.mounted = new Map();
       this.drafts = new Map();
-      try { this.storage = localStorage; } catch (_) { this.storage = { getItem: () => null, setItem: () => { throw Error("unavailable"); } }; }
+      try { this.storage = (window.terrariumStorage || localStorage); } catch (_) { this.storage = { getItem: () => null, setItem: () => { throw Error("unavailable"); } }; }
       this.seq = 0;
       this.tab = "pinned";
       this.conversations = new Map();
@@ -97,8 +97,8 @@
       this.renderChrome();
     }
     $(id) { return document.getElementById(id); }
-    readPreference(key, fallback) { try { return localStorage.getItem(key) || fallback; } catch (_) { return fallback; } }
-    remember(key, value) { try { localStorage.setItem(key, value); } catch (_) {} }
+    readPreference(key, fallback) { try { return (window.terrariumStorage || localStorage).getItem(key) || fallback; } catch (_) { return fallback; } }
+    remember(key, value) { try { (window.terrariumStorage || localStorage).setItem(key, value); } catch (_) {} }
     saveLayout() {
       if (this.editing) return; // Preview until Apply; Cancel restores the snapshot.
       if (!window.TerrariumLayout.write(this.storage, this.space.id, this.layout)) this.o.toast("Layout changed for this session; device storage is unavailable.", "error");
@@ -144,7 +144,7 @@
       this.catalog.nav = plugins.filter((p) => p.pages.length).map((p) => ({ key: p.id, plugin: p, name: p.name, default: true }));
       this.catalog.widgets = items.sort((a, b) => (a.template?.rail?.order ?? a.template?.home?.order ?? 100) - (b.template?.rail?.order ?? b.template?.home?.order ?? 100));
       this.catalog.home = items.slice().sort((a, b) => (a.template?.home?.order ?? 100) - (b.template?.home?.order ?? 100)).map((item) => ({ ...item, default: !item.template?.home?.hidden }));
-      this.catalog.actions = plugins.flatMap((plugin) => plugin.quick_actions.map((action) => ({ key: `${plugin.id}/${action.op}/${action.arg}`, plugin, action, name: action.label, default: true })));
+      this.catalog.actions = plugins.slice().sort((a, b) => Number(b.id === "todo") - Number(a.id === "todo")).flatMap((plugin) => plugin.quick_actions.map((action) => ({ key: `${plugin.id}/${action.op}/${action.arg}`, plugin, action, name: action.label, default: true })));
       for (const [key, mounted] of this.mounted) {
         const item = items.find((entry) => entry.key === key);
         const stamp = item && `${this.space.id}:${item.plugin.version}:${JSON.stringify(item.template)}`;
@@ -451,7 +451,7 @@
       const nodes = [...groups.values()].map(group => group.length === 1 ? renderEvent(group[0]) : this.el("details", { class: "rail-event-group" },
         this.el("summary", {}, `${group[0].title} · ${group.length} events`, this.el("small", { class: "muted" }, new Date(group[0].at).toLocaleDateString())), ...group.map(renderEvent)));
 
-      if (!events.length) nodes.push(this.el("p", { class: "muted" }, "Completed actions in this session and scheduled runs in this space appear here."));
+      if (!events.length) nodes.push(this.el("p", { class: "muted" }, "No activity yet. Completed actions in this session and scheduled runs in this space appear here."));
       this.$("rail-activity-list").replaceChildren(...nodes);
     }
     refresh() {

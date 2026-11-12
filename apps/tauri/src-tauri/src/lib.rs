@@ -16,6 +16,7 @@ mod quick;
 mod registry;
 mod secrets;
 mod shell;
+mod storage;
 mod sync;
 mod themes;
 mod vault;
@@ -406,7 +407,20 @@ pub(crate) fn open_host(app_data: &Path) -> Result<Opened, Box<dyn std::error::E
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let launched = Instant::now();
+    let profile = storage::profile_dir().expect("valid profile directory");
+    let webview_id = storage::webview_id(profile.as_deref(), cfg!(debug_assertions));
+    let mut context = tauri::generate_context!();
+    if webview_id.is_some() {
+        for window in &mut context.config_mut().app.windows {
+            window.create = false;
+        }
+    }
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("profile-storage")
+                .js_init_script(storage::preferences_script(webview_id))
+                .build(),
+        )
         .plugin(tauri_plugin_deep_link::init())
         .on_window_event(|_window, _event| {
             #[cfg(mobile)]
@@ -478,6 +492,14 @@ pub fn run() {
                 launched,
                 profiling: profile_dir.is_some() || cfg!(feature = "startup-profiling"),
             });
+            if let Some(id) = webview_id {
+                for config in &app.config().app.windows {
+                    tauri::WebviewWindowBuilder::from_config(app, config)?
+                        .data_directory(app_data.join("webview"))
+                        .data_store_identifier(id)
+                        .build()?;
+                }
+            }
             startup_span("setup-ready", launched);
             Ok(())
         })
@@ -548,6 +570,6 @@ pub fn run() {
             sync::set_blob_quota,
             sync::cleanup_attachments
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run Terrarium");
 }

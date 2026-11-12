@@ -25,7 +25,8 @@ const listing = () => ({ plugins: [{ ...card }], configured: true, fresh: true, 
 test('empty configuration and phone have no refresh or stage request', async () => {
   const h = harness({ plugins: [], configured: false, fresh: false, message: 'No plugin list is set up' });
   await h.view.load();
-  assert.equal(h.$('registry-message').textContent, 'No plugin list is set up');
+  assert.equal(h.$('registry-message').textContent, 'No plugin list is set up. Install from a .terrapkg file in Installed.');
+  for (const id of ['registry-check', 'registry-search-label', 'registry-search', 'registry-update-settings', 'registry-privacy', 'registry-list']) assert.equal(h.$(id).hidden, true);
   assert.equal(h.$('registry-check').disabled, true);
   await h.view.stage('notes', '0.10.0');
   assert.equal(h.requests.length, 1);
@@ -38,6 +39,8 @@ test('empty configuration and phone have no refresh or stage request', async () 
 test('local search, safe text cards and manual-only Browse never fetch automatically', async () => {
   const h = harness(listing()); await h.view.load();
   assert.equal(h.$('registry-automatic').checked, false);
+  assert.equal(h.$('registry-search-label').hidden, false);
+  assert.equal(h.$('registry-search').hidden, false);
   const rendered = h.$('registry-list').children[0];
   assert.equal(rendered.children[0].children[1].children[0], card.name);
   assert.equal(rendered.children[1].children[0], card.description);

@@ -22,3 +22,12 @@ test('quick actions from every plugin are listed with their app name', () => {
 test('typed text goes to the declared argument', () => {
   assert.deepEqual(argsFor({ arg: 'body' }, 'Hello'), { body: 'Hello' });
 });
+
+
+test('To-do precedes links while retaining order within each app', () => {
+  const action = { label: 'Add', op: 'create', arg: 'text' };
+  assert.deepEqual(actionsFrom({ plugins: [
+    { id: 'bookmarks', name: 'Links', quick_actions: [action] },
+    { id: 'todo', name: 'To-do', quick_actions: [action, { ...action, op: 'other' }] },
+  ] }).map(a => a.key), ['todo/create/text', 'todo/other/text', 'bookmarks/create/text']);
+});
