@@ -643,6 +643,12 @@ impl Store {
         opts: &crate::HistoryOptions,
     ) -> Result<Vec<crate::Version>> {
         let def = self.schema.table(table)?;
+        if def.delete_policy == DeletePolicy::DeleteWins {
+            return Err(Error::Policy {
+                table: table.into(),
+                reason: "delete-wins tables do not support history",
+            });
+        }
         let changes = self.row_changes(table, row)?;
         crate::history::history(def, &changes, opts)
     }
@@ -657,10 +663,17 @@ impl Store {
 
     /// Copy historical values using ordinary synced writes, reviving trash.
     /// Historical deletion state is informative and never trashes a live row.
+    /// A non-no-op restore starts a version; matching live values emit nothing.
     pub fn restore_to(&mut self, table: &str, row: &str, version: &str) -> Result<Vec<String>> {
         let def = self.schema.table(table)?;
         if def.kind == TableKind::Append {
             return Err(Error::AppendOnly(table.into()));
+        }
+        if def.delete_policy == DeletePolicy::DeleteWins {
+            return Err(Error::Policy {
+                table: table.into(),
+                reason: "delete-wins tables do not support version restoration",
+            });
         }
         let missing = || Error::NotFound {
             table: table.into(),
@@ -706,8 +719,10 @@ impl Store {
             }
         }
         self.write(|w| {
-            if state == Some(RowState::Trashed) {
-                w.restore(table, row)?;
+            if state == Some(RowState::Trashed) || !columns.is_empty() {
+                // The marker starts a version even for live rows. Emit it first
+                // so its HLC precedes every value change in this transaction.
+                w.emit(table, row, Op::Restore)?;
             }
             if !updates.is_empty() {
                 w.update(table, row, &updates)?;

@@ -1129,8 +1129,8 @@ a plugin declaring OAuth; older hosts reject the new manifest field.
 
 A manifest can opt standard storage tables into history with
 `"history": ["tasks"]`. The list defaults to empty; unknown tables,
-append-only tables and duplicates are rejected. Every declared column in
-these tables becomes readable to the user, CLI clients and agents through
+append-only tables, delete-wins tables and duplicates are rejected. Every
+declared column in these tables becomes readable to the user, CLI clients and agents through
 host commands, bypassing named queries. Opt in only tables whose entire
 contents are intended to be visible to those callers; there is no column
 allowlist. No other plugin’s data is handed to plugin code.
@@ -1154,7 +1154,12 @@ cannot choose another plugin. `title` is an optional display label.
 first (default 50, range 1–200), returning `{versions, this_device, keeps_days}`.
 With a listed version id it returns `{version, values, in_trash}`.
 `item.restore_version {plugin, table, id, version}` writes historical values
-through the store and returns `{restored, columns}`. Both commands are scoped
+through the store and returns `{restored, columns}`. Each restore starts its
+own version flagged `restored: true`, keeping the replaced values in the
+version directly below it. Later nearby edits may join the restore's group.
+Restoring a live item to its current values writes nothing and adds no
+version. Restoring a trashed item revives it with exactly one Restore marker,
+even when its values already match. Both commands are scoped
 to the selected space; restore requires write access and runs no plugin code.
 Earlier listed ids remain usable after grouping changes, but cutoffs must
 belong to the item's applied changes. The space’s `history_days` preference
@@ -1168,6 +1173,9 @@ plugin set: older hosts reject this new manifest field. New hosts accept
 existing manifests without it. Upgrade every peer to HIST-05 before relying
 on the same retention behavior across devices.
 The host namespace `item` is reserved.
+
+Paired hosts need HIST-07 for consistent restore grouping and rejection of
+delete-wins history tables. Restoration uses existing sync operations.
 
 ### Registry publishing tools
 

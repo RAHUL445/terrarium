@@ -391,7 +391,7 @@ function bridge(plugin) {
 }
 
 // ---- History ----
-function historyLabel(version, thisDevice, now = Date.now()) {
+function historyLabel(version, thisDevice, now = Date.now(), previous = null) {
   const date = new Date(version.at_ms), today = new Date(now);
   const yesterday = new Date(now);
   yesterday.setDate(yesterday.getDate() - 1);
@@ -403,7 +403,8 @@ function historyLabel(version, thisDevice, now = Date.now()) {
     when: `${day} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`,
     who: version.device === thisDevice ? "This device" : "Another device",
     what: version.created ? "Created" : version.trashed ? "Moved to trash"
-      : version.restored ? "Restored from trash" : `Changed ${changed}`,
+      : version.restored ? (previous?.in_trash ? "Restored from trash" : "Restored an earlier version")
+      : `Changed ${changed}`,
   };
 }
 
@@ -504,7 +505,7 @@ async function openHistory(plugin, space, { table, id, title }) {
       keepsDays = result.keeps_days || 0;
       ui.retention.textContent = keepsDays > 0 ? `Showing the last ${keepsDays} days` : "";
       const buttons = result.versions.map((version, index) => {
-        const label = historyLabel(version, result.this_device);
+        const label = historyLabel(version, result.this_device, Date.now(), result.versions[index + 1]);
         return el("button", { type: "button", class: "history-version", onclick: () => pick(version, index, buttons) },
           el("span", {}, `${label.when} · ${label.who}${index === 0 ? " · Current" : ""}`),
           el("span", { class: "muted" }, label.what));

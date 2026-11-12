@@ -59,7 +59,9 @@ test('history labels use local days, device labels and readable change summaries
   assert.equal(label(versions[1], 'd1', now).who, 'Another device');
   const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
   assert.match(label({ at_ms: yesterday.getTime(), trashed: true }, '', now).when, /^Yesterday/);
-  assert.equal(label({ restored: true, at_ms: now }, '', now).what, 'Restored from trash');
+  assert.equal(label({ restored: true, at_ms: now }, '', now, { in_trash: true }).what, 'Restored from trash');
+  assert.equal(label({ restored: true, at_ms: now }, '', now, { in_trash: false }).what, 'Restored an earlier version');
+  assert.equal(label({ restored: true, at_ms: now }, '', now).what, 'Restored an earlier version');
   assert.equal(label({ trashed: true, at_ms: now }, '', now).what, 'Moved to trash');
   assert.ok(!label({ at_ms: now - 3 * 86400000 }, '', now).when.startsWith('Today'));
 });

@@ -1630,13 +1630,21 @@ fn history_lists_and_restores_versions() {
         .unwrap()
         .contains(&json!("title")));
     assert_eq!(task_titles(&mut host), ["Pay rent"]);
-    // The value we replaced remains readable after the normal synced restore.
+    let after = query(&mut host, READ, "item.history", history_args(&id)).unwrap();
+    assert_eq!(after["versions"].as_array().unwrap().len(), 2);
+    assert_eq!(after["versions"][0]["restored"], true);
+    assert_eq!(after["versions"][1], list["versions"][0]);
+    // The value we replaced remains listed and readable after the restore.
     let mut args = history_args(&id);
     args["version"] = list["versions"][0]["id"].clone();
     assert_eq!(
         query(&mut host, READ, "item.history", args).unwrap()["values"]["title"],
         "Pay rent today"
     );
+    let mut args = history_args(&id);
+    args["version"] = after["versions"][1]["id"].clone();
+    run(&mut host, CHANGE, "item.restore_version", args).unwrap();
+    assert_eq!(task_titles(&mut host), ["Pay rent today"]);
 }
 
 #[test]

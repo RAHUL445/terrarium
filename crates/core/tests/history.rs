@@ -289,9 +289,20 @@ fn restore_brings_a_trashed_row_back() {
             .unwrap()
             .in_trash
     );
+    let cursor = a.store.export_since(0).unwrap().1;
     assert_eq!(
         a.store.restore_to("tasks", &row, &initial).unwrap(),
         ["title"]
+    );
+    let (batch, _) = a.store.export_since(cursor).unwrap();
+    assert!(matches!(batch.changes[0].op, Op::Restore));
+    assert_eq!(
+        batch
+            .changes
+            .iter()
+            .filter(|c| matches!(c.op, Op::Restore))
+            .count(),
+        1
     );
     assert_eq!(
         a.store.row_state("tasks", &row).unwrap(),
@@ -322,16 +333,24 @@ fn restore_brings_a_trashed_row_back() {
 }
 
 #[test]
-fn restore_refuses_gone_and_append_rows() {
+fn restore_refuses_delete_wins_append_and_missing_rows() {
     let dir = TempDir::new().unwrap();
     let mut a = Device::new(&dir, "a", 1);
     let row = a.insert("tags", json!({"name":"home"}));
-    let id = versions(&a, "tags", &row)[0].id.clone();
+    let id = a.store.changes(1).unwrap()[0].change.hlc.to_string();
+    assert!(matches!(
+        a.store.history("tags", &row, &HistoryOptions::default()),
+        Err(Error::Policy { .. })
+    ));
+    assert!(matches!(
+        a.store.restore_to("tags", &row, &id),
+        Err(Error::Policy { .. })
+    ));
     a.store.write(|w| w.delete("tags", &row)).unwrap();
     let before = a.store.export_since(0).unwrap();
     assert!(matches!(
         a.store.restore_to("tags", &row, &id),
-        Err(Error::NotFound { .. })
+        Err(Error::Policy { .. })
     ));
     assert_eq!(before, a.store.export_since(0).unwrap());
     assert!(a.store.row_at("tags", &row, &id).unwrap().is_some());
@@ -518,4 +537,94 @@ fn null_text_target_is_an_empty_text_edit() {
         .restore_to("notes", &row, &initial)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn nearby_restore_preserves_pre_restore_version_and_converges() {
+    let dir = TempDir::new().unwrap();
+    let (mut a, mut b) = (Device::new(&dir, "a", 1), Device::new(&dir, "b", 1));
+    for (table, initial, edited) in [
+        (
+            "tasks",
+            json!({"title":"original", "points":2}),
+            json!({"title":"edited", "done":true}),
+        ),
+        (
+            "notes",
+            json!({"body":"original"}),
+            json!({"body":"edited"}),
+        ),
+    ] {
+        let row = a.insert(table, initial);
+        let oldest = versions(&a, table, &row)[0].id.clone();
+        a.time.advance(1_000);
+        a.update(table, &row, edited);
+        if table == "tasks" {
+            a.store
+                .write(|w| w.increment(table, &row, "points", json!(3)))
+                .unwrap();
+        }
+        let before = versions(&a, table, &row)[0].clone();
+        let values = a
+            .store
+            .row_at(table, &row, &before.id)
+            .unwrap()
+            .unwrap()
+            .values;
+        let cursor = a.store.export_since(0).unwrap().1;
+        a.store.restore_to(table, &row, &oldest).unwrap();
+        assert_eq!(
+            a.store.row_state(table, &row).unwrap(),
+            Some(RowState::Live)
+        );
+        let (batch, _) = a.store.export_since(cursor).unwrap();
+        assert!(matches!(batch.changes[0].op, Op::Restore));
+        assert!(batch
+            .changes
+            .windows(2)
+            .all(|pair| pair[0].hlc < pair[1].hlc));
+        let v = versions(&a, table, &row);
+        assert_eq!(v.len(), 2);
+        assert!(v[0].restored);
+        assert_eq!(v[1], before);
+        assert_eq!(
+            a.store
+                .row_at(table, &row, &v[1].id)
+                .unwrap()
+                .unwrap()
+                .values,
+            values
+        );
+        sync(&mut a, &mut b);
+        assert_eq!(v, versions(&b, table, &row));
+        for version in &v {
+            assert_eq!(
+                a.store.row_at(table, &row, &version.id).unwrap(),
+                b.store.row_at(table, &row, &version.id).unwrap()
+            );
+        }
+        a.store.restore_to(table, &row, &v[1].id).unwrap();
+        let current = versions(&a, table, &row);
+        assert_eq!(current.len(), 3);
+        assert!(current[0].restored);
+        assert_eq!(
+            a.store
+                .row_at(table, &row, &current[0].id)
+                .unwrap()
+                .unwrap()
+                .values,
+            values
+        );
+        let log = a.store.export_since(0).unwrap();
+        assert!(a
+            .store
+            .restore_to(table, &row, &current[0].id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(current, versions(&a, table, &row));
+        assert_eq!(log, a.store.export_since(0).unwrap());
+        sync(&mut a, &mut b);
+        assert_eq!(current, versions(&b, table, &row));
+        assert_converged(&[&a, &b]);
+    }
 }

@@ -84,6 +84,8 @@ for sync or erasure.
 Group adjacent changes while both device and user stay the same and the
 gap from the previous change is at most `GROUP_MS = 120_000` milliseconds.
 A larger gap, different device or different user starts another version.
+Every Restore change starts a new version, regardless of device, user or
+elapsed time. Later nearby edits may join that restore's group.
 This sliding rule can group a long uninterrupted autosave session into one
 version; it is not a two-minute maximum session length.
 
@@ -140,11 +142,12 @@ materialized; do not describe such previews as exact former live state.
 
 ### 3.4 Restore: write selected values as a new edit
 
-Reject append-only tables and current missing/gone rows, and reject a
-cutoff with no prior changes. Perform all mutations in one Store::write
-transaction. If currently trashed, call Writer::restore first, regardless
-of the historical `in_trash` flag. Then update only differing LWW/text
-columns and increment counters by `target - current`. Restore copies
+Reject append-only and delete-wins tables and current missing/gone rows,
+and reject a cutoff with no prior changes. Perform all mutations in one
+Store::write transaction. If values differ or the row is currently trashed,
+emit exactly one Restore first (the batch's lowest HLC), regardless of the
+historical `in_trash` flag. On a live row this marker changes no row state.
+Then update only differing LWW/text columns and increment counters by `target - current`. Restore copies
 values and brings the item back; it never moves a live item into trash.
 The historical trash flag is informative. This avoids trying to update a
 trashed row, which Writer correctly refuses.
@@ -155,21 +158,26 @@ string on write, matching Writer::text_edit. Counter null means zero;
 checked subtraction must reject overflow before any changes commit.
 Read current values and calculate differences without invoking plugin code.
 Return sorted changed column names; a trash-only restore may return an
-empty list despite emitting Restore.
+empty list despite emitting Restore. When a live row already has the target
+values, emit no changes and create no version.
 
 Only Restore, Set, TextEdit and Increment are emitted. Never replace CRDT
 blobs, rewrite old changes, or restore `_deleted` directly. Concurrent
 remote edits still merge normally; a counter delta or text restoration
-cannot promise to overwrite unknown offline edits. A restore can group
-with a nearby edit under the ordinary grouping rule; it need not create a
-separate visible version. Earlier cutoff ids remain readable.
+cannot promise to overwrite unknown offline edits. A non-no-op restore
+always starts its own version flagged `restored: true`; the version directly
+below retains the pre-restore values and can itself be restored. Earlier
+cutoff ids remain readable. Under the existing "latest Restore means live"
+rule, the marker also revives a row when it sorts after a concurrent trash
+change; a later Delete can still trash it.
 
 ### 3.5 Visibility: explicit table opt-in
 
 Add manifest `"history": ["tasks"]`, defaulting to an empty list, with
 validation for declared standard tables and duplicates. Reject append-only
-tables. All declared columns of an opted-in table become readable; there
-is no column allowlist in this feature. Plugin authors must not opt in a
+and delete-wins tables; core history and version restoration also reject
+delete-wins tables when called directly. All declared columns of an opted-in
+table become readable; there is no column allowlist in this feature. Plugin authors must not opt in a
 table containing fields they intend to hide behind their named queries.
 This explicit choice is necessary because History bypasses those queries.
 
@@ -282,7 +290,10 @@ unavailable; the live item remains available in its normal sheet.
 
 No new Op variants, Change fields, WIT imports or plugin API version.
 HIST-02 needs no schema migration. Old peers can apply restoration writes
-for a schema they already understand. No cross-plugin schema dependency.
+for a schema they already understand on recoverable tables. Delete-wins
+Restore operations remain rejected, including by older peers. Upgrade all
+peers to HIST-07 for the same restore grouping and delete-wins history
+validation. No cross-plugin schema dependency.
 
 There are two distinct upgrade constraints:
 
@@ -410,7 +421,7 @@ Differences and limits observed in the implementation:
   no host current-user context. Version metadata still includes `user`.
 - The newest entry is **Current** and has no restore button. If expired,
   it remains listed with an explanation; detail and restore commands still
-  reject its cutoff. A restore may join an existing group.
+  reject its cutoff. Each non-no-op restore starts its own group (HIST-07).
 - Retention is visibility only. No log compaction, secure erasure or phone
   performance validation is included; the measurement in section 3.9
   remains a design-time harness result, not runtime command latency.

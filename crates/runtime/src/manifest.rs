@@ -721,6 +721,9 @@ impl Manifest {
             if table.kind == terrarium_core::TableKind::Append {
                 return bad(format!("history: `{name}` is append-only"));
             }
+            if table.delete_policy == terrarium_core::DeletePolicy::DeleteWins {
+                return bad(format!("history: `{name}` uses delete-wins"));
+            }
             if !history.insert(name) {
                 return bad(format!("history: `{name}` is repeated"));
             }
@@ -2312,6 +2315,11 @@ mod history_tests {
         m["storage"]["tables"][0]["kind"] = json!("append");
         let err = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap_err();
         assert!(err.to_string().contains("is append-only"), "{err}");
+        m = fixture();
+        m["history"] = json!(["notes"]);
+        m["storage"]["tables"][0]["delete_policy"] = json!("delete-wins");
+        let err = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("uses delete-wins"), "{err}");
         m = fixture();
         m["id"] = json!("item");
         assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap())

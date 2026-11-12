@@ -144,11 +144,12 @@ pub(crate) fn history(
     let mut columns = BTreeSet::new();
     for record in records {
         let change = &record.change;
-        let new_group = previous.is_none_or(|p| {
-            p.hlc.device != change.hlc.device
-                || p.user != change.user
-                || change.hlc.wall_ms.saturating_sub(p.hlc.wall_ms) > opts.group_ms
-        });
+        let new_group = matches!(change.op, Op::Restore)
+            || previous.is_none_or(|p| {
+                p.hlc.device != change.hlc.device
+                    || p.user != change.user
+                    || change.hlc.wall_ms.saturating_sub(p.hlc.wall_ms) > opts.group_ms
+            });
         if new_group {
             columns.clear();
             versions.push(Version {
