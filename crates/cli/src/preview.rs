@@ -252,6 +252,31 @@ fn invoke(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value, Strin
             terrarium_runtime::services::invoke(host, &name, &args["args"], true)
                 .ok_or_else(|| format!("unknown command `{name}`"))??
         }
+        "blob_put" => terrarium_runtime::services::invoke(
+            host,
+            "blob.put",
+            &json!({
+                "name": args["name"],
+                "mime": args["mime"],
+                "data_base64": args["data_base64"],
+            }),
+            true,
+        )
+        .ok_or_else(|| "unknown command `blob.put`".to_string())??,
+        "blob_get" => terrarium_runtime::services::invoke(
+            host,
+            "blob.get",
+            &json!({"blob": args["blob"]}),
+            true,
+        )
+        .ok_or_else(|| "unknown command `blob.get`".to_string())??,
+        "blob_info" => terrarium_runtime::services::invoke(
+            host,
+            "blob.info",
+            &json!({"blob": args["blob"]}),
+            true,
+        )
+        .ok_or_else(|| "unknown command `blob.info`".to_string())??,
         "service_net" => {
             let (config, key) = terrarium_runtime::services::ai_probe(host, Some(&args["config"]))?;
             terrarium_runtime::services::ai_network(&text("name"), &config, key.as_deref())?

@@ -5,8 +5,12 @@
 
 use std::collections::BTreeMap;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use serde_json::{json, Value};
 use terrarium_ai::{AiConfig, PRESETS};
+use terrarium_blobs::{BlobError, MAX_BLOB};
+use terrarium_core::FileRef;
 use terrarium_scheduler::{Repeat, Settings};
 
 use crate::pages::{clean_config, clean_host_config, host_widgets, Placement, HOST_WIDGETS};
@@ -109,6 +113,46 @@ fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("`{key}` must be text"))
 }
 
+fn parse_blob_id(args: &Value) -> Result<terrarium_blobs::BlobId, String> {
+    let id = arg_str(args, "blob")?;
+    id.parse()
+        .map_err(|_| format!("`blob` is not a valid blob id: `{id}`"))
+}
+
+fn quota_error_text(quota_mb: u64) -> String {
+    format!(
+        "Attachments are full ({} GB). Remove some or raise the limit in Settings.",
+        quota_mb / 1024
+    )
+}
+
+fn quota_allows_blob(host: &PluginHost, bytes: usize) -> Result<(), String> {
+    let current = host.blob_usage_bytes();
+    let limit = host.blob_quota_bytes();
+    if current.saturating_add(bytes as u64) > limit {
+        return Err(quota_error_text(host.blob_quota_mb()));
+    }
+    Ok(())
+}
+
+fn attachment_settings(host: &PluginHost) -> Value {
+    json!({
+        "used_bytes": host.blob_usage_bytes(),
+        "quota_mb": host.blob_quota_mb(),
+        "quota_bytes": host.blob_quota_bytes(),
+    })
+}
+
+fn blob_error(e: BlobError) -> String {
+    match e {
+        BlobError::TooLarge => format!("blob is larger than {MAX_BLOB} bytes"),
+        BlobError::NoKey => "Attachments are available after this device joins a space.".into(),
+        BlobError::Corrupt => "stored blob data is corrupt".into(),
+        BlobError::NotFound => "blob not found".into(),
+        BlobError::Io(message) => message,
+    }
+}
+
 /// Answers `cmd` if it is one of these commands. `desktop`: whether this
 /// device is a computer (for "run now").
 pub fn invoke(
@@ -124,6 +168,84 @@ pub fn invoke(
         "assistant_reply" => {
             (|| host.assistant_reply(arg_str(args, "space")?, arg_str(args, "id")?))()
         }
+        "blob.settings" => Ok(attachment_settings(host)),
+        "blob.set_quota" => (|| {
+            let quota_mb = arg(args, "quota_mb")?
+                .as_u64()
+                .ok_or("`quota_mb` must be a whole number")?;
+            if !(512..=10_240).contains(&quota_mb) {
+                return Err("`quota_mb` must be between 512 and 10240".into());
+            }
+            host.set_blob_quota_mb(quota_mb);
+            Ok(attachment_settings(host))
+        })(),
+        "blob.cleanup" => {
+            let report = host.blob_gc_collect_now(now_ms());
+            Ok(json!({
+                "report": report,
+                "settings": attachment_settings(host),
+            }))
+        }
+        "blob.put" => (|| {
+            let name = arg_str(args, "name")?.to_string();
+            let mime = arg_str(args, "mime")?.to_string();
+            let data = arg_str(args, "data_base64")?;
+            let bytes = B64
+                .decode(data)
+                .map_err(|_| "`data_base64` must be valid base64".to_string())?;
+            if bytes.len() as u64 > MAX_BLOB {
+                return Err(format!("blob exceeds {MAX_BLOB} bytes"));
+            }
+            let blobs = host.blob_store();
+            let mut store = blobs
+                .lock()
+                .map_err(|_| "blob store is unavailable".to_string())?;
+            let maybe_existing = store.id_of(&bytes).ok();
+            if let Some(id) = &maybe_existing {
+                if !store.has(id) {
+                    quota_allows_blob(host, bytes.len())?;
+                }
+            } else {
+                quota_allows_blob(host, bytes.len())?;
+            }
+            let blob = store.put(&bytes).map_err(blob_error)?;
+            let value = FileRef {
+                blob,
+                name,
+                mime,
+                size: bytes.len() as u64,
+            }
+            .to_json_string()
+            .map_err(|e| e.to_string())?;
+            Ok(json!(value))
+        })(),
+        "blob.get" => (|| {
+            let blob = parse_blob_id(args)?;
+            let blobs = host.blob_store();
+            let store = blobs
+                .lock()
+                .map_err(|_| "blob store is unavailable".to_string())?;
+            match store.get(&blob) {
+                Ok(bytes) => Ok(json!({
+                    "mime": "application/octet-stream",
+                    "data_base64": B64.encode(bytes),
+                })),
+                Err(BlobError::NotFound) => Ok(json!({"missing": true})),
+                Err(e) => Err(blob_error(e)),
+            }
+        })(),
+        "blob.info" => (|| {
+            let blob = parse_blob_id(args)?;
+            let blobs = host.blob_store();
+            let store = blobs
+                .lock()
+                .map_err(|_| "blob store is unavailable".to_string())?;
+            if !store.has(&blob) {
+                return Ok(json!({"present": false, "size": Value::Null}));
+            }
+            let size = store.size(&blob).map_err(blob_error)?;
+            Ok(json!({"present": true, "size": size}))
+        })(),
         "ai_save_settings" => (|| {
             let config: AiConfig =
                 serde_json::from_value(arg(args, "config")?.clone()).map_err(|e| e.to_string())?;

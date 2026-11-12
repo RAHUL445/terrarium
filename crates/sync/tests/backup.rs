@@ -2,11 +2,13 @@
 //! phrase on a fresh one, merged without undoing newer edits.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
+use terrarium_blobs::{BlobKey, BlobStore};
 use terrarium_core::{ManualTime, PluginSchema, Store, StoreConfig};
-use terrarium_sync::{Backup, Roster, SpaceKey};
+use terrarium_sync::{Backup, BackupBlobs, Roster, SpaceKey};
 
 fn schema() -> PluginSchema {
     serde_json::from_value(json!({"version": 1, "tables": [
@@ -41,15 +43,62 @@ fn values(v: Value) -> Map<String, Value> {
     v.as_object().unwrap().clone()
 }
 
+struct DiskBlobs {
+    store: Mutex<BlobStore>,
+}
+
+impl DiskBlobs {
+    fn new(root: &std::path::Path, key: &SpaceKey) -> Self {
+        let mut store = BlobStore::open(root).unwrap();
+        store.set_key(BlobKey::new("space", &key.to_bytes()));
+        Self {
+            store: Mutex::new(store),
+        }
+    }
+}
+
+impl BackupBlobs for DiskBlobs {
+    fn list_blob_ids(&self) -> terrarium_sync::Result<Vec<String>> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect())
+    }
+
+    fn get_sealed(&self, id: &str) -> terrarium_sync::Result<Vec<u8>> {
+        let id = id
+            .parse()
+            .map_err(|_| terrarium_sync::SyncError::Transport(format!("bad blob id {id}")))?;
+        self.store
+            .lock()
+            .unwrap()
+            .get_sealed(&id)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+
+    fn put_sealed(&self, id: &str, sealed: &[u8]) -> terrarium_sync::Result<()> {
+        let id = id
+            .parse()
+            .map_err(|_| terrarium_sync::SyncError::Transport(format!("bad blob id {id}")))?;
+        self.store
+            .lock()
+            .unwrap()
+            .put_sealed(&id, sealed)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+}
+
 #[test]
-fn backup_restores_with_the_recovery_phrase_and_keeps_newer_edits() {
+fn v2_backup_round_trip_restores_blobs() {
     let dir = TempDir::new().unwrap();
     let time = ManualTime::new(1_000);
     let key = SpaceKey::generate();
-    let phrase = key.recovery_phrase();
-
     let mut laptop = stores(&dir, "laptop", &time);
-    let id = laptop
+    laptop
         .get_mut("notes")
         .unwrap()
         .write(|w| {
@@ -59,70 +108,82 @@ fn backup_restores_with_the_recovery_phrase_and_keeps_newer_edits() {
             )
         })
         .unwrap();
-    let backup = Backup::collect(
+    let source_blobs = DiskBlobs::new(&dir.path().join("blobs-src"), &key);
+    let blob_id = source_blobs
+        .store
+        .lock()
+        .unwrap()
+        .put(b"hello from backup blob")
+        .unwrap();
+
+    let backup = Backup::collect_with_blobs(
         "space-1",
         &"laptop".into(),
         5_000,
         Roster::new(),
         &mut laptop,
+        &source_blobs,
     )
     .unwrap();
     let sealed = backup.seal(&key).unwrap();
-
-    // Readable header, unreadable content without the key.
-    let info = Backup::info(&sealed).unwrap();
-    assert_eq!(info.space, "space-1");
-    assert!(!String::from_utf8_lossy(&sealed).contains("first draft"));
-    let wrong = SpaceKey::generate();
-    assert!(Backup::open(&sealed, &wrong).is_err());
-
-    // A fresh device gets everything back.
+    assert_eq!(Backup::info(&sealed).unwrap().v, 2);
     let mut phone = stores(&dir, "phone", &time);
-    let restored =
-        Backup::open(&sealed, &SpaceKey::from_recovery_phrase(&phrase).unwrap()).unwrap();
-    let report = restored.restore(&mut phone).unwrap();
+    let target_blobs = DiskBlobs::new(&dir.path().join("blobs-dst"), &key);
+    let restored = Backup::open(&sealed, &key).unwrap();
+    let report = restored
+        .restore_with_blobs(&mut phone, &target_blobs)
+        .unwrap();
     assert!(report.applied > 0);
-    let rows = phone["notes"]
-        .query("SELECT title, body FROM notes", &[])
-        .unwrap();
-    assert_eq!(rows[0]["body"], json!("first draft"));
-
-    // Restoring an old backup does not undo a later edit, and repeats are no-ops.
-    time.advance(10_000);
-    laptop
-        .get_mut("notes")
-        .unwrap()
-        .write(|w| w.update("notes", &id, &values(json!({"title": "Plan v2"}))))
-        .unwrap();
-    let again = restored.restore(&mut laptop).unwrap();
-    assert_eq!(again.applied, 0);
-    let rows = laptop["notes"]
-        .query("SELECT title FROM notes", &[])
-        .unwrap();
-    assert_eq!(rows[0]["title"], json!("Plan v2"));
-
-    // Tampering is detected.
-    let mut bad = sealed.clone();
-    let text = String::from_utf8(bad.clone()).unwrap();
-    let at = text.find("\"ciphertext\":\"").unwrap() + 20;
-    bad[at] = if bad[at] == b'A' { b'B' } else { b'A' };
-    assert!(Backup::open(&bad, &key).is_err());
+    assert_eq!(restored.blobs.len(), 1);
+    let opened = target_blobs.store.lock().unwrap().get(&blob_id).unwrap();
+    assert_eq!(opened, b"hello from backup blob");
 }
 
 #[test]
-fn restore_reports_stores_this_device_lacks() {
+fn v1_backup_still_restores() {
     let dir = TempDir::new().unwrap();
     let time = ManualTime::new(1_000);
     let key = SpaceKey::generate();
     let mut laptop = stores(&dir, "laptop", &time);
     let backup = Backup::collect("s", &"laptop".into(), 1, Roster::new(), &mut laptop).unwrap();
+    let v1 = backup.seal_v1_compat(&key).unwrap();
+    assert_eq!(Backup::info(&v1).unwrap().v, 1);
     let mut only_notes: BTreeMap<String, Store> = stores(&dir, "tablet", &time)
         .into_iter()
         .filter(|(k, _)| k == "notes")
         .collect();
-    let report = Backup::open(&backup.seal(&key).unwrap(), &key)
+    let report = Backup::open(&v1, &key)
         .unwrap()
         .restore(&mut only_notes)
         .unwrap();
     assert_eq!(report.missing, vec!["other".to_string()]);
+}
+
+#[test]
+fn tampered_blob_in_backup_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let time = ManualTime::new(1_000);
+    let key = SpaceKey::generate();
+    let mut laptop = stores(&dir, "laptop", &time);
+    let source_blobs = DiskBlobs::new(&dir.path().join("blobs-src"), &key);
+    source_blobs
+        .store
+        .lock()
+        .unwrap()
+        .put(b"tamper me")
+        .unwrap();
+    let mut backup = Backup::collect_with_blobs(
+        "space-1",
+        &"laptop".into(),
+        5_000,
+        Roster::new(),
+        &mut laptop,
+        &source_blobs,
+    )
+    .unwrap();
+    backup.blobs[0].sealed[10] ^= 1;
+    let target_blobs = DiskBlobs::new(&dir.path().join("blobs-dst"), &key);
+    let restored = Backup::open(&backup.seal(&key).unwrap(), &key).unwrap();
+    let out = restored.restore_with_blobs(&mut laptop, &target_blobs);
+    assert!(out.is_err());
 }

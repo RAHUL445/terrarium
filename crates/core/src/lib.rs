@@ -5,6 +5,7 @@
 //! merges deterministically on every device using per-column merge rules
 //! and per-table delete policies. See `docs/develop/architecture.md`.
 
+pub mod blob;
 pub mod change;
 pub mod error;
 pub mod hlc;
@@ -14,11 +15,12 @@ pub mod store;
 mod text;
 mod value;
 
+pub use blob::BlobId;
 pub use change::{Batch, Change, Op, VersionVector};
 pub use error::{Error, Result};
 pub use hlc::{Clock, DeviceId, Hlc, ManualTime, SystemTime, TimeSource};
 pub use schema::{
-    ColumnDef, ColumnType, DeletePolicy, MergeRule, PluginSchema, TableDef, TableKind,
+    ColumnDef, ColumnType, DeletePolicy, FileRef, MergeRule, PluginSchema, TableDef, TableKind,
 };
 pub use store::{
     ChangeRecord, ConflictRecord, ImportReport, NoticeRecord, RowState, Store, StoreConfig,

@@ -32,6 +32,10 @@
     "allow-remove-theme",
     "allow-export-space",
     "allow-reveal-export",
+    "allow-blob-put",
+    "allow-blob-get",
+    "allow-blob-info",
+    "allow-blob-save",
     "allow-create-backup",
     "allow-list-backups",
     "allow-restore-backup",
@@ -60,6 +64,8 @@
     "allow-recovery-phrase",
     "allow-connect-drive",
     "allow-disconnect-drive",
-    "allow-take-links"
+    "allow-take-links",
+    "allow-set-blob-quota",
+    "allow-cleanup-attachments"
   ]
 }

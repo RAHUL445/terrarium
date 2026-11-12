@@ -29,7 +29,7 @@ use crate::spaces::DEFAULT_SPACE;
 /// Namespaces of host commands. Plugin ids can't use them.
 pub const HOST_NAMESPACES: &[&str] = &[
     "app", "plugin", "space", "page", "search", "schedule", "theme", "sync", "backup", "ui", "ref",
-    "link",
+    "link", "blob",
 ];
 
 const SEARCH_LIMIT: usize = 200;

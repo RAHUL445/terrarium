@@ -1,0 +1,18 @@
+[package]
+name = "terrarium-blobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+terrarium-core = { path = "../core" }
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+hkdf = "0.12"
+serde.workspace = true
+sha2 = "0.10"
+tempfile.workspace = true
+thiserror.workspace = true

@@ -6,10 +6,13 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use terrarium_runtime::blobs::{BlobKey, MAX_BLOB};
 use terrarium_runtime::commands::{self, Caller, CommandError, Kind, Scope};
-use terrarium_runtime::{build_plugin, HostConfig, Manifest, PluginHost};
+use terrarium_runtime::{build_plugin, services, HostConfig, Manifest, PluginHost};
 
 const READ: Caller = Caller::Client(Scope::Read);
 const CHANGE: Caller = Caller::Client(Scope::Change);
@@ -1436,6 +1439,35 @@ fn import_errors() {
 }
 
 #[test]
+fn blob_put_then_get_round_trip() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.set_blob_key(BlobKey::new("space", &[9u8; 32]));
+    let payload = b"hello attachments";
+    let put = services::invoke(
+        &mut host,
+        "blob.put",
+        &json!({
+            "name": "hello.txt",
+            "mime": "text/plain",
+            "data_base64": B64.encode(payload),
+        }),
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    let file: terrarium_core::FileRef = serde_json::from_str(put.as_str().unwrap()).unwrap();
+    let get = services::invoke(&mut host, "blob.get", &json!({"blob": file.blob}), true)
+        .unwrap()
+        .unwrap();
+    assert_eq!(get["mime"], "application/octet-stream");
+    assert_eq!(
+        B64.decode(get["data_base64"].as_str().unwrap()).unwrap(),
+        payload
+    );
+}
+
+#[test]
 fn plugin_list_shows_importers() {
     let data = TempDir::new().unwrap();
     let mut host = import_host(&data);
@@ -1487,4 +1519,63 @@ fn import_csv_reports_failures_and_keeps_successful_items() {
     let mut titles = task_titles(&mut host);
     titles.sort();
     assert_eq!(titles, ["First", "Last"]);
+}
+
+#[test]
+fn blob_get_unknown_reports_missing() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.set_blob_key(BlobKey::new("space", &[9u8; 32]));
+    let missing = services::invoke(
+        &mut host,
+        "blob.get",
+        &json!({"blob":"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(missing, json!({"missing": true}));
+}
+
+#[test]
+fn blob_put_over_limit_fails() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.set_blob_key(BlobKey::new("space", &[9u8; 32]));
+    let large = vec![0u8; MAX_BLOB as usize + 1];
+    let err = services::invoke(
+        &mut host,
+        "blob.put",
+        &json!({
+            "name":"big.bin",
+            "mime":"application/octet-stream",
+            "data_base64": B64.encode(large),
+        }),
+        true,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(err.contains("blob exceeds"));
+}
+
+#[test]
+fn blob_put_fails_over_quota() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.set_blob_key(BlobKey::new("space", &[9u8; 32]));
+    host.set_blob_quota_mb(1);
+    let payload = vec![0u8; 2 * 1024 * 1024];
+    let err = services::invoke(
+        &mut host,
+        "blob.put",
+        &json!({
+            "name":"big.bin",
+            "mime":"application/octet-stream",
+            "data_base64": B64.encode(payload),
+        }),
+        true,
+    )
+    .unwrap()
+    .unwrap_err();
+    assert!(err.contains("Attachments are full"));
 }

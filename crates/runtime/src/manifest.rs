@@ -523,8 +523,15 @@ impl Manifest {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Manifest> {
-        let manifest: Manifest =
-            serde_json::from_slice(bytes).map_err(|e| RuntimeError::Manifest(e.to_string()))?;
+        let manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| {
+            let mut message = e.to_string();
+            if message.contains("unknown variant `file`") {
+                message.push_str(
+                    "; this plugin needs Terrarium 0.1.0 or later with file column support",
+                );
+            }
+            RuntimeError::Manifest(message)
+        })?;
         manifest.validate()?;
         Ok(manifest)
     }

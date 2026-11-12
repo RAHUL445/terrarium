@@ -66,6 +66,11 @@ manifest `view` declarations into ordinary `list`, `table`, `board` or
 - Each plugin gets its own SQLite database per space.
 - Reads are SQL restricted to the plugin's own database. Writes go through the
   host storage API so every change is logged and mergeable.
+- Attachments are encrypted blobs in a host-owned blob store per space. Rows
+  reference blobs by id through `file` column values and markdown
+  `terrarium:blob/<id>` links.
+- Plugin code never receives attachment bytes directly. It only reads and
+  writes file-reference values; byte upload/download is host-mediated.
 - Primary keys are UUIDv7 generated on the device. There are no UNIQUE
   constraints or enforced foreign keys, so offline edits never make sync fail.
 - Migrations are additive only; old changes from other devices must stay valid.
@@ -97,6 +102,12 @@ device, user)`. Devices group changes into numbered batches, encrypt them with
 the space key (XChaCha20-Poly1305) and sign them with the device key (Ed25519).
 Any transport that can `put`, `list` and `get` opaque files can carry them;
 transports never see plaintext and never merge.
+
+Attachment transfer runs after change-batch sync: devices fetch missing blobs
+on demand when rows or markdown references point to them. While bytes are still
+downloading, the UI shows "Not on this device yet". Blob upload/download uses
+the same end-to-end encryption key material and verifies ids against decrypted
+content before accepting bytes.
 
 | Merge rule | Behavior | Example |
 | --- | --- | --- |

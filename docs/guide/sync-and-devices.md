@@ -76,8 +76,11 @@ every plugin's data and the plugin list.
 
 - On a Mac, backups go to `~/Documents/Terrarium Backups/`. On a phone they
   stay in the app's storage, and a phone must join a computer first.
+- Backups include attachments (encrypted blob data) as well as rows.
 - A backup can only be opened with the space's recovery phrase.
 - **Restore from a file** merges the backup in; newer changes are kept.
+- Backup files that include attachments need attachment-capable app versions.
+  Older app versions reject those backups.
 - On a new device, enter the recovery phrase when restoring. A new computer
   that restores a backup becomes the host of that space, so devices paired
   before keep syncing with it.
@@ -86,3 +89,14 @@ There are no automatic or scheduled backups yet.
 
 For readable JSON, Markdown and CSV copies, see [Export and import](export-and-import.md).
 Exports are not encrypted and cannot be restored like backups.
+
+## Attachment storage and cleanup
+
+In **Settings → Devices and sync**, the Attachments card shows usage and quota
+for the current space. You can:
+
+- raise or lower the attachment quota,
+- run **Clean up now** to remove orphaned attachments past their grace period.
+
+Cleanup does not promise secure deletion; it removes unreferenced blobs from
+Terrarium storage.

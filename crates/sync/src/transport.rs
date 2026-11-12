@@ -4,11 +4,16 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Mutex;
 
+use terrarium_blobs::BlobId;
 use terrarium_core::DeviceId;
 
 use crate::error::{Result, SyncError};
+
+const MAX_SEALED_BLOB_BYTES: usize = terrarium_blobs::MAX_BLOB as usize + 4096;
+const MAX_BLOB_LIST_LIMIT: usize = 5_000;
 
 pub trait BatchStore {
     /// Devices that have published anything.
@@ -20,6 +25,20 @@ pub trait BatchStore {
     /// The latest snapshot `device` published, if any.
     fn snapshot(&self, device: &DeviceId) -> Result<Option<Vec<u8>>>;
     fn put_snapshot(&self, device: &DeviceId, bytes: &[u8]) -> Result<()>;
+
+    /// Blob ids in ascending order; optional cursor is exclusive.
+    fn blob_list(&self, _after: Option<&str>, _limit: usize) -> Result<Vec<String>> {
+        Err(SyncError::Transport("blob transport unsupported".into()))
+    }
+    fn blob_has(&self, _id: &str) -> Result<bool> {
+        Err(SyncError::Transport("blob transport unsupported".into()))
+    }
+    fn blob_get(&self, _id: &str) -> Result<Vec<u8>> {
+        Err(SyncError::Transport("blob transport unsupported".into()))
+    }
+    fn blob_put(&self, _id: &str, _sealed: &[u8]) -> Result<()> {
+        Err(SyncError::Transport("blob transport unsupported".into()))
+    }
 }
 
 fn write_atomic(dir: &std::path::Path, name: &str, bytes: &[u8]) -> Result<()> {
@@ -47,6 +66,23 @@ pub(crate) fn check_device(device: &DeviceId) -> Result<()> {
     }
 }
 
+pub(crate) fn check_blob_id(id: &str) -> Result<BlobId> {
+    BlobId::from_str(id).map_err(|_| SyncError::Transport(format!("blob id `{id}` is not valid")))
+}
+
+fn check_blob_size(sealed: &[u8]) -> Result<()> {
+    if sealed.len() > MAX_SEALED_BLOB_BYTES {
+        return Err(SyncError::Transport(format!(
+            "blob is larger than {MAX_SEALED_BLOB_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn clamp_blob_limit(limit: usize) -> usize {
+    limit.min(MAX_BLOB_LIST_LIMIT)
+}
+
 /// A directory: local, network share, or a folder another tool syncs.
 pub struct FolderStore {
     root: PathBuf,
@@ -60,6 +96,12 @@ impl FolderStore {
     fn device_dir(&self, device: &DeviceId) -> Result<PathBuf> {
         check_device(device)?;
         Ok(self.root.join("devices").join(&device.0))
+    }
+
+    fn blob_path(&self, id: &BlobId) -> PathBuf {
+        self.root
+            .join("blobs")
+            .join(format!("{}.blob", id.as_str()))
     }
 }
 
@@ -131,6 +173,67 @@ impl BatchStore for FolderStore {
             bytes,
         )
     }
+
+    fn blob_list(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        let after = match after {
+            Some(id) => Some(check_blob_id(id)?),
+            None => None,
+        };
+        let dir = self.root.join("blobs");
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(SyncError::io(&dir, e)),
+        };
+        let mut ids: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_file())
+            .filter_map(|entry| {
+                let path = entry.path();
+                let stem = path.file_stem()?.to_str()?;
+                check_blob_id(stem).ok().map(|id| id.to_string())
+            })
+            .collect();
+        ids.sort();
+        if let Some(after) = after {
+            ids.retain(|id| id.as_str() > after.as_str());
+        }
+        ids.truncate(clamp_blob_limit(limit));
+        Ok(ids)
+    }
+
+    fn blob_has(&self, id: &str) -> Result<bool> {
+        let id = check_blob_id(id)?;
+        Ok(self.blob_path(&id).is_file())
+    }
+
+    fn blob_get(&self, id: &str) -> Result<Vec<u8>> {
+        let id = check_blob_id(id)?;
+        let path = self.blob_path(&id);
+        let metadata = std::fs::metadata(&path).map_err(|e| SyncError::io(&path, e))?;
+        if metadata.len() as usize > MAX_SEALED_BLOB_BYTES {
+            return Err(SyncError::Transport(
+                "blob exceeds transport size limit".into(),
+            ));
+        }
+        let bytes = std::fs::read(&path).map_err(|e| SyncError::io(&path, e))?;
+        check_blob_size(&bytes)?;
+        Ok(bytes)
+    }
+
+    fn blob_put(&self, id: &str, sealed: &[u8]) -> Result<()> {
+        let id = check_blob_id(id)?;
+        check_blob_size(sealed)?;
+        let path = self.blob_path(&id);
+        if path.is_file() {
+            return Ok(());
+        }
+        write_atomic(
+            &self.root.join("blobs"),
+            &format!("{}.blob", id.as_str()),
+            sealed,
+        )
+    }
 }
 
 impl FolderStore {
@@ -150,6 +253,7 @@ impl FolderStore {
 pub struct MemoryStore {
     files: Mutex<BTreeMap<(DeviceId, u64), Vec<u8>>>,
     snapshots: Mutex<BTreeMap<DeviceId, Vec<u8>>>,
+    blobs: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl MemoryStore {
@@ -211,6 +315,48 @@ impl BatchStore for MemoryStore {
             .lock()
             .unwrap()
             .insert(device.clone(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn blob_list(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        let after = match after {
+            Some(id) => Some(check_blob_id(id)?),
+            None => None,
+        };
+        let mut ids: Vec<String> = self.blobs.lock().unwrap().keys().cloned().collect();
+        if let Some(after) = after {
+            ids.retain(|id| id.as_str() > after.as_str());
+        }
+        ids.truncate(clamp_blob_limit(limit));
+        Ok(ids)
+    }
+
+    fn blob_has(&self, id: &str) -> Result<bool> {
+        let id = check_blob_id(id)?;
+        Ok(self.blobs.lock().unwrap().contains_key(id.as_str()))
+    }
+
+    fn blob_get(&self, id: &str) -> Result<Vec<u8>> {
+        let id = check_blob_id(id)?;
+        let bytes = self
+            .blobs
+            .lock()
+            .unwrap()
+            .get(id.as_str())
+            .cloned()
+            .ok_or_else(|| SyncError::Transport(format!("no blob {}", id.as_str())))?;
+        check_blob_size(&bytes)?;
+        Ok(bytes)
+    }
+
+    fn blob_put(&self, id: &str, sealed: &[u8]) -> Result<()> {
+        let id = check_blob_id(id)?;
+        check_blob_size(sealed)?;
+        self.blobs
+            .lock()
+            .unwrap()
+            .entry(id.to_string())
+            .or_insert_with(|| sealed.to_vec());
         Ok(())
     }
 }
@@ -307,5 +453,87 @@ impl BatchStore for MultiStore {
 
     fn put_snapshot(&self, device: &DeviceId, bytes: &[u8]) -> Result<()> {
         self.each(|s| s.put_snapshot(device, bytes)).map(|_| ())
+    }
+
+    fn blob_list(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        if let Some(id) = after {
+            check_blob_id(id)?;
+        }
+        let mut all: Vec<String> = self
+            .each(|s| s.blob_list(after, limit))?
+            .into_iter()
+            .flatten()
+            .collect();
+        all.sort();
+        all.dedup();
+        all.truncate(clamp_blob_limit(limit));
+        Ok(all)
+    }
+
+    fn blob_has(&self, id: &str) -> Result<bool> {
+        check_blob_id(id)?;
+        let mut success = false;
+        let mut last = None;
+        for (_, store) in &self.stores {
+            match store.blob_has(id) {
+                Ok(true) => return Ok(true),
+                Ok(false) => success = true,
+                Err(e) => last = Some(e),
+            }
+        }
+        if success {
+            Ok(false)
+        } else {
+            Err(last.unwrap_or_else(|| SyncError::Transport("no stores".into())))
+        }
+    }
+
+    fn blob_get(&self, id: &str) -> Result<Vec<u8>> {
+        check_blob_id(id)?;
+        let mut last = None;
+        for (_, store) in &self.stores {
+            match store.blob_get(id) {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| SyncError::Transport("no stores".into())))
+    }
+
+    fn blob_put(&self, id: &str, sealed: &[u8]) -> Result<()> {
+        check_blob_id(id)?;
+        check_blob_size(sealed)?;
+        self.each(|s| s.blob_put(id, sealed)).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folder_store_blob_put_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FolderStore::new(dir.path());
+        let id = "b1-12345678-0000000000000000000000000000000000000000000000000000000000000000";
+        let first = vec![7u8; 32];
+        let second = vec![9u8; 32];
+        store.blob_put(id, &first).unwrap();
+        store.blob_put(id, &second).unwrap();
+        assert_eq!(store.blob_get(id).unwrap(), first);
+    }
+
+    #[test]
+    fn multistore_blob_get_falls_back() {
+        let available = MemoryStore::new();
+        let missing = MemoryStore::new();
+        let id = "b1-12345678-1111111111111111111111111111111111111111111111111111111111111111";
+        let bytes = vec![3u8; 64];
+        available.blob_put(id, &bytes).unwrap();
+        let multi = MultiStore::new(vec![
+            ("missing".into(), Box::new(missing)),
+            ("available".into(), Box::new(available)),
+        ]);
+        assert_eq!(multi.blob_get(id).unwrap(), bytes);
     }
 }

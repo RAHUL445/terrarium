@@ -37,6 +37,9 @@ tauri-plugin-opener = "2"
 time = "0.3"
 tempfile.workspace = true
 
+[target.'cfg(not(target_os = "android"))'.dependencies]
+rfd = "0.15"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 

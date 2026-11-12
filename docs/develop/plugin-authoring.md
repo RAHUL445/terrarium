@@ -27,6 +27,20 @@ Tables and columns come from `storage` in the manifest. Every table gets `id` (U
 - no UNIQUE constraints or foreign keys
 - counters only take `increment`
 
+Attachment columns use `type: "file"`. The value is JSON text with:
+`blob` (attachment id), `name`, optional `mime`, and `size` in bytes.
+Example:
+
+```json
+{"blob":"b1-0123abcd-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"receipt.jpg","mime":"image/jpeg","size":24512}
+```
+
+Plugins can store and read this value like any other column value, but plugin
+code never receives attachment bytes. Byte upload/download stays in host
+commands and host-rendered UI. Hosts that do not support attachments reject
+manifests with `type: "file"`, so publish attachment plugins only for
+attachment-capable host builds.
+
 ## Queries and templates
 
 UI lists never call your code. Declare named read-only queries in the manifest, with `params` naming the values bound to `?1`, `?2`, …:
@@ -45,7 +59,7 @@ A template is `{ "state": {...}, "body": node }`. Example node:
 
 Templates are data: lists run declared queries through the host, so rendering never calls plugin code; only actions do. All text is set through `textContent` and `setAttribute`.
 
-Core components: `stack`, `card`, `section`, `heading`, `text`, `badge`, `stat`, `divider`, `empty`, `button`, `checkbox`, `tabs`, `search-field`, `form`, `text-field`, `text-area`, `date`, `list`, `table`, `calendar`. Any component accepts `if`, `grow` and `basis`.
+Core components: `stack`, `card`, `section`, `heading`, `text`, `badge`, `stat`, `divider`, `empty`, `button`, `checkbox`, `tabs`, `search-field`, `form`, `text-field`, `text-area`, `date`, `list`, `table`, `calendar`, `image`, `file`. Any component accepts `if`, `grow` and `basis`.
 
 Bindings are `{{state.*}}`, `{{row.*}}`, `{{form.*}}`, `{{value}}` and `{{$today}}`. A whole-string binding keeps its raw type, e.g. `true` for `done`.
 
@@ -86,11 +100,21 @@ More components and keys:
 | `action.link` | `{"link": {"from": "{{row.$ref}}", "to": "{{value.ref}}", "kind": "related"}}` calls host `link.add` before an optional `op`. Kind defaults to `related`; success shows “Linked” (or `success`) and refreshes views. Failure shows an error and stops the operation. |
 | `markdown` links | `[Task](terrarium:todo/tasks/id)` renders the same chip in Markdown nodes and editor previews; http(s) links keep their usual behavior. Refs stay within the current space. |
 | `markdown-editor` | Form field for Markdown: toolbar (heading, bold, italic, lists, checklist), Enter continues a list, live preview with tickable checkboxes, word count. Typing `@` plus 1–40 characters offers indexed items across plugins; choosing one inserts a `terrarium:` Markdown link. Use arrows and Enter/Tab to choose or Escape to close. `start: "preview"` opens in preview; `actions: [{label, icon, op, arg, success}]` send the selection or current line to an operation |
+| `image` | Preview an attachment from a file value: `{type: "image", file: "{{row.photo}}", alt, max_height}`. Supports PNG/JPEG/GIF/WebP. Missing bytes show "Not on this device yet". SVG is not rendered inline. |
+| `file` | File card from a file value: `{type: "file", file: "{{row.attachment}}"}` with name, size and a Save action when available. Missing bytes show "Not on this device yet". |
 | `form.autosave` | Saves a moment after typing stops and when its sheet closes; no button. Status shows next to the editor's word count |
 | `sheet.size: "large"`, `sheet.on_close` | Wide panel (full screen on phones); an action run after closing, with the sheet's `row` (e.g. drop an empty note) |
 | `list.layout: "chips"`, `button.variant: "chip"`, `button.pressed` | A row of filter chips (scrolls sideways on phones) |
 | `text-field.suggestions` | `{query, column}`: offers existing values while typing |
 | `$utc_offset_ms` | Add to a UTC ms timestamp in SQL to get local time: `date((ts + ?n) / 1000, 'unixepoch')` |
+
+Markdown attachments use `terrarium:blob/<blob-id>` links:
+
+- image: `![caption](terrarium:blob/<blob-id>)`
+- file: `[download](terrarium:blob/<blob-id>)`
+
+The host resolves and opens these references. Plugin code still only sees
+text/JSON values, never attachment bytes.
 
 A node whose `if` reads `state.*` (outside a list row) appears and disappears as state changes.
 

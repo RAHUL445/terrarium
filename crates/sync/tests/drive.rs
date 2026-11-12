@@ -221,6 +221,25 @@ fn drive_store_puts_lists_gets_and_replaces_snapshots() {
 }
 
 #[test]
+fn drive_blob_round_trip_uses_x_names() {
+    let (endpoints, files) = fake_drive();
+    let drive = DriveStore::with_endpoints(creds(), endpoints);
+    let id = "b1-12345678-0000000000000000000000000000000000000000000000000000000000000000";
+    drive.blob_put(id, b"sealed-blob").unwrap();
+    assert!(drive.blob_has(id).unwrap());
+    assert_eq!(drive.blob_get(id).unwrap(), b"sealed-blob");
+    assert_eq!(drive.blob_list(None, 10).unwrap(), vec![id.to_string()]);
+    let names: Vec<String> = files
+        .lock()
+        .unwrap()
+        .files
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect();
+    assert!(names.iter().any(|name| name == &format!("x.{id}")));
+}
+
+#[test]
 fn sign_in_uses_pkce_and_returns_a_refresh_token() {
     let (endpoints, _) = fake_drive();
     let creds = authorize_drive(

@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -11,6 +12,7 @@ use serde_json::{Map, Value};
 use terrarium_core::{DeviceId, Store as CoreStore, StoreConfig, SystemTime};
 
 use terrarium_ai::{Ai, AiConfig, AiError, Completion, Job, Sealer};
+use terrarium_blobs::{BlobKey, BlobStore};
 use terrarium_scheduler::{Finished, Outcome, Repeat, ScheduleInput, Scheduler};
 
 use crate::error::{Result, RuntimeError};
@@ -73,9 +75,19 @@ pub struct PluginHost {
     /// AI service and scheduler: `None` only while lent to a running call.
     ai: Option<Ai>,
     scheduler: Option<Scheduler>,
+    blobs: Arc<Mutex<BlobStore>>,
     assistant: crate::assistant::Assistant,
     /// Search index: None only while lent to a host indexing call.
     index: Option<crate::index::SearchIndex>,
+}
+
+const BLOB_QUOTA_DEFAULT_MB: u64 = 2048;
+const BLOB_QUOTA_MAX_MB: u64 = 10 * 1024;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct BlobSettings {
+    #[serde(default)]
+    blob_quota_mb: Option<u64>,
 }
 
 impl PluginHost {
@@ -86,6 +98,8 @@ impl PluginHost {
         let pages = Pages::open(&cfg.data_dir, store_config(&cfg, PAGES_STORE_ID))?;
         let links = Links::open(&cfg.data_dir, store_config(&cfg, LINKS_STORE_ID))?;
         let ai = Ai::open(&cfg.data_dir, store_config(&cfg, terrarium_ai::STORE_ID))?;
+        let blobs = BlobStore::open(&blob_dir_for_space(&cfg, DEFAULT_SPACE))
+            .map_err(|e| RuntimeError::Wasm(format!("blob store open failed: {e}")))?;
         let scheduler = Scheduler::open(
             &cfg.data_dir,
             store_config(&cfg, terrarium_scheduler::STORE_ID),
@@ -104,6 +118,7 @@ impl PluginHost {
             open_spaces: [DEFAULT_SPACE.to_string()].into_iter().collect(),
             ai: Some(ai),
             scheduler: Some(scheduler),
+            blobs: Arc::new(Mutex::new(blobs)),
             assistant: crate::assistant::Assistant::default(),
         })
     }
@@ -516,6 +531,66 @@ impl PluginHost {
         self.ai_mut().set_sealer(sealer);
     }
 
+    /// Sets the key that encrypts local blobs at rest.
+    pub fn set_blob_key(&mut self, key: BlobKey) {
+        if let Ok(mut blobs) = self.blobs.lock() {
+            blobs.set_key(key);
+        }
+    }
+
+    pub fn blob_store(&self) -> Arc<Mutex<BlobStore>> {
+        self.blobs.clone()
+    }
+
+    pub fn blobs_gc_path(&self) -> PathBuf {
+        self.data_root().join("blobs-gc.json")
+    }
+
+    pub fn blob_quota_mb(&self) -> u64 {
+        let settings = self.blob_settings();
+        settings
+            .blob_quota_mb
+            .unwrap_or(BLOB_QUOTA_DEFAULT_MB)
+            .clamp(1, BLOB_QUOTA_MAX_MB)
+    }
+
+    pub fn blob_quota_bytes(&self) -> u64 {
+        self.blob_quota_mb() * 1024 * 1024
+    }
+
+    pub fn set_blob_quota_mb(&mut self, quota_mb: u64) {
+        let mut settings = self.blob_settings();
+        settings.blob_quota_mb = Some(quota_mb.clamp(1, BLOB_QUOTA_MAX_MB));
+        self.save_blob_settings(&settings);
+    }
+
+    pub fn blob_usage_bytes(&self) -> u64 {
+        self.blob_store()
+            .lock()
+            .map(|store| store.total_bytes())
+            .unwrap_or(0)
+    }
+
+    pub fn has_closed_spaces(&self) -> bool {
+        let active = self.spaces.active().map(|s| s.len()).unwrap_or_default();
+        active > self.open_spaces.len()
+    }
+
+    pub fn blob_gc_collect(&self, now_ms: u64) -> crate::blobs_gc::GcReport {
+        crate::blobs_gc::collect(self, now_ms)
+    }
+
+    pub fn blob_gc_collect_now(&self, now_ms: u64) -> crate::blobs_gc::GcReport {
+        crate::blobs_gc::collect_now(self, now_ms)
+    }
+
+    pub fn referenced_blob_ids(&self) -> BTreeSet<String> {
+        crate::blobs_gc::referenced(self)
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+
     /// The next queued AI request, if a worker slot is free. Run it with
     /// [`terrarium_ai::complete`] without holding the host, then hand the
     /// result to [`PluginHost::deliver_ai`].
@@ -789,6 +864,36 @@ impl PluginHost {
             .get(plugin)
             .ok_or_else(|| RuntimeError::UnknownPlugin(plugin.into()))
     }
+
+    fn data_root(&self) -> PathBuf {
+        self.cfg
+            .data_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cfg.data_dir.clone())
+    }
+
+    fn blob_settings_path(&self) -> PathBuf {
+        self.data_root().join("blob-settings.json")
+    }
+
+    fn blob_settings(&self) -> BlobSettings {
+        let path = self.blob_settings_path();
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_blob_settings(&self, settings: &BlobSettings) {
+        let path = self.blob_settings_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(bytes) = serde_json::to_vec_pretty(settings) {
+            let _ = std::fs::write(path, bytes);
+        }
+    }
 }
 
 /// The other loaded plugins, carried through a call so that interop can
@@ -1026,6 +1131,22 @@ fn store_config(cfg: &HostConfig, plugin: &str) -> StoreConfig {
         device: cfg.device.clone(),
         user: cfg.user.clone(),
     }
+}
+
+fn blob_dir_for_space(cfg: &HostConfig, space: &str) -> PathBuf {
+    let plugins_dir = if space == DEFAULT_SPACE {
+        cfg.data_dir.clone()
+    } else {
+        cfg.spaces_dir
+            .clone()
+            .unwrap_or_else(|| cfg.data_dir.join("spaces"))
+            .join(space)
+            .join("plugins")
+    };
+    plugins_dir
+        .parent()
+        .map(|p| p.join("blobs"))
+        .unwrap_or_else(|| plugins_dir.join("blobs"))
 }
 
 impl terrarium_core::StoreSet for PluginHost {

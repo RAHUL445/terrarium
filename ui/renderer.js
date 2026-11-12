@@ -22,6 +22,8 @@
   const lifecycle = { activeViews: 0, activeTimers: 0, mountedTotal: 0, disposedTotal: 0 };
   const WHOLE = /^\{\{\s*(!?)\s*([\w$.]+)\s*(?:(==|!=)\s*([\w$.-]*)\s*)?\}\}$/;
   const PART = /\{\{\s*([\w$.]+)\s*\}\}/g;
+  const MAX_BLOB_BYTES = 25 * 1024 * 1024;
+  const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
   function lookup(scope, path) {
     let value = scope;
@@ -137,6 +139,103 @@
   function dayKey(value) {
     const text = String(value ?? "");
     return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : null;
+  }
+
+  function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    if (n >= 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+    return `${Math.max(0, Math.round(n))} B`;
+  }
+
+  function blobLinkRef(url) {
+    const text = String(url || "");
+    const m = text.match(/^terrarium:blob\/(b1-[0-9a-f]{8}-[0-9a-f]{64})(?:\?.*)?$/);
+    if (!m) return null;
+    return { blob: m[1] };
+  }
+
+  function parseFileRef(value) {
+    if (!value) return null;
+    let raw = value;
+    if (typeof raw === "string") {
+      try { raw = JSON.parse(raw); } catch (_) { return null; }
+    }
+    if (!raw || typeof raw !== "object") return null;
+    if (typeof raw.blob !== "string" || typeof raw.name !== "string") return null;
+    if (typeof raw.size !== "number") return null;
+    return {
+      blob: raw.blob,
+      name: raw.name,
+      mime: String(raw.mime || "application/octet-stream"),
+      size: Number(raw.size) || 0,
+    };
+  }
+
+  function escapeMd(text) {
+    return String(text || "").replace(/[\[\]()!]/g, "\\$&");
+  }
+
+  function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",", 2)[1] || "");
+      reader.onerror = () => reject(reader.error || new Error("Couldn’t read file"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function sniffImageMime(dataBase64) {
+    const text = String(dataBase64 || "");
+    if (text.startsWith("iVBORw0KGgo")) return "image/png";
+    if (text.startsWith("/9j/")) return "image/jpeg";
+    if (text.startsWith("R0lGOD")) return "image/gif";
+    try {
+      const head = atob(text.slice(0, 32));
+      if (head.startsWith("RIFF") && head.slice(8, 12) === "WEBP") return "image/webp";
+    } catch (_) {}
+    return null;
+  }
+
+  function renderBlobImage(file, { alt = "", maxHeight = null, blobGet = null } = {}) {
+    const wrap = el("div", "pp-blob-image");
+    const status = el("p", "pp-muted", "Loading image…");
+    wrap.append(status);
+    if (!file) {
+      status.textContent = "Image preview not available.";
+      return wrap;
+    }
+    if (file.mime && !IMAGE_MIME.has(file.mime)) {
+      status.textContent = "Image preview not available.";
+      return wrap;
+    }
+    if (!blobGet) {
+      status.textContent = "Not on this device yet";
+      return wrap;
+    }
+    blobGet(file.blob).then((result) => {
+      if (!result || result.missing) {
+        status.textContent = "Not on this device yet";
+        return;
+      }
+      if (!result.data_base64) {
+        status.textContent = "Couldn’t load image.";
+        return;
+      }
+      const mime = IMAGE_MIME.has(file.mime) ? file.mime : sniffImageMime(result.data_base64);
+      if (!mime) {
+        status.textContent = "Image preview not available.";
+        return;
+      }
+      const img = el("img", "pp-blob-image-img");
+      img.alt = String(alt || file.name || "");
+      if (maxHeight != null) img.style.maxHeight = `${Math.max(32, Number(maxHeight) || 0)}px`;
+      img.src = `data:${mime};base64,${result.data_base64}`;
+      wrap.replaceChildren(img);
+    }).catch(() => {
+      status.textContent = "Couldn’t load image.";
+    });
+    return wrap;
   }
 
   function el(tag, className, text) {
@@ -1190,7 +1289,8 @@
       preview.hidden = true;
       const foot = el("div", "pp-md-foot");
       const count = el("span", "pp-muted", "");
-      foot.append(count);
+      const fileStatus = el("span", "pp-muted", "");
+      foot.append(count, fileStatus);
       const changed = () => area.dispatchEvent(new Event("input", { bubbles: true }));
       const words = () => {
         const text = area.value.replace(/^\s*(#+|[-*>]|\d+\.)\s+(\[[ xX]\]\s+)?/gm, "");
@@ -1199,6 +1299,40 @@
       };
       area.addEventListener("input", words);
       words();
+      const setFileStatus = (text, error = false) => {
+        fileStatus.textContent = text || "";
+        fileStatus.classList.toggle("pp-tone-danger", !!error);
+      };
+      const insertAtCursor = (text) => {
+        const start = area.selectionStart;
+        const end = area.selectionEnd;
+        replace(start, end, text);
+      };
+      const storeFiles = async (files) => {
+        if (!files.length || !this.bridge.blobPut) return false;
+        setFileStatus("Adding file…");
+        try {
+          const refs = [];
+          for (const file of files) {
+            if (file.size > MAX_BLOB_BYTES) throw new Error(`"${file.name}" exceeds 25 MB`);
+            const data_base64 = await fileToBase64(file);
+            const mime = file.type || "application/octet-stream";
+            const stored = await this.bridge.blobPut({ name: file.name, mime, data_base64 });
+            const ref = parseFileRef(stored);
+            if (!ref) throw new Error(`Couldn’t add "${file.name}"`);
+            const safeName = escapeMd(ref.name);
+            refs.push(IMAGE_MIME.has(ref.mime)
+              ? `![${safeName}](terrarium:blob/${ref.blob})`
+              : `[${safeName}](terrarium:blob/${ref.blob})`);
+          }
+          insertAtCursor(refs.join("\n"));
+          setFileStatus("");
+          return true;
+        } catch (e) {
+          setFileStatus(String(e), true);
+          return true;
+        }
+      };
 
       const lineBounds = () => {
         const v = area.value;
@@ -1299,6 +1433,7 @@
             markdown(area.value, {
               open: (url) => this.bridge.open(url),
               ref: (r, label) => this.refs.chip(r, label),
+              blobGet: this.bridge.blobGet ? (id) => this.bridge.blobGet(id) : null,
               toggle: (line) => {
                 const lines = area.value.split("\n");
                 lines[line] = lines[line].replace(/\[( |x)\]/, (_, c) => (c === "x" ? "[ ]" : "[x]"));
@@ -1326,6 +1461,21 @@
         if (!m[4].trim()) return replace(start, area.selectionStart, "");
         const next = m[3] ? `${Number(m[3]) + 1}. ` : m[2].replace("[x]", "[ ]");
         replace(area.selectionStart, area.selectionEnd, `\n${m[1]}${next}`);
+      });
+      area.addEventListener("paste", (event) => {
+        const files = [...(event.clipboardData?.files || [])];
+        if (!files.length) return;
+        event.preventDefault();
+        storeFiles(files);
+      });
+      area.addEventListener("dragover", (event) => {
+        if ((event.dataTransfer?.files || []).length) event.preventDefault();
+      });
+      area.addEventListener("drop", (event) => {
+        const files = [...(event.dataTransfer?.files || [])];
+        if (!files.length) return;
+        event.preventDefault();
+        storeFiles(files);
       });
       node.append(label, bar, area, picker, preview, foot);
       return node;
@@ -1642,7 +1792,48 @@
     },
 
     markdown(spec, scope) {
-      return markdown(resolve(spec.text, scope), { open: (url) => this.bridge.open(url), ref: (r, label) => this.refs.chip(r, label) });
+      return markdown(resolve(spec.text, scope), {
+        open: (url) => this.bridge.open(url),
+        ref: (r, label) => this.refs.chip(r, label),
+        blobGet: this.bridge.blobGet ? (id) => this.bridge.blobGet(id) : null,
+      });
+    },
+
+    image(spec, scope) {
+      const file = parseFileRef(resolve(spec.file, scope));
+      return renderBlobImage(file, {
+        alt: resolve(spec.alt, scope) || file?.name || "",
+        maxHeight: resolve(spec.max_height, scope),
+        blobGet: this.bridge.blobGet ? (id) => this.bridge.blobGet(id) : null,
+      });
+    },
+
+    file(spec, scope) {
+      const file = parseFileRef(resolve(spec.file, scope));
+      if (!file) return el("p", "pp-muted", "Not on this device yet");
+      const card = el("div", "pp-file");
+      const meta = el("div", "pp-file-meta");
+      meta.append(
+        el("strong", "pp-file-name", file.name),
+        el("span", "pp-muted", formatBytes(file.size)),
+      );
+      card.append(meta);
+      if (this.bridge.blobSave && this.bridge.canSaveBlob !== false) {
+        const button = el("button", "pp-button pp-ghost", "Save");
+        button.type = "button";
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await this.bridge.blobSave(file.blob, file.name);
+          } catch (e) {
+            this.bridge.toast(String(e), "error");
+          } finally {
+            button.disabled = false;
+          }
+        });
+        card.append(button);
+      }
+      return card;
     },
 
     /** Opens an http(s) URL in the system browser. */
@@ -2962,12 +3153,20 @@
     let code = null;
     const inline = (line) => {
       const out = document.createDocumentFragment();
-      const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(terrarium:[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}\)|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s)]+)/g;
+      const re = /(\!\[[^\]]*\]\([^)]+\)|\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(terrarium:[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}\)|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s)]+)/g;
       let last = 0;
       for (const m of line.matchAll(re)) {
         if (m.index > last) out.append(line.slice(last, m.index));
         const token = m[0];
-        if (token.startsWith("**")) out.append(el("strong", "", token.slice(2, -2)));
+        if (token.startsWith("![")) {
+          const image = token.match(/^!\[([^\]]*)\]\(([^)\s]+)\)$/);
+          const ref = image ? blobLinkRef(image[2]) : null;
+          if (ref) out.append(renderBlobImage(
+            { blob: ref.blob, name: image[1] || "Attachment", mime: "", size: 0 },
+            { alt: image[1], blobGet: hooks.blobGet },
+          ));
+          else out.append(token);
+        } else if (token.startsWith("**")) out.append(el("strong", "", token.slice(2, -2)));
         else if (token.startsWith("`")) out.append(el("code", "", token.slice(1, -1)));
         else if (token.startsWith("[") || token.startsWith("http")) {
           const link = token.match(/^\[([^\]]+)\]\((.*)\)$/);

@@ -13,6 +13,7 @@
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,10 +23,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tauri::{AppHandle, Emitter, Manager, State};
 use terrarium_core::DeviceId;
+use terrarium_runtime::blobs::BlobId;
 use terrarium_sync::{
-    authorize_drive, pair_with, pairing, Backup, BatchStore, DeviceKeys, DriveCredentials,
-    DriveEndpoints, DriveStore, Envelope, FolderStore, HttpStore, Kind, MultiStore, PeerServer,
-    Relay, Roster, SpaceKey, SpaceSync, SyncReport, BACKUP_EXT,
+    authorize_drive, pair_with, pairing, plan_blobs, transfer_blobs, Backup, BackupBlobs,
+    BatchStore, BlobReport, DeviceKeys, DriveCredentials, DriveEndpoints, DriveStore, Envelope,
+    FolderStore, HttpStore, Kind, LocalBlobs, MultiStore, PeerServer, Relay, Roster, SpaceKey,
+    SpaceSync, SyncReport, BACKUP_EXT,
 };
 
 use crate::plugins::Plugins;
@@ -68,6 +71,8 @@ pub struct LastSync {
     report: Option<SyncReport>,
     /// Stores that could not be reached, e.g. the host while it sleeps.
     stores: BTreeMap<String, String>,
+    #[serde(default)]
+    blobs: BlobReport,
 }
 
 struct Membership {
@@ -116,6 +121,14 @@ pub struct Status {
     tailnet_addresses: Vec<String>,
     pairing: bool,
     last: Option<LastSync>,
+    attachments: AttachmentStatus,
+}
+
+#[derive(Clone, Default, Serialize)]
+pub struct AttachmentStatus {
+    used_bytes: u64,
+    quota_mb: u64,
+    quota_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -260,7 +273,7 @@ impl Sync {
         } = &mut *inner;
         let member = member.as_mut()?;
         let mut store_errors = BTreeMap::new();
-        let outcome = (|| -> Result<SyncReport, String> {
+        let outcome = (|| -> Result<(SyncReport, BlobReport), String> {
             let mut stores: Vec<(String, Box<dyn BatchStore + Send + std::marker::Sync>)> =
                 Vec::new();
             match member.file.role {
@@ -305,11 +318,50 @@ impl Sync {
                 stores.push(("Google Drive".into(), Box::new(DriveStore::new(creds))));
             }
             let transport = MultiStore::new(stores);
-            let result = plugins
-                .with_host(|host| member.engine.sync(host, &transport).map_err(err))
+            let (result, blobs) = plugins
+                .with_host(|host| {
+                    let report = member.engine.sync(host, &transport).map_err(err)?;
+                    let local = host.blob_store();
+                    let wanted = host.referenced_blob_ids();
+                    let used = host.blob_usage_bytes();
+                    let quota = host.blob_quota_bytes();
+                    Ok::<_, String>((report, local, wanted, used, quota))
+                })
                 .unwrap_or_else(|| Err("plugin host unavailable".into()));
             store_errors = transport.errors();
-            let report = result?;
+            let (report, local, wanted, used, quota) = result?;
+            let mut blob_report = BlobReport::default();
+            if report.rejected.is_empty() {
+                let local_ids = {
+                    let guard = local.lock().map_err(err)?;
+                    guard
+                        .list()
+                        .into_iter()
+                        .map(|id| id.to_string())
+                        .collect::<std::collections::BTreeSet<_>>()
+                };
+                let remote_ids = list_remote_blob_ids(&transport).map_err(err)?;
+                let wanted_local = wanted.clone();
+                let wanted_missing_total = remote_ids
+                    .difference(&local_ids)
+                    .filter(|id| wanted_local.contains(*id))
+                    .count();
+                let quota_budget = quota.saturating_sub(used);
+                let blob_plan = plan_blobs(
+                    &local_ids,
+                    &remote_ids,
+                    &|id| wanted.contains(id),
+                    quota_budget,
+                );
+                transfer_blobs(
+                    &blob_plan,
+                    &BlobStoreHandle(local),
+                    &transport,
+                    &mut blob_report,
+                )
+                .map_err(err)?;
+                blob_report.pending = wanted_missing_total.saturating_sub(blob_report.downloaded);
+            }
             if member.file.role == Role::Host {
                 let folder = FolderStore::new(dir.join("relay"));
                 let stored: usize = folder
@@ -325,15 +377,16 @@ impl Sync {
                     eprintln!("compacted {removed} of {stored} batches");
                 }
             }
-            Ok(report)
+            Ok((report, blob_report))
         })();
         let last = match outcome {
-            Ok(report) => LastSync {
+            Ok((report, blobs)) => LastSync {
                 at_ms: now_ms(),
                 ok: report.rejected.is_empty(),
                 error: None,
                 report: Some(report),
                 stores: store_errors,
+                blobs,
             },
             Err(e) => LastSync {
                 at_ms: now_ms(),
@@ -341,6 +394,7 @@ impl Sync {
                 error: Some(e),
                 report: None,
                 stores: store_errors,
+                blobs: BlobReport::default(),
             },
         };
         inner.last = Some(last.clone());
@@ -420,6 +474,76 @@ impl Sync {
     }
 }
 
+struct BlobStoreHandle(std::sync::Arc<std::sync::Mutex<terrarium_runtime::blobs::BlobStore>>);
+
+impl LocalBlobs for BlobStoreHandle {
+    fn get_sealed(&self, id: &str) -> terrarium_sync::Result<Vec<u8>> {
+        let id = BlobId::from_str(id).map_err(|_| {
+            terrarium_sync::SyncError::Transport(format!("blob id `{id}` is not valid"))
+        })?;
+        self.0
+            .lock()
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))?
+            .get_sealed(&id)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+
+    fn put_sealed(&self, id: &str, bytes: &[u8]) -> terrarium_sync::Result<()> {
+        let id = BlobId::from_str(id).map_err(|_| {
+            terrarium_sync::SyncError::Transport(format!("blob id `{id}` is not valid"))
+        })?;
+        self.0
+            .lock()
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))?
+            .put_sealed(&id, bytes)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+}
+
+impl BackupBlobs for BlobStoreHandle {
+    fn list_blob_ids(&self) -> terrarium_sync::Result<Vec<String>> {
+        let mut ids: Vec<String> = self
+            .0
+            .lock()
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))?
+            .list()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect();
+        ids.sort();
+        Ok(ids)
+    }
+
+    fn get_sealed(&self, id: &str) -> terrarium_sync::Result<Vec<u8>> {
+        LocalBlobs::get_sealed(self, id)
+    }
+
+    fn put_sealed(&self, id: &str, bytes: &[u8]) -> terrarium_sync::Result<()> {
+        LocalBlobs::put_sealed(self, id, bytes)
+    }
+}
+
+fn list_remote_blob_ids(
+    transport: &dyn BatchStore,
+) -> terrarium_sync::Result<std::collections::BTreeSet<String>> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = transport.blob_list(cursor.as_deref(), 5_000)?;
+        if page.is_empty() {
+            break;
+        }
+        for id in &page {
+            ids.insert(id.clone());
+        }
+        cursor = page.last().cloned();
+        if page.len() < 5_000 {
+            break;
+        }
+    }
+    Ok(ids)
+}
+
 fn save_space(dir: &Path, file: &SpaceFile) -> Result<(), String> {
     write_private(
         &dir.join("space.json"),
@@ -489,7 +613,7 @@ impl Inner {
 }
 
 #[tauri::command]
-pub fn sync_status(sync: State<'_, Sync>) -> Result<Status, String> {
+pub fn sync_status(sync: State<'_, Sync>, plugins: State<'_, Plugins>) -> Result<Status, String> {
     sync.refresh_host_roster();
     let pairing = sync
         .relay
@@ -518,6 +642,13 @@ pub fn sync_status(sync: State<'_, Sync>) -> Result<Status, String> {
             this_device: true,
         });
     }
+    let attachments = plugins
+        .with_host(|host| AttachmentStatus {
+            used_bytes: host.blob_usage_bytes(),
+            quota_mb: host.blob_quota_mb(),
+            quota_bytes: host.blob_quota_bytes(),
+        })
+        .unwrap_or_default();
     Ok(Status {
         key_storage: inner.secrets.describe(),
         drive: inner.drive.is_some(),
@@ -533,6 +664,7 @@ pub fn sync_status(sync: State<'_, Sync>) -> Result<Status, String> {
             .collect(),
         pairing,
         last: inner.last.clone(),
+        attachments,
     })
 }
 
@@ -789,6 +921,43 @@ pub fn disconnect_drive(sync: State<'_, Sync>) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn set_blob_quota(
+    plugins: State<'_, Plugins>,
+    quota_mb: u64,
+) -> Result<AttachmentStatus, String> {
+    if !(512..=10_240).contains(&quota_mb) {
+        return Err("Quota must be between 512 MB and 10 GB.".into());
+    }
+    plugins
+        .with_host(|host| {
+            host.set_blob_quota_mb(quota_mb);
+            AttachmentStatus {
+                used_bytes: host.blob_usage_bytes(),
+                quota_mb: host.blob_quota_mb(),
+                quota_bytes: host.blob_quota_bytes(),
+            }
+        })
+        .ok_or("plugin host unavailable".into())
+}
+
+#[tauri::command]
+pub fn cleanup_attachments(plugins: State<'_, Plugins>) -> Result<Value, String> {
+    plugins
+        .with_host(|host| {
+            let report = host.blob_gc_collect_now(now_ms());
+            Ok(json!({
+                "report": report,
+                "attachments": {
+                    "used_bytes": host.blob_usage_bytes(),
+                    "quota_mb": host.blob_quota_mb(),
+                    "quota_bytes": host.blob_quota_bytes(),
+                }
+            }))
+        })
+        .ok_or("plugin host unavailable")?
+}
+
 // ---- Encrypted backups -------------------------------------------------
 
 #[derive(Serialize)]
@@ -856,7 +1025,9 @@ pub async fn create_backup(app: AppHandle) -> Result<BackupEntry, String> {
         let now = now_ms();
         let sealed = plugins
             .with_host(|host| {
-                Backup::collect(&space, &device, now, roster, host).and_then(|b| b.seal(&key))
+                let blobs = BlobStoreHandle(host.blob_store());
+                Backup::collect_with_blobs(&space, &device, now, roster, host, &blobs)
+                    .and_then(|b| b.seal(&key))
             })
             .ok_or("plugin host unavailable")?
             .map_err(err)?;
@@ -947,12 +1118,18 @@ pub async fn restore_backup(
         let plugins = app.state::<Plugins>();
         // The plugin set first; then the plugins it brings can take their data.
         let first = plugins
-            .with_host(|host| backup.restore(host))
+            .with_host(|host| {
+                let blobs = BlobStoreHandle(host.blob_store());
+                backup.restore_with_blobs(host, &blobs)
+            })
             .ok_or("plugin host unavailable")?
             .map_err(err)?;
         plugins.reconcile(&crate::shell::AppShell(app.clone()));
         let second = plugins
-            .with_host(|host| backup.restore(host))
+            .with_host(|host| {
+                let blobs = BlobStoreHandle(host.blob_store());
+                backup.restore_with_blobs(host, &blobs)
+            })
             .ok_or("plugin host unavailable")?
             .map_err(err)?;
         let _ = app.emit("data-changed", ());

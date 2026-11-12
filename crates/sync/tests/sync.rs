@@ -1,14 +1,18 @@
 //! Devices syncing through a shared batch store, end to end: encryption,
 //! signatures, relaying, tampering and late-installed plugins.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::str::FromStr;
+use std::sync::Mutex;
 
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
+use terrarium_blobs::{BlobId, BlobKey, BlobStore};
 use terrarium_core::{DeviceId, ManualTime, PluginSchema, RowState, Store, StoreConfig};
 use terrarium_sync::{
-    BatchStore, DeviceKeys, Envelope, FolderStore, MemoryStore, Roster, SpaceKey, SpaceSync,
+    plan_blobs, transfer_blobs, BatchStore, BlobReport, DeviceKeys, Envelope, FolderStore,
+    LocalBlobs, MemoryStore, Roster, SpaceKey, SpaceSync,
 };
 
 fn schema() -> PluginSchema {
@@ -482,4 +486,144 @@ fn idle_devices_stop_publishing() {
     // After a few rounds nothing new and no acknowledgement is outstanding.
     assert_eq!(mac.sync(&store).pushed, None);
     assert_eq!(phone.sync(&store).pushed, None);
+}
+
+struct TestLocalBlobs {
+    store: Mutex<BlobStore>,
+}
+
+impl TestLocalBlobs {
+    fn open(dir: &Path, seed: u8) -> Self {
+        let mut store = BlobStore::open(dir).unwrap();
+        store.set_key(BlobKey::new("space", &[seed; 32]));
+        Self {
+            store: Mutex::new(store),
+        }
+    }
+
+    fn put_plain(&self, plain: &[u8]) -> String {
+        self.store.lock().unwrap().put(plain).unwrap().to_string()
+    }
+
+    fn ids(&self) -> std::collections::BTreeSet<String> {
+        self.store
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect()
+    }
+}
+
+impl LocalBlobs for TestLocalBlobs {
+    fn get_sealed(&self, id: &str) -> terrarium_sync::Result<Vec<u8>> {
+        let id = BlobId::from_str(id).map_err(|_| {
+            terrarium_sync::SyncError::Transport(format!("blob id `{id}` is not valid"))
+        })?;
+        self.store
+            .lock()
+            .unwrap()
+            .get_sealed(&id)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+
+    fn put_sealed(&self, id: &str, bytes: &[u8]) -> terrarium_sync::Result<()> {
+        let id = BlobId::from_str(id).map_err(|_| {
+            terrarium_sync::SyncError::Transport(format!("blob id `{id}` is not valid"))
+        })?;
+        self.store
+            .lock()
+            .unwrap()
+            .put_sealed(&id, bytes)
+            .map_err(|e| terrarium_sync::SyncError::Transport(e.to_string()))
+    }
+}
+
+#[test]
+fn blobs_flow_between_two_devices_via_folder_store() {
+    let root = TempDir::new().unwrap();
+    let folder = FolderStore::new(root.path().join("relay"));
+    let one = TestLocalBlobs::open(&root.path().join("one"), 7);
+    let two = TestLocalBlobs::open(&root.path().join("two"), 7);
+    let one_id = one.put_plain(b"from one");
+    let two_id = two.put_plain(b"from two");
+
+    let remote: BTreeSet<String> = folder.blob_list(None, 1_000).unwrap().into_iter().collect();
+    let plan_one = plan_blobs(&one.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    transfer_blobs(&plan_one, &one, &folder, &mut BlobReport::default()).unwrap();
+
+    let remote: BTreeSet<String> = folder.blob_list(None, 1_000).unwrap().into_iter().collect();
+    let plan_two = plan_blobs(&two.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    let mut report = BlobReport::default();
+    transfer_blobs(&plan_two, &two, &folder, &mut report).unwrap();
+    let remote: BTreeSet<String> = folder.blob_list(None, 1_000).unwrap().into_iter().collect();
+    let plan_one_again = plan_blobs(&one.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    transfer_blobs(&plan_one_again, &one, &folder, &mut BlobReport::default()).unwrap();
+
+    assert!(two.ids().contains(&one_id));
+    assert!(one.ids().contains(&two_id), "{report:?}");
+}
+
+#[test]
+fn missing_blob_on_remote_is_uploaded_once() {
+    let root = TempDir::new().unwrap();
+    let folder = FolderStore::new(root.path().join("relay"));
+    let local = TestLocalBlobs::open(&root.path().join("local"), 9);
+    let id = local.put_plain(b"once");
+    let remote: std::collections::BTreeSet<String> = BTreeSet::new();
+    let plan = plan_blobs(&local.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    let mut report = BlobReport::default();
+    transfer_blobs(&plan, &local, &folder, &mut report).unwrap();
+    transfer_blobs(&plan, &local, &folder, &mut report).unwrap();
+    assert_eq!(folder.blob_list(None, 100).unwrap(), vec![id]);
+}
+
+#[test]
+fn corrupt_remote_blob_is_rejected_and_reported() {
+    let root = TempDir::new().unwrap();
+    let folder = FolderStore::new(root.path().join("relay"));
+    let src = TestLocalBlobs::open(&root.path().join("src"), 5);
+    let dst = TestLocalBlobs::open(&root.path().join("dst"), 6);
+    let id = src.put_plain(b"shared");
+    let mut report = BlobReport::default();
+    let remote: std::collections::BTreeSet<String> = BTreeSet::new();
+    let upload = plan_blobs(&src.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    transfer_blobs(&upload, &src, &folder, &mut report).unwrap();
+
+    let mut sealed = folder.blob_get(&id).unwrap();
+    *sealed.last_mut().unwrap() ^= 0x55;
+    std::fs::write(
+        root.path()
+            .join("relay")
+            .join("blobs")
+            .join(format!("{id}.blob")),
+        sealed,
+    )
+    .unwrap();
+
+    let remote = folder.blob_list(None, 100).unwrap().into_iter().collect();
+    let download = plan_blobs(&dst.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    let mut report = BlobReport::default();
+    transfer_blobs(&download, &dst, &folder, &mut report).unwrap();
+    assert_eq!(report.failed, 1);
+    assert!(!dst.ids().contains(&id));
+}
+
+#[test]
+fn budget_limits_downloads_per_cycle() {
+    let root = TempDir::new().unwrap();
+    let folder = FolderStore::new(root.path().join("relay"));
+    let src = TestLocalBlobs::open(&root.path().join("src"), 4);
+    let dst = TestLocalBlobs::open(&root.path().join("dst"), 4);
+    for i in 0..3 {
+        src.put_plain(format!("blob-{i}").as_bytes());
+    }
+    let remote: std::collections::BTreeSet<String> = BTreeSet::new();
+    let upload = plan_blobs(&src.ids(), &remote, &|_| true, 200 * 1024 * 1024);
+    transfer_blobs(&upload, &src, &folder, &mut BlobReport::default()).unwrap();
+
+    let remote = folder.blob_list(None, 100).unwrap().into_iter().collect();
+    let plan = plan_blobs(&dst.ids(), &remote, &|_| true, terrarium_blobs::MAX_BLOB);
+    assert_eq!(plan.download.len(), 1);
 }

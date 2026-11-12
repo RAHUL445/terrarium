@@ -41,6 +41,10 @@ fn main() {
             "remove_theme",
             "export_space",
             "reveal_export",
+            "blob_put",
+            "blob_get",
+            "blob_info",
+            "blob_save",
             "create_backup",
             "list_backups",
             "restore_backup",
@@ -70,6 +74,8 @@ fn main() {
             "connect_drive",
             "disconnect_drive",
             "take_links",
+            "set_blob_quota",
+            "cleanup_attachments",
         ]),
     ))
     .expect("build application permissions")

@@ -14,6 +14,8 @@ use crate::transport::BatchStore;
 const MAX_BATCH: u64 = 32 * 1024 * 1024;
 const MAX_SNAPSHOT: u64 = MAX_BATCH * 4;
 const MAX_METADATA: u64 = 1024 * 1024;
+const MAX_BLOB_BODY: u64 = 26 * 1024 * 1024;
+const MAX_BLOB_LIST_LIMIT: usize = 5_000;
 
 fn read_limited(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -175,7 +177,7 @@ impl HttpStore {
             .agent
             .request(method, &format!("{}{path}", self.base))
             .set(crate::http_auth::AUTH_HEADER, &proof.header());
-        let result = if method == "GET" {
+        let result = if method == "GET" || method == "HEAD" {
             request.call()
         } else {
             request.send_bytes(body)
@@ -281,6 +283,70 @@ impl BatchStore for HttpStore {
     fn put_snapshot(&self, device: &DeviceId, bytes: &[u8]) -> Result<()> {
         crate::transport::check_device(device)?;
         self.put_bytes(&format!("/snapshots/{}", device.0), bytes, MAX_SNAPSHOT)
+    }
+
+    fn blob_list(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        if let Some(id) = after {
+            crate::transport::check_blob_id(id)?;
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        #[derive(serde::Deserialize)]
+        struct BlobPage {
+            ids: Vec<String>,
+            #[serde(default)]
+            next: Option<String>,
+        }
+        let mut out = Vec::new();
+        let mut cursor = after.map(str::to_string);
+        while out.len() < limit {
+            let page_limit = (limit - out.len()).min(MAX_BLOB_LIST_LIMIT);
+            let mut path = format!("/blobs?limit={page_limit}");
+            if let Some(after) = cursor.as_deref() {
+                path.push_str(&format!("&after={after}"));
+            }
+            let page: BlobPage = self.get_json(&path)?;
+            for id in page.ids {
+                crate::transport::check_blob_id(&id)?;
+                out.push(id);
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+            match page.next {
+                Some(next) => {
+                    crate::transport::check_blob_id(&next)?;
+                    cursor = Some(next);
+                }
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    fn blob_has(&self, id: &str) -> Result<bool> {
+        crate::transport::check_blob_id(id)?;
+        let (status, _) = self.exchange("HEAD", &format!("/blobs/{id}"), &[], MAX_METADATA)?;
+        if status == 404 {
+            return Ok(false);
+        }
+        if !(200..300).contains(&status) {
+            return Err(SyncError::Transport(format!("host answered HTTP {status}")));
+        }
+        Ok(true)
+    }
+
+    fn blob_get(&self, id: &str) -> Result<Vec<u8>> {
+        crate::transport::check_blob_id(id)?;
+        Ok(self
+            .get(&format!("/blobs/{id}"), MAX_BLOB_BODY, false)?
+            .expect("required blob"))
+    }
+
+    fn blob_put(&self, id: &str, sealed: &[u8]) -> Result<()> {
+        crate::transport::check_blob_id(id)?;
+        self.put_bytes(&format!("/blobs/{id}"), sealed, MAX_BLOB_BODY)
     }
 }
 

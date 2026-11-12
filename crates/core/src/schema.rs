@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::blob::BlobId;
 use crate::error::{Error, Result};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +39,42 @@ pub struct ColumnDef {
     pub default: Option<Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileRef {
+    pub blob: BlobId,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+}
+
+impl FileRef {
+    pub fn parse_json(value: &str) -> Result<Self> {
+        let file: FileRef = serde_json::from_str(value)
+            .map_err(|_| Error::Schema("file value is not a valid file reference".into()))?;
+        file.validate()?;
+        Ok(file)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.name.chars().count() > 200 || self.name.contains('/') || self.name.contains('\\') {
+            return Err(Error::Schema(
+                "file value has an invalid name (max 200 chars, no / or \\)".into(),
+            ));
+        }
+        if self.mime.chars().count() > 100 {
+            return Err(Error::Schema(
+                "file value has an invalid mime (max 100 chars)".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn to_json_string(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(Into::into)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ColumnType {
@@ -45,6 +82,7 @@ pub enum ColumnType {
     Integer,
     Real,
     Boolean,
+    File,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,12 +174,39 @@ impl PluginSchema {
                         }
                     }
                 }
+                if column.ty == ColumnType::File {
+                    if column.rule != MergeRule::Lww {
+                        return Err(Error::Schema(format!(
+                            "file column `{}.{}` must use the default lww rule",
+                            table.name, column.name
+                        )));
+                    }
+                    if !matches!(column.default, None | Some(Value::Null)) {
+                        return Err(Error::Schema(format!(
+                            "file column `{}.{}` must have null default",
+                            table.name, column.name
+                        )));
+                    }
+                }
                 if let Some(default) = &column.default {
                     column.check_value(&table.name, default)?;
                 }
             }
         }
         Ok(())
+    }
+
+    pub fn file_columns(&self) -> Vec<(String, String)> {
+        self.tables
+            .iter()
+            .flat_map(|table| {
+                table
+                    .columns
+                    .iter()
+                    .filter(|column| column.ty == ColumnType::File)
+                    .map(|column| (table.name.clone(), column.name.clone()))
+            })
+            .collect()
     }
 
     /// Migrations may only add tables, columns and nothing else: old changes
@@ -246,7 +311,7 @@ impl ColumnDef {
 
     fn ddl(&self) -> Vec<String> {
         let ty = match self.ty {
-            ColumnType::Text => "TEXT",
+            ColumnType::Text | ColumnType::File => "TEXT",
             ColumnType::Integer | ColumnType::Boolean => "INTEGER",
             ColumnType::Real => "REAL",
         };
@@ -266,6 +331,7 @@ impl ColumnDef {
         let ok = match (self.ty, value) {
             (_, Value::Null) => self.rule != MergeRule::Counter,
             (ColumnType::Text, Value::String(_)) => true,
+            (ColumnType::File, Value::String(text)) => FileRef::parse_json(text).is_ok(),
             (ColumnType::Integer, Value::Number(n)) => n.is_i64(),
             (ColumnType::Real, Value::Number(_)) => true,
             (ColumnType::Boolean, Value::Bool(_)) => true,
@@ -282,6 +348,7 @@ impl ColumnDef {
                     ColumnType::Integer => "an integer",
                     ColumnType::Real => "a number",
                     ColumnType::Boolean => "true, false or null",
+                    ColumnType::File => "a valid file reference or null",
                 },
             })
         }
@@ -327,7 +394,8 @@ mod tests {
             {"name": "tasks", "columns": [
                 {"name": "title", "type": "text"},
                 {"name": "done", "type": "boolean", "default": false},
-                {"name": "streak", "type": "integer", "rule": "counter"}
+                {"name": "streak", "type": "integer", "rule": "counter"},
+                {"name": "attachment", "type": "file"}
             ]}
         ]}))
     }
@@ -348,6 +416,8 @@ mod tests {
             json!({"version": 1, "tables": [{"name": "t", "kind": "append", "columns": [{"name": "c", "type": "text", "rule": "text"}]}]}),
             json!({"version": 1, "tables": [{"name": "t", "columns": [{"name": "c__crdt", "type": "text"}]}]}),
             json!({"version": 1, "tables": [{"name": "t", "kind": "append", "columns": [{"name": "c", "type": "integer", "rule": "counter"}]}]}),
+            json!({"version": 1, "tables": [{"name": "t", "columns": [{"name": "c", "type": "file", "rule": "counter"}]}]}),
+            json!({"version": 1, "tables": [{"name": "t", "columns": [{"name": "c", "type": "file", "default": {"blob":"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","name":"x","mime":"text/plain","size":1}}]}]}),
             json!({"version": 0, "tables": []}),
         ];
         for v in bad {
@@ -403,5 +473,68 @@ mod tests {
         policy.version = 2;
         policy.tables[0].delete_policy = DeletePolicy::DeleteWins;
         assert!(base().check_migration(&policy).is_err());
+    }
+
+    #[test]
+    fn file_column_accepts_valid_refs_and_null() {
+        let column = &base().tables[0].columns[3];
+        column.check_value("tasks", &Value::Null).unwrap();
+        column
+            .check_value(
+                "tasks",
+                &json!(
+                    "{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"photo.jpg\",\"mime\":\"image/jpeg\",\"size\":42}"
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn file_column_rejects_bad_ids_names_and_extra_keys() {
+        let column = &base().tables[0].columns[3];
+        let bad = [
+            json!(
+                "{\"blob\":\"bad\",\"name\":\"x\",\"mime\":\"text/plain\",\"size\":1}"
+            ),
+            json!(
+                "{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"a/b\",\"mime\":\"text/plain\",\"size\":1}"
+            ),
+            json!(
+                "{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"x\",\"mime\":\"text/plain\",\"size\":-1}"
+            ),
+            json!(
+                "{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"x\",\"mime\":\"text/plain\",\"size\":1,\"extra\":true}"
+            ),
+            json!(
+                "{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"x\",\"size\":1}"
+            ),
+        ];
+        for value in bad {
+            assert!(
+                column.check_value("tasks", &value).is_err(),
+                "accepted invalid file ref: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn retyping_text_to_file_is_rejected() {
+        let from = schema(json!({"version": 1, "tables": [
+            {"name": "tasks", "columns": [{"name": "title", "type": "text"}]}
+        ]}));
+        let mut to = from.clone();
+        to.version = 2;
+        to.tables[0].columns[0].ty = ColumnType::File;
+        assert!(from.check_migration(&to).is_err());
+    }
+
+    #[test]
+    fn old_schemas_still_parse() {
+        let parsed: PluginSchema = serde_json::from_value(json!({
+            "version": 1,
+            "tables": [{"name":"tasks","columns":[{"name":"title","type":"text"}]}]
+        }))
+        .unwrap();
+        assert_eq!(parsed.tables[0].columns[0].ty, ColumnType::Text);
     }
 }

@@ -11,6 +11,7 @@
 //! ancestors. Merging is done by `terrarium-core` on each device.
 
 mod backup;
+mod blobs;
 mod drive;
 mod engine;
 mod envelope;
@@ -24,7 +25,8 @@ pub mod pairing;
 mod peer;
 mod transport;
 
-pub use backup::{Backup, BackupInfo, RestoreReport, BACKUP_EXT};
+pub use backup::{Backup, BackupBlobs, BackupInfo, RestoreReport, BACKUP_EXT};
+pub use blobs::{plan as plan_blobs, transfer as transfer_blobs, BlobPlan, BlobReport, LocalBlobs};
 pub use drive::{
     authorize as authorize_drive, DriveCredentials, DriveEndpoints, DriveStore,
     SCOPE as DRIVE_SCOPE,

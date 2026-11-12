@@ -12,6 +12,10 @@
 //!   PUT  /batches/<device>/<seq>      store a batch (verified)
 //!   GET  /snapshots/<device>          latest snapshot bytes (404 if none)
 //!   PUT  /snapshots/<device>          store a snapshot (verified)
+//!   GET  /blobs?after=<id>&limit=<n>  JSON blob ids page
+//!   HEAD /blobs/<id>                  blob existence
+//!   GET  /blobs/<id>                  sealed blob bytes
+//!   PUT  /blobs/<id>                  store sealed blob bytes
 //!   GET  /config/<name>               sealed space setting (404 if none)
 //!   GET  /roster                      JSON roster
 //!   GET  /challenge                   single-use request nonce
@@ -41,9 +45,11 @@ use crate::transport::{BatchStore, FolderStore};
 /// Largest batch accepted, and largest pairing request.
 const MAX_BATCH_BODY: usize = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_BODY: usize = 128 * 1024 * 1024;
+const MAX_BLOB_BODY: usize = 26 * 1024 * 1024;
 const MAX_PAIR_BODY: usize = 64 * 1024;
 const MAX_CLOSE_DRAIN: usize = 64 * 1024;
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
+const MAX_BLOB_LIST_LIMIT: usize = 5_000;
 
 type RosterHook = Box<dyn Fn(&Roster) -> Result<()> + Send + Sync>;
 
@@ -454,6 +460,7 @@ async fn handle(
         (Endpoint::Peer(_), &Method::POST, ["v1", "pair"]) => MAX_PAIR_BODY,
         (Endpoint::Peer(_), &Method::PUT, ["v1", "batches", _, _]) => MAX_BATCH_BODY,
         (Endpoint::Peer(_), &Method::PUT, ["v1", "snapshots", _]) => MAX_SNAPSHOT_BODY,
+        (Endpoint::Peer(_), &Method::PUT, ["v1", "blobs", _]) => MAX_BLOB_BODY,
         _ => 0,
     };
     if request
@@ -609,6 +616,69 @@ fn dispatch(relay: &Relay, method: Method, url: &str, body: &[u8]) -> PeerRespon
                 Ok(()) => reply(204, Vec::new(), false),
                 Err(e @ SyncError::Rejected { .. }) => reply_error(403, &e.to_string()),
                 Err(e) => reply_error(500, &e.to_string()),
+            }
+        }
+        (Method::GET, ["v1", "blobs"]) => {
+            let mut after = None;
+            let mut limit = MAX_BLOB_LIST_LIMIT;
+            for kv in query.split('&').filter(|kv| !kv.is_empty()) {
+                if let Some(value) = kv.strip_prefix("after=") {
+                    after = Some(value);
+                } else if let Some(value) = kv.strip_prefix("limit=") {
+                    let Ok(parsed) = value.parse::<usize>() else {
+                        return reply_error(400, "bad blob list limit");
+                    };
+                    limit = parsed.min(MAX_BLOB_LIST_LIMIT);
+                }
+            }
+            if let Some(cursor) = after {
+                if crate::transport::check_blob_id(cursor).is_err() {
+                    return reply_error(400, "bad blob list cursor");
+                }
+            }
+            match relay.store.blob_list(after, limit) {
+                Ok(ids) => {
+                    let next = if ids.len() == limit {
+                        ids.last().cloned()
+                    } else {
+                        None
+                    };
+                    reply(
+                        200,
+                        serde_json::to_vec(&serde_json::json!({"ids": ids, "next": next}))
+                            .unwrap_or_default(),
+                        true,
+                    )
+                }
+                Err(e) => reply_error(500, &e.to_string()),
+            }
+        }
+        (Method::HEAD, ["v1", "blobs", id]) => {
+            if crate::transport::check_blob_id(id).is_err() {
+                return reply_error(404, "no such blob");
+            }
+            match relay.store.blob_has(id) {
+                Ok(true) => reply(200, Vec::new(), false),
+                Ok(false) => reply_error(404, "no such blob"),
+                Err(e) => reply_error(500, &e.to_string()),
+            }
+        }
+        (Method::GET, ["v1", "blobs", id]) => {
+            if crate::transport::check_blob_id(id).is_err() {
+                return reply_error(404, "no such blob");
+            }
+            match relay.store.blob_get(id) {
+                Ok(bytes) => reply(200, bytes, false),
+                Err(_) => reply_error(404, "no such blob"),
+            }
+        }
+        (Method::PUT, ["v1", "blobs", id]) => {
+            if crate::transport::check_blob_id(id).is_err() {
+                return reply_error(404, "no such blob");
+            }
+            match relay.store.blob_put(id, body) {
+                Ok(()) => reply(204, Vec::new(), false),
+                Err(e) => reply_error(400, &e.to_string()),
             }
         }
         (Method::POST, ["v1", "pair"]) => {
@@ -815,5 +885,28 @@ mod auth_tests {
             .unwrap_err()
             .to_string()
             .contains("unverified peer response"));
+    }
+
+    #[test]
+    fn invalid_blob_id_is_404_without_touching_disk() {
+        let (dir, keys, _key, relay, _server, address) = setup();
+        let path = "/v1/blobs/..%2Fsecret";
+        let p = proof(&address, &keys, "GET", path, b"");
+        let response = ureq::get(&format!("http://{address}{path}"))
+            .set(AUTH_HEADER, &p.header())
+            .call()
+            .unwrap_err();
+        assert!(matches!(response, ureq::Error::Status(404, _)));
+        assert!(!dir.path().join("blobs").exists());
+        assert!(relay.store.blob_list(None, 10).unwrap().is_empty());
+
+        let uppercase = "/v1/blobs/b1-ABCDEF12-0000000000000000000000000000000000000000000000000000000000000000";
+        let p = proof(&address, &keys, "GET", uppercase, b"");
+        let response = ureq::get(&format!("http://{address}{uppercase}"))
+            .set(AUTH_HEADER, &p.header())
+            .call()
+            .unwrap_err();
+        assert!(matches!(response, ureq::Error::Status(404, _)));
+        assert!(!dir.path().join("blobs").exists());
     }
 }

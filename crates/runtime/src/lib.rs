@@ -6,6 +6,7 @@
 //! transaction: it commits only if the operation returns `ok`.
 
 mod assistant;
+mod blobs_gc;
 mod builder;
 pub mod commands;
 mod csv;
@@ -56,6 +57,7 @@ pub use spaces::{split_store_id, store_id, SpaceInfo, Spaces, DEFAULT_SPACE, SPA
 pub use speech::SpeechConfig;
 /// The AI service and scheduler crates, for hosts.
 pub use terrarium_ai as ai;
+pub use terrarium_blobs as blobs;
 pub use terrarium_scheduler as scheduler;
 pub use theme::{contrast, Theme, THEME_EXT, THEME_FONTS, THEME_TOKENS};
 

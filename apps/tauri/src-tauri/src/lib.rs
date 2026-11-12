@@ -3,6 +3,7 @@
 //! developer storage inspector over a built-in test plugin.
 
 mod ai;
+mod blobs;
 mod control;
 mod export;
 #[cfg(desktop)]
@@ -494,6 +495,10 @@ pub fn run() {
             themes::remove_theme,
             export::export_space,
             export::reveal_export,
+            blobs::blob_put,
+            blobs::blob_get,
+            blobs::blob_info,
+            blobs::blob_save,
             sync::create_backup,
             sync::list_backups,
             sync::restore_backup,
@@ -522,7 +527,9 @@ pub fn run() {
             sync::recovery_phrase,
             sync::connect_drive,
             sync::disconnect_drive,
-            links::take_links
+            links::take_links,
+            sync::set_blob_quota,
+            sync::cleanup_attachments
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Terrarium");

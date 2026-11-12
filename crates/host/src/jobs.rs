@@ -24,6 +24,7 @@ use terrarium_runtime::{store_id, DEFAULT_SPACE};
 use crate::{now_ms, Plugins, Shell, DESKTOP};
 
 const TICK: Duration = Duration::from_secs(30);
+const GC_EVERY_MS: u64 = 24 * 60 * 60 * 1000;
 /// A computer shows a reminder only if it fell due this recently.
 pub const LATE_LIMIT_MS: u64 = 15 * 60_000;
 
@@ -67,10 +68,15 @@ pub fn start(plugins: Plugins, shell: Arc<dyn Shell>, state_path: PathBuf) {
                 .handled
                 .retain(|key| !state.scheduled.values().any(|k| k == key));
         }
+        let mut next_gc_ms = 0u64;
         loop {
             std::thread::sleep(TICK);
             let ran = run_due_jobs(&plugins, &*shell);
             let now = now_ms();
+            if now >= next_gc_ms {
+                let _ = plugins.with_host(|host| host.blob_gc_collect(now));
+                next_gc_ms = now.saturating_add(GC_EVERY_MS);
+            }
             let reminders = reminders(&plugins, now);
             shell.deliver_reminders(&reminders, &mut state, now);
             forget_old(&mut state, now);

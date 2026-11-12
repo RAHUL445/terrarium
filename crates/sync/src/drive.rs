@@ -22,6 +22,7 @@ use crate::transport::BatchStore;
 pub const SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const MAX_FILE: u64 = 128 * 1024 * 1024;
+const MAX_BLOB_LIST_LIMIT: usize = 5_000;
 
 /// What a device needs to use the store. The refresh token only grants
 /// access to this app's hidden folder.
@@ -127,6 +128,10 @@ fn batch_name(device: &DeviceId, seq: u64) -> String {
 
 fn snapshot_name(device: &DeviceId) -> String {
     format!("s.{}", device.0)
+}
+
+fn blob_name(id: &str) -> String {
+    format!("x.{id}")
 }
 
 fn check_device(device: &DeviceId) -> Result<()> {
@@ -341,6 +346,50 @@ impl BatchStore for DriveStore {
         match self.find(&name)? {
             Some(id) => self.replace(&id, bytes),
             None => self.create(&name, bytes),
+        }
+    }
+
+    fn blob_list(&self, after: Option<&str>, limit: usize) -> Result<Vec<String>> {
+        if let Some(id) = after {
+            crate::transport::check_blob_id(id)?;
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut ids: Vec<String> = self
+            .search("name contains 'x.'")?
+            .into_iter()
+            .filter_map(|f| f.name.strip_prefix("x.").map(str::to_string))
+            .filter(|id| crate::transport::check_blob_id(id).is_ok())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if let Some(after) = after {
+            ids.retain(|id| id.as_str() > after);
+        }
+        ids.truncate(limit.min(MAX_BLOB_LIST_LIMIT));
+        Ok(ids)
+    }
+
+    fn blob_has(&self, id: &str) -> Result<bool> {
+        crate::transport::check_blob_id(id)?;
+        Ok(self.find(&blob_name(id))?.is_some())
+    }
+
+    fn blob_get(&self, id: &str) -> Result<Vec<u8>> {
+        crate::transport::check_blob_id(id)?;
+        let file = self
+            .find(&blob_name(id))?
+            .ok_or_else(|| SyncError::Transport(format!("no blob {id} in Drive")))?;
+        self.download(&file)
+    }
+
+    fn blob_put(&self, id: &str, sealed: &[u8]) -> Result<()> {
+        crate::transport::check_blob_id(id)?;
+        let name = blob_name(id);
+        match self.find(&name)? {
+            Some(file) => self.replace(&file, sealed),
+            None => self.create(&name, sealed),
         }
     }
 }

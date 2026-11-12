@@ -12,6 +12,7 @@ const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 fn schema(version: u32) -> PluginSchema {
     let mut tasks = vec![
         json!({"name": "title", "type": "text"}),
+        json!({"name": "attachment", "type": "file"}),
         json!({"name": "done", "type": "boolean", "default": false}),
         json!({"name": "points", "type": "integer", "rule": "counter"}),
     ];
@@ -26,6 +27,34 @@ fn schema(version: u32) -> PluginSchema {
         {"name": "notes", "columns": [{"name": "body", "type": "text", "rule": "text"}]}
     ]}))
     .unwrap()
+}
+
+#[test]
+fn file_values_merge_like_lww_text() {
+    let dir = TempDir::new().unwrap();
+    let (mut a, mut b) = (Device::new(&dir, "a", 1), Device::new(&dir, "b", 1));
+    let row = a.insert("tasks", json!({"title": "receipt"}));
+    sync(&mut a, &mut b);
+    a.time.set(2_000);
+    a.update(
+        "tasks",
+        &row,
+        json!({"attachment":"{\"blob\":\"b1-01234567-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"a.pdf\",\"mime\":\"application/pdf\",\"size\":12}"}),
+    );
+    b.time.set(3_000);
+    b.update(
+        "tasks",
+        &row,
+        json!({"attachment":"{\"blob\":\"b1-01234567-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"name\":\"b.pdf\",\"mime\":\"application/pdf\",\"size\":13}"}),
+    );
+    sync(&mut a, &mut b);
+    assert_converged(&[&a, &b]);
+    assert_eq!(
+        a.cell("tasks", &row, "attachment"),
+        json!(
+            "{\"blob\":\"b1-01234567-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"name\":\"b.pdf\",\"mime\":\"application/pdf\",\"size\":13}"
+        )
+    );
 }
 
 struct Device {

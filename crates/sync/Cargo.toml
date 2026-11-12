@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 terrarium-core = { path = "../core" }
+terrarium-blobs = { path = "../blobs" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

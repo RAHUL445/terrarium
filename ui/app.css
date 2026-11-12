@@ -715,6 +715,11 @@ button.pp-item-main { cursor: pointer; border-radius: 6px; }
 .pp-md-foot .pp-muted { font-size: 12px; }
 .pp-markdown blockquote { margin: 0; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .pp-markdown ol { margin: 0; padding-left: 22px; }
+.pp-blob-image { margin: 4px 0; }
+.pp-blob-image-img { display: block; max-width: 100%; border-radius: 8px; border: 1px solid var(--border); }
+.pp-file { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.pp-file-meta { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
+.pp-file-name { overflow-wrap: anywhere; }
 .pp-md-code { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow-x: auto; font: 13px/1.5 var(--mono); }
 .pp-markdown ul:has(> .pp-md-task) { list-style: none; padding-left: 2px; }
 .pp-md-task { display: flex; align-items: flex-start; gap: 8px; }

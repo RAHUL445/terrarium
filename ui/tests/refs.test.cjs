@@ -102,7 +102,7 @@ test('disposed views and replies from a previous refresh cannot change chips', a
 test('bridge forwards only allowed host commands and guards the captured space', async () => {
   const source = readFileSync(require.resolve('../app.js'), 'utf8');
   const calls = []; const opens = []; let closes = 0;
-  const context = { currentSpace: 'personal', rails: { closeDrawer: () => closes++ }, call: (...a) => { calls.push(a); return Promise.resolve(); }, openPage: (...a) => opens.push(a), toast() {}, localToday() {} };
+  const context = { window: {}, currentSpace: 'personal', rails: { closeDrawer: () => closes++ }, call: (...a) => { calls.push(a); return Promise.resolve(); }, openPage: (...a) => opens.push(a), toast() {}, localToday() {} };
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('const HOST_BRIDGE_COMMANDS'), source.indexOf('\nfunction refreshPluginViews')), context);
   const b = vm.runInContext('bridge("notes")', context);

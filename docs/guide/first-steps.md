@@ -47,6 +47,10 @@ Bulk actions run up to 500 items at a time. If an action reports
 "10 done, 2 failed", those two failed rows stay selected so you can retry or
 change the action. When available, the toast shows **Undo** for ten seconds.
 
+In Notes, you can add images by pasting or dropping them into the Markdown
+editor. Terrarium stores attachments in your space and inserts
+`terrarium:blob/...` references in the note text.
+
 ## Search and commands
 
 Press **⌘K** (Ctrl+K on other keyboards), or choose **Search**, to find items
@@ -114,6 +118,9 @@ use the same plugins and are on all your paired devices.
 Deleting an item moves it to that app's trash; you can restore it from there.
 If one device edits an item while another deletes it, the edit is kept and the
 item stays in trash with a prompt to restore it.
+
+If a note or file row references an attachment that has not downloaded yet on
+this device, Terrarium shows **Not on this device yet** until sync fetches it.
 
 ## Next
 

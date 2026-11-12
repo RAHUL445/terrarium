@@ -323,9 +323,24 @@ function toast(message, kind = "ok", action = null) {
 }
 
 const HOST_BRIDGE_COMMANDS = new Set(["ref.resolve", "search.query", "ref.backlinks", "link.list", "link.remove", "link.add"]);
+const BLOB_CACHE_LIMIT = 20;
+const blobCache = new Map();
+const blobCacheGet = (id) => {
+  if (!blobCache.has(id)) return null;
+  const value = blobCache.get(id);
+  blobCache.delete(id);
+  blobCache.set(id, value);
+  return value;
+};
+const blobCacheSet = (id, value) => {
+  blobCache.set(id, value);
+  while (blobCache.size > BLOB_CACHE_LIMIT) blobCache.delete(blobCache.keys().next().value);
+};
+const blobCacheDrop = (id) => { if (id) blobCache.delete(id); };
 
 function bridge(plugin) {
   const space = currentSpace;
+  const desktopSave = Boolean(window.__TAURI__ && !/Android/.test(navigator.userAgent) && !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname));
   return {
     plugin,
     command: (kind, id, args) => HOST_BRIDGE_COMMANDS.has(id)
@@ -338,6 +353,21 @@ function bridge(plugin) {
     query: (name, params) => call("run_query", { space, plugin, name, params }),
     action: (op, args) => call("run_action", { space, plugin, op, args }),
     bulk: (op, ids, args) => call("command", { kind: "action", id: "plugin.run_bulk", space, args: { plugin, op, ids, args } }),
+    blobPut: async ({ name, mime, data_base64 }) => {
+      const result = await call("blob_put", { name, mime, data_base64 });
+      try { blobCacheDrop(JSON.parse(result).blob); } catch (_) {}
+      return result;
+    },
+    blobGet: async (id) => {
+      const key = String(id || "");
+      const cached = blobCacheGet(key);
+      if (cached) return cached;
+      const value = await call("blob_get", { blob: key });
+      if (!value?.missing) blobCacheSet(key, value);
+      return value;
+    },
+    blobSave: (id, suggestedName) => call("blob_save", { blob: String(id || ""), suggested_name: String(suggestedName || "attachment") }),
+    canSaveBlob: desktopSave,
     toast,
     aiStatus: async () => {
       const state = await call("service", { name: "ai_settings" });
@@ -632,15 +662,28 @@ function ago(ms) {
   return new Date(ms).toLocaleString();
 }
 
+function formatStorage(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 / 1024))} MB`;
+}
+
 function describeLast(last) {
   if (!last) return "not yet";
   const down = Object.keys(last.stores || {});
   const via = down.length ? ` (unreachable: ${down.join(", ")})` : "";
   if (last.error) return `failed ${ago(last.at_ms)}: ${last.error}`;
   const r = last.report || {};
+  const b = last.blobs || {};
   const parts = [`ok ${ago(last.at_ms)}${via}`];
   if (r.batches) parts.push(`${r.batches} received`);
   if (r.pushed) parts.push(`sent #${r.pushed}`);
+  if (b.downloaded || b.uploaded) {
+    parts.push(`${b.uploaded || 0} uploaded`);
+    parts.push(`${b.downloaded || 0} downloaded`);
+  }
+  if (b.pending) parts.push(`Attachments: ${b.pending} waiting`);
+  if (b.failed) parts.push(`${b.failed} attachment failures`);
   if (r.rejected?.length) parts.push(`${r.rejected.length} rejected`);
   return parts.join(" · ");
 }
@@ -695,6 +738,10 @@ async function loadSyncStatus() {
     ["Keys stored in", s.key_storage],
     ["Last sync", describeLast(s.last)],
   ];
+  const attachments = s.attachments || {};
+  $("attachments-usage").textContent = `Attachments: ${formatStorage(attachments.used_bytes || 0)} of ${formatStorage(attachments.quota_bytes || 0)}`;
+  $("attachments-quota").value = String(attachments.quota_mb || 2048);
+  $("attachments-cleanup-status").textContent = "";
   $("sync-summary").replaceChildren(...rows.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]));
   $("sync-now").hidden = !s.role;
   $("devices-card").hidden = !s.role;
@@ -810,6 +857,42 @@ $("sync-now").addEventListener("click", async () => {
   }
   button.disabled = false;
   await loadSyncStatus();
+});
+
+$("attachments-quota").addEventListener("change", async (event) => {
+  const select = event.currentTarget;
+  select.disabled = true;
+  try {
+    await call("set_blob_quota", { quotaMb: Number(select.value) });
+    await loadSyncStatus();
+  } catch (e) {
+    syncError(String(e));
+  } finally {
+    select.disabled = false;
+  }
+});
+
+$("attachments-cleanup").addEventListener("click", async () => {
+  const button = $("attachments-cleanup");
+  const status = $("attachments-cleanup-status");
+  button.disabled = true;
+  status.textContent = "Cleaning up…";
+  try {
+    const result = await call("cleanup_attachments");
+    const deleted = result?.report?.deleted || 0;
+    const pending = result?.report?.pending || 0;
+    status.textContent = deleted
+      ? `Removed ${deleted} orphaned attachment${deleted === 1 ? "" : "s"}.`
+      : pending
+        ? `${pending} orphaned attachment${pending === 1 ? "" : "s"} still in grace period.`
+        : "No orphaned attachments to remove.";
+    await loadSyncStatus();
+  } catch (e) {
+    status.textContent = "";
+    syncError(String(e));
+  } finally {
+    button.disabled = false;
+  }
 });
 
 $("recovery-show").addEventListener("click", async () => {

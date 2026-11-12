@@ -9,8 +9,8 @@ use serde_json::json;
 use tempfile::TempDir;
 use terrarium_core::{DeviceId, ManualTime, PluginSchema, Store, StoreConfig};
 use terrarium_sync::{
-    pair_with, pairing, BatchStore, DeviceKeys, Envelope, FolderStore, HttpStore, Payload,
-    PeerServer, Relay, Roster, SpaceKey, SpaceSync,
+    pair_with, pairing, BatchStore, DeviceKeys, Envelope, FolderStore, HttpStore, MemoryStore,
+    MultiStore, Payload, PeerServer, Relay, Roster, SpaceKey, SpaceSync,
 };
 
 fn schema() -> PluginSchema {
@@ -81,6 +81,19 @@ impl Host {
     fn address(&self) -> String {
         self.server.addrs()[0].to_string()
     }
+}
+
+fn valid_blob_id() -> &'static str {
+    "b1-12345678-0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+fn blob_round_trip(store: &dyn BatchStore) {
+    let id = valid_blob_id();
+    let bytes = b"sealed blob bytes from tests".to_vec();
+    store.blob_put(id, &bytes).unwrap();
+    assert!(store.blob_has(id).unwrap());
+    assert_eq!(store.blob_get(id).unwrap(), bytes);
+    assert_eq!(store.blob_list(None, 10).unwrap(), vec![id.to_string()]);
 }
 
 #[test]
@@ -297,6 +310,54 @@ fn wildcard_listeners_and_unapproved_device_paths_are_rejected() {
     host.relay
         .set_config("drive", Some(b"sealed-test-bytes".to_vec()));
     assert_eq!(http.config("drive").unwrap().unwrap(), b"sealed-test-bytes");
+}
+
+#[test]
+fn blob_routes_require_membership() {
+    let root = TempDir::new().unwrap();
+    let host = host(&root);
+    let base = format!("http://{}", host.address());
+    for path in ["/v1/blobs", &format!("/v1/blobs/{}", valid_blob_id())] {
+        let err = ureq::get(&format!("{base}{path}")).call().unwrap_err();
+        assert!(matches!(err, ureq::Error::Status(401, _)));
+    }
+    let err = ureq::put(&format!("{base}/v1/blobs/{}", valid_blob_id()))
+        .send_bytes(b"blob")
+        .unwrap_err();
+    assert!(matches!(err, ureq::Error::Status(401, _)));
+}
+
+#[test]
+fn blob_put_and_get_round_trip() {
+    let root = TempDir::new().unwrap();
+    let host = host(&root);
+    let http = HttpStore::new(&host.address(), "personal", &host.keys, &host.key).unwrap();
+    blob_round_trip(&http);
+
+    let folder = FolderStore::new(root.path().join("folder-store"));
+    blob_round_trip(&folder);
+
+    let memory = MemoryStore::new();
+    blob_round_trip(&memory);
+
+    let multi = MultiStore::new(vec![
+        (
+            "folder".into(),
+            Box::new(FolderStore::new(root.path().join("multi-folder"))),
+        ),
+        ("memory".into(), Box::new(MemoryStore::new())),
+    ]);
+    blob_round_trip(&multi);
+}
+
+#[test]
+fn oversized_blob_put_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let host = host(&root);
+    let http = HttpStore::new(&host.address(), "personal", &host.keys, &host.key).unwrap();
+    let bytes = vec![7u8; 26 * 1024 * 1024 + 1];
+    let err = http.blob_put(valid_blob_id(), &bytes).unwrap_err();
+    assert!(err.to_string().contains("size limit"), "{err}");
 }
 
 #[test]

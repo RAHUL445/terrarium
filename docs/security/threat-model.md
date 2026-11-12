@@ -22,6 +22,9 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 - Tauri commands are enumerated and granted only to the local main window.
 - Sync batches are encrypted and signed; peer HTTP requests carry a device proof
   and single-use challenge ([details](peer-http-authentication.md)).
+- Attachments are encrypted-at-rest blobs keyed from the space key. During sync,
+  received blob bytes are accepted only if decrypt+id verification succeeds.
+  Attachment quotas and size caps limit storage and transfer growth.
 - Speech workspaces are private and cleaned up ([details](private-audio.md)).
 - Command-line control is off until turned on in Settings. The socket is a
   `0600` file in the data folder, not a network port. Each client has its own
@@ -42,6 +45,8 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
   neither syncs nor sends AI requests.
 - Dependency advisories are tracked with exposure guards
   ([review](dependency-advisory-review.md)).
+- Blob images only render trusted raster types (PNG/JPEG/GIF/WebP). SVG
+  attachments are treated as files, not inline images.
 
 ## Known gaps
 

@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 use terrarium_runtime::ai::Sealer;
+use terrarium_runtime::blobs::BlobKey;
 use terrarium_runtime::services;
 
 use crate::plugins::{err, Plugins};
@@ -32,7 +33,10 @@ fn update_sealer(app: &AppHandle, current: &mut Option<String>) {
     let id = sealer.id().to_string();
     if app
         .state::<Plugins>()
-        .with_host(|host| host.set_ai_sealer(sealer))
+        .with_host(|host| {
+            host.set_ai_sealer(sealer);
+            host.set_blob_key(BlobKey::new(kind, &root));
+        })
         .is_some()
     {
         *current = Some(id);

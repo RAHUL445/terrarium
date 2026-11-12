@@ -164,6 +164,26 @@
           <dl class="bench" id="sync-summary"></dl>
         </div>
 
+        <div class="card" id="attachments-card">
+          <div class="card-head">
+            <h2>Attachments</h2>
+            <button type="button" id="attachments-cleanup">Clean up now</button>
+          </div>
+          <p class="muted" id="attachments-usage">Not available yet.</p>
+          <div class="pp-field">
+            <label class="pp-label" for="attachments-quota">Quota</label>
+            <select class="pp-input" id="attachments-quota">
+              <option value="512">512 MB</option>
+              <option value="1024">1 GB</option>
+              <option value="2048">2 GB</option>
+              <option value="4096">4 GB</option>
+              <option value="8192">8 GB</option>
+              <option value="10240">10 GB</option>
+            </select>
+          </div>
+          <p class="muted" id="attachments-cleanup-status"></p>
+        </div>
+
         <div class="card" id="devices-card" hidden>
           <h2>Paired devices</h2>
           <ul class="plain" id="device-list"></ul>
