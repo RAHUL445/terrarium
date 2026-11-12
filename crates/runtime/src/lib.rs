@@ -11,6 +11,7 @@ mod builder;
 pub mod commands;
 mod csv;
 mod error;
+mod events;
 mod export;
 mod host;
 mod import;
@@ -22,6 +23,7 @@ mod packages;
 mod pages;
 mod refs;
 mod registry;
+pub mod rules;
 pub mod services;
 mod spaces;
 mod speech;
@@ -30,14 +32,15 @@ mod time;
 
 pub use builder::{build_plugin, componentize};
 pub use error::{Result, RuntimeError};
+pub use events::{EventLog, EventRecord, EVENTS_STORE_ID, EVENT_RETENTION_MS};
 pub use host::Execution;
 pub use index::{IndexProgress, INDEX_CHUNK};
 pub use links::{LinkInfo, Links, LINKS_STORE_ID, LINK_KINDS};
 pub use manifest::{
-    Effect, ExportDef, ExportFormat, ImportDef, ImportFormat, IndexDef, InterfaceDef, JobDef,
-    Limits, Manifest, MoveDef, OpenDef, OperationDef, ParamSpec, ParamType, QueryDef, QueryView,
-    QuickAction, RefDef, RemindersDef, RunOn, Schedule, ShareTarget, ViewColumn, ViewDef,
-    API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES, PERMISSIONS, SHARE_TYPES,
+    Effect, EventDef, ExportDef, ExportFormat, ImportDef, ImportFormat, IndexDef, InterfaceDef,
+    JobDef, Limits, Manifest, MoveDef, OpenDef, OperationDef, ParamSpec, ParamType, QueryDef,
+    QueryView, QuickAction, RefDef, RemindersDef, RunOn, Schedule, ShareTarget, ViewColumn,
+    ViewDef, API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES, PERMISSIONS, SHARE_TYPES,
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,
@@ -62,4 +65,6 @@ pub use terrarium_scheduler as scheduler;
 pub use theme::{contrast, Theme, THEME_EXT, THEME_FONTS, THEME_TOKENS};
 
 pub use refs::{ItemRef, MAX_RESOLVE};
+mod automation;
 mod bulk;
+pub use automation::RuleRunSummary;

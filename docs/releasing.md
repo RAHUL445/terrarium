@@ -28,6 +28,18 @@ A digest mismatch must never be bypassed silently.
 Imported `bundled-plugins/`, build outputs, user databases, keys and signing
 files are not source inputs and are never committed.
 
+## Event-enabled packages
+
+Upgrade the host on **every paired device** before publishing or refreshing a
+synced set containing To-do 0.5.0 or Habits 0.3.0. The API stays
+`terrarium:plugin@0.1.0`, but old hosts reject the `events` manifest field and
+cannot link the new WIT import. New hosts still load pre-event packages.
+Review expanded event-sharing capabilities on install/update, then review each
+automation again on its selected execution device and explicitly start there.
+Rollback to an old host requires compatible packages or another host upgrade;
+never remove synced tables/columns or silently strip event declarations.
+See [plugin authoring](develop/plugin-authoring.md#events).
+
 ## Binary builds
 
 Do not label debug-key Android APKs or unsigned, non-notarized macOS builds as

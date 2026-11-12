@@ -443,7 +443,7 @@ pub fn run() {
             startup_span("sync-open", stage);
             plugins.start(shell.clone());
             sync::Sync::start(app.handle().clone());
-            terrarium_host::jobs::start(plugins, shell, data_dir.join("jobs-state.json"));
+            terrarium_host::jobs::start(plugins, shell, data_dir.join("jobs-state.json"), true);
             ai::start(app.handle().clone());
             app.manage(control::Control::open(&app_data));
             control::start(app.handle());

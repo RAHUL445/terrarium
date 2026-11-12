@@ -31,6 +31,17 @@ fn built(dir: PathBuf) -> PathBuf {
     dir
 }
 
+fn take_events(host: &mut PluginHost) -> Vec<(String, String, Map<String, Value>)> {
+    let events = host.pending_events(1000).unwrap();
+    for event in &events {
+        host.mark_event_handled(&event.id).unwrap();
+    }
+    events
+        .into_iter()
+        .map(|e| (e.plugin, e.name, e.payload))
+        .collect()
+}
+
 fn todo_dir() -> PathBuf {
     built(support::package_root().join("todo"))
 }
@@ -44,11 +55,15 @@ fn host(data: &TempDir) -> PluginHost {
 }
 
 fn host_with(data: &TempDir, execution: Execution) -> PluginHost {
+    host_with_device(data, execution, "test-device")
+}
+
+fn host_with_device(data: &TempDir, execution: Execution, device: &str) -> PluginHost {
     PluginHost::new(HostConfig {
         data_dir: data.path().join("plugins"),
         spaces_dir: None,
         space: "personal".into(),
-        device: "test-device".into(),
+        device: device.into(),
         user: "owner".into(),
         timezone: "Asia/Kolkata".into(),
         execution,
@@ -765,4 +780,792 @@ fn todo_existing_tasks_gain_safe_board_and_matrix_defaults() {
     assert_eq!(rows[0]["id"], id);
     assert_eq!(rows[0]["board_lane"], json!("todo"));
     assert_eq!(rows[0]["matrix_lane"], json!("eliminate"));
+}
+
+#[test]
+fn emitted_events_are_kept_only_when_the_call_commits() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    host.call("limits", "emit_ok", &json!({})).unwrap();
+    let events = take_events(&mut host);
+    assert_eq!(
+        events,
+        vec![("limits".into(), "pinged".into(), params(json!({"n":1})))]
+    );
+    for op in ["emit_then_fail", "emit_then_trap", "emit_many"] {
+        assert!(host.call("limits", op, &json!({})).is_err());
+        assert!(take_events(&mut host).is_empty());
+    }
+}
+#[test]
+fn dry_run_emits_nothing() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    host.call_traced("personal", "limits", "emit_ok", &json!({}), true)
+        .unwrap();
+    assert!(take_events(&mut host).is_empty());
+}
+#[test]
+fn undeclared_and_malformed_events_are_rejected() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    for op in ["emit_undeclared", "emit_bad_payload"] {
+        assert!(
+            matches!(host.call("limits",op,&json!({})),Err(RuntimeError::Plugin {code,..}) if code=="invalid")
+        );
+    }
+    for payload in [
+        json!(null),
+        json!([]),
+        json!({}),
+        json!({"n":null}),
+        json!({"n":true}),
+        json!({"n":1.5}),
+        json!({"n":1,"plugin":"forged"}),
+        json!({"n":1,"space":"forged"}),
+    ] {
+        assert!(
+            matches!(host.call("limits","emit_payload",&json!({"payload":payload})),Err(RuntimeError::Plugin {code,..}) if code=="invalid")
+        );
+    }
+    assert!(
+        matches!(host.call("limits","emit_payload",&json!({"payload":{"n":1,"extra":"x".repeat(16384)}})),Err(RuntimeError::Plugin {code,..}) if code=="quota")
+    );
+    assert!(take_events(&mut host).is_empty());
+}
+#[test]
+fn too_many_events_hit_the_quota() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    host.call("limits", "emit_count", &json!({"count":50}))
+        .unwrap();
+    assert_eq!(take_events(&mut host).len(), 50);
+    assert!(
+        matches!(host.call("limits","emit_many",&json!({})),Err(RuntimeError::Plugin {code,..}) if code=="quota")
+    );
+    assert!(take_events(&mut host).is_empty());
+    host.call("limits", "emit_ok", &json!({})).unwrap();
+    assert_eq!(take_events(&mut host).len(), 1);
+}
+
+#[test]
+fn nested_commits_survive_outer_failure_and_share_the_budget() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    let child = TempDir::new().unwrap();
+    copy_package(&limits_dir(), child.path());
+    let path = child.path().join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["id"] = json!("event-child");
+    manifest["provides"] = json!({"event_sink":{"operations":["emit_count"]}});
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    host.load(child.path()).unwrap();
+    for op in [
+        "emit_child",
+        "emit_child_then_fail",
+        "emit_child_budget",
+        "emit_child_then_trap",
+    ] {
+        let result = host.call("limits", op, &json!({}));
+        if op == "emit_child" {
+            result.unwrap();
+        } else {
+            assert!(result.is_err());
+        }
+        let pending = host.pending_events(100).unwrap();
+        assert!(pending.iter().all(|e| e.space == "personal"
+            && e.plugin == "event-child"
+            && e.depth == 0
+            && e.root == e.id));
+        let events = take_events(&mut host);
+        assert_eq!(events.len(), 50);
+        assert!(events
+            .iter()
+            .all(|(plugin, name, payload)| plugin == "event-child"
+                && name == "pinged"
+                && payload == &params(json!({"n":1}))));
+    }
+    assert!(
+        matches!(host.call("limits", "emit_failed_child_budget", &json!({})), Err(RuntimeError::Plugin {code,..}) if code=="quota")
+    );
+    assert!(take_events(&mut host).is_empty());
+    host.call_traced("personal", "limits", "emit_child", &json!({}), true)
+        .unwrap();
+    assert!(take_events(&mut host).is_empty());
+}
+
+#[test]
+fn unused_events_import_is_eliminated_by_the_final_sdk() {
+    let imports = |dir: PathBuf| {
+        let bytes = std::fs::read(dir.join("dist/plugin.wasm")).unwrap();
+        let wit_component::DecodedWasm::Component(resolve, world) =
+            wit_component::decode(&bytes).unwrap()
+        else {
+            panic!("expected a component");
+        };
+        resolve.worlds[world]
+            .imports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect::<Vec<_>>()
+    };
+    let used = imports(limits_dir());
+    // To-do now emits events; Bookmarks still exercises an unused SDK import.
+    let unused_package = support::package_root().join("bookmarks");
+    build_plugin(&unused_package).unwrap();
+    let unused = imports(unused_package);
+    println!("used imports: {used:?}; unused imports: {unused:?}");
+    assert!(used
+        .iter()
+        .any(|name| name == "terrarium:plugin/events@0.1.0"));
+    assert!(!unused
+        .iter()
+        .any(|name| name.starts_with("terrarium:plugin/events@")));
+}
+
+#[test]
+fn event_payload_types_bounds_optional_fields_and_size_boundary() {
+    let package = TempDir::new().unwrap();
+    copy_package(&limits_dir(), package.path());
+    let path = package.path().join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["events"]["pinged"]["payload"] = json!({
+        "n":{"type":"integer","required":true,"min":0,"max":5},
+        "status":{"type":"enum","values":["ok","waiting"]},
+        "day":{"type":"date"},"flag":{"type":"boolean"},"blob":{"type":"string"}
+    });
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(package.path()).unwrap();
+    for payload in [
+        json!({"n":0}),
+        json!({"n":5,"status":null,"day":null,"flag":null}),
+        json!({"n":1,"status":"ok","day":"2026-11-11","flag":true}),
+    ] {
+        host.call("limits", "emit_payload", &json!({"payload":payload}))
+            .unwrap();
+        assert_eq!(take_events(&mut host).len(), 1);
+    }
+    for payload in [
+        json!({"n":-1}),
+        json!({"n":6}),
+        json!({"n":1,"status":"secret-bad-value"}),
+        json!({"n":1,"day":"secret-bad-value"}),
+        json!({"n":1,"flag":"secret-bad-value"}),
+    ] {
+        let error = host
+            .call("limits", "emit_payload", &json!({"payload":payload}))
+            .unwrap_err();
+        assert!(matches!(&error,RuntimeError::Plugin {code,..} if code=="invalid"));
+        assert!(!error.to_string().contains("secret-bad-value"));
+        assert!(take_events(&mut host).is_empty());
+    }
+    let overhead = json!({"n":1,"blob":""}).to_string().len();
+    let exact = json!({"n":1,"blob":"x".repeat(16384-overhead)});
+    assert_eq!(exact.to_string().len(), 16384);
+    host.call("limits", "emit_payload", &json!({"payload":exact}))
+        .unwrap();
+    assert_eq!(take_events(&mut host).len(), 1);
+    let over = json!({"n":1,"blob":"x".repeat(16385-overhead)});
+    assert!(
+        matches!(host.call("limits","emit_payload",&json!({"payload":over})),Err(RuntimeError::Plugin {code,..}) if code=="quota")
+    );
+    assert!(take_events(&mut host).is_empty());
+}
+
+#[test]
+fn committed_events_reach_the_log_with_depth_zero() {
+    use terrarium_core::StoreSet;
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    assert!(host.plugin_ids().contains(&"_events".into()));
+    host.call("limits", "emit_ok", &json!({})).unwrap();
+    let events = host.pending_events(10).unwrap();
+    assert_eq!(events.len(), 1);
+    let e = &events[0];
+    assert_eq!(
+        (&*e.plugin, &*e.name, e.depth, &*e.space),
+        ("limits", "pinged", 0, "personal")
+    );
+    assert_eq!(e.payload, params(json!({"n":1})));
+    assert_eq!(e.device, "test-device");
+    assert!(e.id.starts_with("ev-test-device-"));
+    assert_eq!(e.root, e.id);
+    assert_eq!(e.contract.len(), 64);
+    let date = jiff::Timestamp::from_millisecond(e.emitted_ms as i64)
+        .unwrap()
+        .to_zoned(jiff::tz::TimeZone::get("Asia/Kolkata").unwrap())
+        .date()
+        .to_string();
+    assert_eq!(e.date, date);
+    assert!(host.pending_events(0).unwrap().is_empty());
+    host.mark_event_handled(&e.id).unwrap();
+    assert!(host.pending_events(10).unwrap().is_empty());
+}
+
+#[test]
+fn failed_and_dry_run_calls_leave_the_log_empty() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    for op in ["emit_then_fail", "emit_then_trap", "emit_many"] {
+        assert!(host.call("limits", op, &json!({})).is_err());
+        assert!(host.pending_events(10).unwrap().is_empty());
+    }
+    host.call_traced("personal", "limits", "emit_ok", &json!({}), true)
+        .unwrap();
+    assert!(host.pending_events(10).unwrap().is_empty());
+}
+
+#[test]
+fn event_insert_failure_does_not_roll_back_or_repeat_plugin_commit() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    // Force an actual SQLite insert failure after the independent plugin commit.
+    let connection = rusqlite::Connection::open(data.path().join("plugins/_events.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'secret-private-value'); END;").unwrap();
+    let result = host.call("limits", "emit_write", &json!({})).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER reject_event")
+        .unwrap();
+    assert!(host.pending_events(10).unwrap().is_empty());
+    let rows = host.query("limits", "all", &Map::new()).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], result["id"]);
+}
+
+#[test]
+fn imported_event_payload_is_revalidated_without_disclosing_values() {
+    use terrarium_core::StoreSet;
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&limits_dir()).unwrap();
+    host.call("limits", "emit_ok", &json!({})).unwrap();
+    let id = host.pending_events(1).unwrap()[0].id.clone();
+    host.store_mut("_events")
+        .unwrap()
+        .write(|w| {
+            w.update(
+                "events",
+                &id,
+                json!({"payload":"{\"n\":\"secret-private-value\"}"})
+                    .as_object()
+                    .unwrap(),
+            )
+        })
+        .unwrap();
+    assert!(host.pending_events(10).unwrap().is_empty());
+}
+
+#[test]
+fn older_peer_parks_events_and_replays_after_upgrade() {
+    use terrarium_core::{Store, StoreSet};
+    use terrarium_sync::{DeviceKeys, MemoryStore, Roster, SpaceKey, SpaceSync};
+    // Simulate an old host which knows all stores except _events.
+    struct Older<'a>(&'a mut PluginHost);
+    impl StoreSet for Older<'_> {
+        fn plugin_ids(&self) -> Vec<String> {
+            self.0
+                .plugin_ids()
+                .into_iter()
+                .filter(|id| id != "_events")
+                .collect()
+        }
+        fn store_mut(&mut self, id: &str) -> Option<&mut Store> {
+            if id == "_events" {
+                None
+            } else {
+                self.0.store_mut(id)
+            }
+        }
+    }
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let mut source = host_with_device(&a, Execution::Auto, "source");
+    let mut destination = host_with_device(&b, Execution::Auto, "destination");
+    source.load(&limits_dir()).unwrap();
+    destination.load(&limits_dir()).unwrap();
+    let key = SpaceKey::generate();
+    let ka = DeviceKeys::generate("source".into());
+    let kb = DeviceKeys::generate("destination".into());
+    let roster: Roster = [&ka, &kb]
+        .into_iter()
+        .map(|k| (k.device.clone(), k.public(&k.device.0)))
+        .collect();
+    let mut sa = SpaceSync::open(
+        "personal",
+        ka,
+        key.clone(),
+        roster.clone(),
+        &a.path().join("sync"),
+    )
+    .unwrap();
+    let mut sb = SpaceSync::open("personal", kb, key, roster, &b.path().join("sync")).unwrap();
+    source.call("limits", "emit_ok", &json!({})).unwrap();
+    let original = source.pending_events(10).unwrap();
+    let transport = MemoryStore::new();
+    sa.sync(&mut source, &transport).unwrap();
+    let parked = sb.sync(&mut Older(&mut destination), &transport).unwrap();
+    assert!(parked.rejected.is_empty());
+    assert!(parked.pending > 0);
+    assert!(destination.pending_events(10).unwrap().is_empty());
+    // Once the host exposes _events, its parked encrypted batches are replayed.
+    let replayed = sb.sync(&mut destination, &transport).unwrap();
+    assert!(replayed.rejected.is_empty());
+    assert!(replayed.applied > 0);
+    assert_eq!(destination.pending_events(10).unwrap(), original);
+}
+
+fn rules_host(data: &TempDir) -> PluginHost {
+    let mut host = host(data);
+    let dir = data.path().join("rule-fixture");
+    copy_package(&limits_dir(), &dir);
+    let path = dir.join("manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["events"]["pinged"]["payload"] = json!({
+        "n":{"type":"integer","required":true}, "optional":{"type":"integer"},
+        "tags":{"type":"string"}, "day":{"type":"date","required":true},
+        "status":{"type":"enum","values":["done","skip"],"required":true},
+        "flag":{"type":"boolean","required":true}
+    });
+    m["operations"]["ok"] = json!({"effect":"write","params":{
+        "n":{"type":"number","required":true}, "day":{"type":"date"},
+        "text":{"type":"string"}, "status":{"type":"enum","values":["done"]},
+        "nested":{"type":"json"}
+    }});
+    for (name, def) in [
+        ("read", json!({"effect":"read","params":{}})),
+        ("destroy", json!({"effect":"destructive","params":{}})),
+        ("on_callback", json!({"effect":"write","params":{}})),
+        ("hidden", json!({"effect":"write","params":{},"cli":false})),
+        (
+            "confirm",
+            json!({"effect":"write","params":{},"confirm":"Confirm"}),
+        ),
+        ("untyped", json!({"effect":"write"})),
+    ] {
+        m["operations"][name] = def;
+    }
+    std::fs::write(path, serde_json::to_vec(&m).unwrap()).unwrap();
+    host.load(&dir).unwrap();
+    host
+}
+fn rule_input() -> terrarium_runtime::rules::RuleInput {
+    serde_json::from_value(json!({"name":"Gym","trigger":{"plugin":"limits","event":"pinged"},"action":{"plugin":"limits","operation":"ok","args":{"n":"{{event.n}}"}}})).unwrap()
+}
+#[test]
+fn rule_check_rejects_unknown_events_fields_and_destructive_targets() {
+    use terrarium_runtime::rules::check;
+    let data = TempDir::new().unwrap();
+    let host = rules_host(&data);
+    let mut r = rule_input();
+    r.trigger.event = "missing".into();
+    assert!(check(&host, &r).unwrap_err().contains("event"));
+    r = rule_input();
+    r.trigger.plugin = "missing".into();
+    assert!(check(&host, &r).unwrap_err().contains("plugin"));
+    r = rule_input();
+    r.filter =
+        serde_json::from_value(json!([{"field":"missing","op":"exists","value":true}])).unwrap();
+    assert!(check(&host, &r).unwrap_err().contains("field"));
+    for op in [
+        "read",
+        "destroy",
+        "on_callback",
+        "hidden",
+        "confirm",
+        "untyped",
+    ] {
+        r = rule_input();
+        r.action.operation = op.into();
+        assert!(check(&host, &r).is_err(), "{op}");
+    }
+    for (field, op, value) in [
+        ("n", "contains", json!("1")),
+        ("tags", "gt", json!(2)),
+        ("n", "exists", json!("true")),
+        ("tags", "has_tag", json!("two tags")),
+        ("n", "eq", json!("1")),
+    ] {
+        r = rule_input();
+        r.filter = serde_json::from_value(json!([{"field":field,"op":op,"value":value}])).unwrap();
+        assert!(check(&host, &r).is_err(), "{field} {op}");
+    }
+}
+#[test]
+fn rule_check_accepts_bindings_that_match_param_types() {
+    use terrarium_runtime::rules::check;
+    let data = TempDir::new().unwrap();
+    let host = rules_host(&data);
+    let mut r = rule_input();
+    r.action.args.insert("day".into(), json!("{{event.$date}}"));
+    r.action
+        .args
+        .insert("text".into(), json!("{{event.$plugin}}"));
+    r.action
+        .args
+        .insert("nested".into(), json!({"literal":"{{event.missing}}"}));
+    assert!(check(&host, &r).is_ok());
+    for binding in [
+        "{{event.day}}",
+        "{{event.optional}}",
+        "{{event.flag}}",
+        "{{event.unknown}}",
+        "prefix {{event.n}}",
+        "{{event.n}} suffix",
+        "{{event.n}}}}",
+    ] {
+        let mut r = rule_input();
+        r.action.args.insert("n".into(), json!(binding));
+        assert!(check(&host, &r).is_err(), "{binding}");
+    }
+    r = rule_input();
+    r.action
+        .args
+        .insert("status".into(), json!("{{event.status}}"));
+    assert!(check(&host, &r).is_err(), "enum subset");
+    r = rule_input();
+    r.action.args.insert("n".into(), json!(42));
+    assert!(check(&host, &r).is_ok());
+    r.action.args.insert("n".into(), json!("42"));
+    assert!(check(&host, &r).is_err());
+}
+#[test]
+fn rule_list_command_is_read_only() {
+    use terrarium_core::StoreSet;
+    use terrarium_runtime::{
+        commands::{self, Caller, Kind, Scope},
+        services,
+    };
+    let data = TempDir::new().unwrap();
+    let mut host = rules_host(&data);
+    assert!(host.plugin_ids().contains(&"_rules".into()));
+    assert!(StoreSet::store_mut(&mut host, "_rules").is_some());
+    let work = host.spaces_mut().create("Work").unwrap();
+    host.sync_spaces().unwrap();
+    let rule = services::invoke(
+        &mut host,
+        "rule_create",
+        &json!({"space":"personal","rule":rule_input()}),
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(rule["approved"], false);
+    for cmd in [
+        "rule_update",
+        "rule_set_enabled",
+        "rule_remove",
+        "rule_review",
+        "rule_approve",
+    ] {
+        let mut args = json!({"space":work.id,"id":rule["id"]});
+        if cmd == "rule_update" {
+            args["rule"] = json!(rule_input());
+        }
+        if cmd == "rule_set_enabled" {
+            args["enabled"] = json!(false);
+        }
+        if cmd == "rule_approve" {
+            args["digest"] = json!("stale");
+        }
+        assert!(
+            services::invoke(&mut host, cmd, &args, true)
+                .unwrap()
+                .unwrap_err()
+                .contains("space"),
+            "{cmd}"
+        );
+    }
+
+    for caller in [Caller::Client(Scope::Read), Caller::Client(Scope::Change)] {
+        let listed = commands::invoke(
+            &mut host,
+            caller,
+            Kind::Query,
+            "rule.list",
+            Some("personal"),
+            &json!({}),
+            true,
+        )
+        .unwrap();
+        assert_eq!(listed["rules"].as_array().unwrap().len(), 1);
+        assert!(!listed.to_string().contains("source_package"));
+        for name in [
+            "rule.create",
+            "rule.update",
+            "rule.approve",
+            "rule.remove",
+            "rule.review",
+            "rule_create",
+        ] {
+            assert_eq!(
+                commands::invoke(
+                    &mut host,
+                    caller,
+                    Kind::Action,
+                    name,
+                    Some("personal"),
+                    &json!({}),
+                    true
+                )
+                .unwrap_err()
+                .code,
+                "not-found"
+            );
+        }
+        assert!(commands::invoke(
+            &mut host,
+            caller,
+            Kind::Query,
+            "rule.runs",
+            Some("personal"),
+            &json!({"limit":51}),
+            true
+        )
+        .is_err());
+    }
+    let mut m: Value =
+        serde_json::from_slice(&std::fs::read(limits_dir().join("manifest.json")).unwrap())
+            .unwrap();
+    m["id"] = json!("rule");
+    assert!(
+        terrarium_runtime::Manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+    assert!(services::invoke(
+        &mut host,
+        "rules",
+        &json!({"space":"personal","unknown":true}),
+        true
+    )
+    .unwrap()
+    .is_err());
+}
+#[test]
+fn rule_review_tokens_bind_loaded_packages_and_current_content() {
+    use terrarium_runtime::services;
+    let data = TempDir::new().unwrap();
+    let mut host = rules_host(&data);
+    let invoke = |host: &mut PluginHost, cmd: &str, args: Value| {
+        services::invoke(host, cmd, &args, true).unwrap()
+    };
+    let r = invoke(
+        &mut host,
+        "rule_create",
+        json!({"space":"personal","rule":rule_input()}),
+    )
+    .unwrap();
+    let id = r["id"].as_str().unwrap();
+    let review = invoke(
+        &mut host,
+        "rule_review",
+        json!({"space":"personal","id":id}),
+    )
+    .unwrap();
+    let approved = invoke(
+        &mut host,
+        "rule_approve",
+        json!({"space":"personal","id":id,"digest":review["digest"]}),
+    )
+    .unwrap();
+    assert_eq!(approved["approved"], true);
+    let mut next = rule_input();
+    next.name = "Rename".into();
+    assert_eq!(
+        invoke(
+            &mut host,
+            "rule_update",
+            json!({"space":"personal","id":id,"rule":next})
+        )
+        .unwrap()["approved"],
+        true
+    );
+    next.action.args.insert("n".into(), json!(2));
+    invoke(
+        &mut host,
+        "rule_update",
+        json!({"space":"personal","id":id,"rule":next}),
+    )
+    .unwrap();
+    assert!(invoke(
+        &mut host,
+        "rule_approve",
+        json!({"space":"personal","id":id,"digest":review["digest"]})
+    )
+    .is_err());
+    // Restoring the mapping restores its content approval, but a package reload revokes it.
+    invoke(
+        &mut host,
+        "rule_update",
+        json!({"space":"personal","id":id,"rule":rule_input()}),
+    )
+    .unwrap();
+    let path = data.path().join("rule-fixture/manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["name"] = json!("Updated fixture");
+    std::fs::write(path, serde_json::to_vec(&m).unwrap()).unwrap();
+    host.load(&data.path().join("rule-fixture")).unwrap();
+    let rule = host.rules().get(id).unwrap().unwrap();
+    assert!(!host.rule_info(rule).unwrap().approved);
+    host.unload("limits");
+    let info = host
+        .rule_info(host.rules().get(id).unwrap().unwrap())
+        .unwrap();
+    assert!(info.problem.is_some());
+    assert!(!info.approved);
+    assert!(invoke(&mut host, "rule_remove", json!({"space":"missing","id":id})).is_err());
+}
+
+#[test]
+fn older_peer_parks_rules_and_replays_after_upgrade() {
+    use terrarium_core::{Store, StoreSet};
+    use terrarium_sync::{DeviceKeys, MemoryStore, Roster, SpaceKey, SpaceSync};
+    // Simulate an old host which knows all stores except _rules.
+    struct Older<'a>(&'a mut PluginHost);
+    impl StoreSet for Older<'_> {
+        fn plugin_ids(&self) -> Vec<String> {
+            self.0
+                .plugin_ids()
+                .into_iter()
+                .filter(|id| id != "_rules")
+                .collect()
+        }
+        fn store_mut(&mut self, id: &str) -> Option<&mut Store> {
+            if id == "_rules" {
+                None
+            } else {
+                self.0.store_mut(id)
+            }
+        }
+    }
+    let a = TempDir::new().unwrap();
+    let b = TempDir::new().unwrap();
+    let mut source = host_with_device(&a, Execution::Auto, "source");
+    let mut destination = host_with_device(&b, Execution::Auto, "destination");
+    source.load(&limits_dir()).unwrap();
+    destination.load(&limits_dir()).unwrap();
+    let key = SpaceKey::generate();
+    let ka = DeviceKeys::generate("source".into());
+    let kb = DeviceKeys::generate("destination".into());
+    let roster: Roster = [&ka, &kb]
+        .into_iter()
+        .map(|k| (k.device.clone(), k.public(&k.device.0)))
+        .collect();
+    let mut sa = SpaceSync::open(
+        "personal",
+        ka,
+        key.clone(),
+        roster.clone(),
+        &a.path().join("sync"),
+    )
+    .unwrap();
+    let mut sb = SpaceSync::open("personal", kb, key, roster, &b.path().join("sync")).unwrap();
+    let original = source
+        .rules_mut()
+        .create("personal", &rule_input())
+        .unwrap();
+    let transport = MemoryStore::new();
+    sa.sync(&mut source, &transport).unwrap();
+    let parked = sb.sync(&mut Older(&mut destination), &transport).unwrap();
+    assert!(parked.rejected.is_empty());
+    assert!(parked.pending > 0);
+    assert!(destination.rules().list("personal").unwrap().is_empty());
+    // Once the host exposes _rules, its parked encrypted batches are replayed.
+    let replayed = sb.sync(&mut destination, &transport).unwrap();
+    assert!(replayed.rejected.is_empty());
+    assert!(replayed.applied > 0);
+    let imported = destination.rules().get(&original.id).unwrap().unwrap();
+    assert_eq!(imported.input(), original.input());
+    assert!(!imported.approved);
+}
+
+#[test]
+fn plugin_event_rejection_rolls_back_writes_and_dry_runs_discard_events() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    h.load(&todo_dir()).unwrap();
+    let task = h
+        .call("todo", "create", &json!({"title":"Exercise"}))
+        .unwrap()["id"]
+        .clone();
+    h.call_traced(
+        "personal",
+        "todo",
+        "toggle",
+        &json!({"id":task,"done":true}),
+        true,
+    )
+    .unwrap();
+    assert!(h.pending_events(50).unwrap().is_empty());
+    assert_eq!(
+        h.store("todo")
+            .unwrap()
+            .query(
+                "SELECT done FROM tasks WHERE id = ?1",
+                std::slice::from_ref(&task)
+            )
+            .unwrap()[0]["done"],
+        0
+    );
+
+    for (plugin, event, operation, args) in [
+        (
+            "todo",
+            "task_done",
+            "toggle",
+            json!({"id":task,"done":true}),
+        ),
+        ("habits", "checked_in", "checkin", json!({})),
+    ] {
+        let source = support::package_root().join(plugin);
+        build_plugin(&source).unwrap();
+        h.load(&source).unwrap();
+        let args = if plugin == "habits" {
+            let habit = h.call("habits", "save", &json!({"title":"Gym"})).unwrap()["id"].clone();
+            json!({"id":habit})
+        } else {
+            args
+        };
+        // A stricter synthetic event contract rejects emission after the plugin
+        // has written, proving both writes and held events are rolled back.
+        let broken = TempDir::new().unwrap();
+        copy_package(&source, broken.path());
+        let path = broken.path().join("manifest.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["events"][event]["payload"]["extra"] = json!({"type":"string","required":true});
+        std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        h.load(broken.path()).unwrap();
+        assert!(h.call(plugin, operation, &args).is_err());
+        assert!(h.pending_events(50).unwrap().is_empty());
+        if plugin == "habits" {
+            assert!(h
+                .store("habits")
+                .unwrap()
+                .query("SELECT id FROM checkins", &[])
+                .unwrap()
+                .is_empty());
+        } else {
+            assert_eq!(
+                h.store("todo")
+                    .unwrap()
+                    .query(
+                        "SELECT done FROM tasks WHERE id = ?1",
+                        std::slice::from_ref(&task)
+                    )
+                    .unwrap()[0]["done"],
+                0
+            );
+        }
+    }
 }

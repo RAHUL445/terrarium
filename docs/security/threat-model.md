@@ -43,6 +43,25 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
   exclusive lock on the data folder that the app also takes, so only one
   process writes the data; it has no access to the device keys, so it
   neither syncs nor sends AI requests.
+- Events must be declared typed objects; names, fields, sizes and emission
+  counts are bounded, and imported records are validated again. Package
+  capabilities disclose replicated event fields. Plugin code cannot read
+  events/rules or subscribe; the host transfers only explicitly mapped fields.
+- Automation consent is device-local and bound to rule content, rule/space id
+  and exact source/target package digests and signers. Review tokens detect
+  stale sheets. Only trusted app services can approve, enable local execution
+  or arm a space; CLI/MCP expose read-only rules/history. Synced flags cannot
+  authorize execution. Keyless headless serve cannot execute automations.
+- Local claims are durable before invocation, survive synced history pruning
+  and prevent replay on that device. Chains stop at depth 3, fan-out is capped
+  at ten, and local rates cap attempts at 60/rule/hour and 600/profile/hour.
+  The 100,000-claim ceiling stops actions rather than evicting replay protection.
+- Local `automation-audit.jsonl` records bounded identifiers, time, status,
+  fixed error code and change count, without payloads, arguments, names, raw
+  results or plugin errors. It uses private permissions and trims to the newest
+  200 entries after 512 KiB. Audit preflight failure prevents action calls;
+  failure after an action does not retry it. See the
+  [as-built design](../design/events-and-automations.md).
 - Dependency advisories are tracked with exposure guards
   ([review](dependency-advisory-review.md)).
 - Blob images only render trusted raster types (PNG/JPEG/GIF/WebP). SVG
@@ -52,7 +71,23 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 
 Complete compromised-device revocation is not active
 ([design](device-revocation.md), [milestone](membership-v2-milestone.md)).
-Retention controls, hard quotas, fuzzing and production-signed artifacts remain
+Event types cannot prove that a plugin's business event is true or prevent a
+malicious plugin encoding sensitive data in declared strings. A compromised
+paired peer can forge events that trigger an already approved rule, suppress
+work through fabricated history, or falsify synced audit history. Local consent
+prevents new mappings, not forged activity within an approved mapping. Payloads
+are visible to authorized peers; there is no private-event mode or signed-event
+attestation.
+
+Event persistence is best effort across separate plugin/event transactions;
+crashes can lose delivery or claimed work, and actions are never automatically
+retried. Offline devices with stale primary settings can both act; converging
+history is not exactly-once delivery. Seven-day event and 30-day run retention
+are logical deletion, not physical erasure of tombstones or encrypted batches.
+Durable outboxes, distributed leadership, safe retries and claim-ledger
+compaction remain deferred.
+
+General retention controls, hard quotas, fuzzing and production-signed artifacts remain
 open; see the [roadmap](../roadmap.md). An agent whose client cannot ask its
 user can pass `confirmed: true` on its own; a **Read only** token is the way
 to rule that out, and deleted items stay in the trash.

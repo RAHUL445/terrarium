@@ -108,6 +108,7 @@
           <button type="button" class="nav-item" data-settings="appearance"><svg class="icon" aria-hidden="true" data-icon="palette"></svg><span>Appearance</span></button>
           <button type="button" class="nav-item" data-settings="ai"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg><span>AI</span></button>
           <button type="button" class="nav-item" data-settings="scheduled"><svg class="icon" aria-hidden="true" data-icon="clock"></svg><span>Scheduled</span></button>
+          <button type="button" class="nav-item" data-settings="automations"><svg class="icon" aria-hidden="true" data-icon="bolt"></svg><span>Automations</span></button>
           <button type="button" class="nav-item" data-settings="plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span></button>
           <button type="button" class="nav-item" data-settings="developer"><svg class="icon" aria-hidden="true" data-icon="code"></svg><span>Developer</span></button>
         </nav>
@@ -407,6 +408,29 @@
             <div class="card">
               <h2>Recent runs</h2>
               <ul class="pp-list" id="sched-runs"></ul>
+            </div>
+          </section>
+          <section class="settings-section" id="settings-automations" hidden>
+            <div class="page-head"><h2 class="section-title">Automations</h2><p class="muted">When something happens in one app, do something in another. Automations run on one device.</p></div>
+            <div class="card">
+              <label class="pp-label" for="auto-device">Runs on</label>
+              <select class="pp-input" id="auto-device"></select>
+              <label class="pp-checkbox"><input type="checkbox" id="auto-paused"> Pause all automations</label>
+              <p class="muted small" id="auto-device-note"></p>
+              <button type="button" class="pp-button pp-primary" id="auto-start" hidden>Start on this device</button>
+            </div>
+            <p id="auto-error" class="error" role="alert" hidden></p>
+            <div class="card">
+              <h2>Automations</h2>
+              <div id="auto-editor" hidden></div>
+              <ul class="pp-list" id="auto-list"></ul>
+              <button type="button" class="pp-button" id="auto-new">New automation</button>
+            </div>
+            <div class="card">
+              <h2>Recent runs</h2>
+              <ul class="pp-list" id="auto-runs"></ul>
+              <button type="button" class="pp-button" id="auto-more" hidden>Older runs</button>
+              <button type="button" class="pp-button" id="auto-latest" hidden>Latest runs</button>
             </div>
           </section>
           <section class="settings-section" id="settings-plugins" hidden>

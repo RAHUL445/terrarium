@@ -36,7 +36,48 @@
       "bulk": true,
       "bulk_op": "mark_many"
     },
-    "mark_many": {}
+    "mark_many": {},
+    "emit_ok": {},
+    "emit_write": {},
+    "emit_then_fail": {},
+    "emit_then_trap": {},
+    "emit_undeclared": {},
+    "emit_bad_payload": {},
+    "emit_many": {},
+    "emit_payload": {},
+    "emit_count": {},
+    "emit_child": {},
+    "emit_child_then_fail": {},
+    "emit_child_budget": {},
+    "emit_child_then_trap": {},
+    "emit_failed_child_budget": {},
+    "record": {
+      "effect": "write",
+      "params": {
+        "n": {
+          "type": "integer",
+          "required": true
+        }
+      }
+    },
+    "record_fail": {
+      "effect": "write",
+      "params": {
+        "n": {
+          "type": "integer",
+          "required": true
+        }
+      }
+    },
+    "chain": {
+      "effect": "write",
+      "params": {
+        "n": {
+          "type": "integer",
+          "required": true
+        }
+      }
+    }
   },
   "queries": {
     "all": {
@@ -50,6 +91,17 @@
     "timeout_ms": 5000
   },
   "uses": [
-    "tasks"
-  ]
+    "tasks",
+    "event_sink"
+  ],
+  "events": {
+    "pinged": {
+      "payload": {
+        "n": {
+          "type": "integer",
+          "required": true
+        }
+      }
+    }
+  }
 }

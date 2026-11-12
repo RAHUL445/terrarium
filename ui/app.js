@@ -178,7 +178,7 @@ function rememberWorkspace() {
 }
 async function restoreWorkspace(location) {
   if (!location) return;
-  if (location.settings && ["spaces", "devices", "backups", "appearance", "ai", "scheduled", "plugins", "developer"].includes(location.settings)) settingsSection = location.settings;
+  if (location.settings && ["spaces", "devices", "backups", "appearance", "ai", "scheduled", "automations", "plugins", "developer"].includes(location.settings)) settingsSection = location.settings;
   const plugin = pluginList.plugins.find(p => p.id === location.plugin);
   if (location.view === "plugin" && plugin?.pages.some(p => p.id === location.page)) await openPage(location.plugin, location.page, { item: location.item || null });
   else await showView(location.view === "plugin" ? "home" : location.view);
@@ -1531,7 +1531,7 @@ $("ai-key-remove").addEventListener("click", async () => {
 // ---- Scheduled ----------------------------------------------------------------
 
 const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-const STATUS_LABELS = { done: "Done", failed: "Failed", skipped: "Skipped", retry: "Will retry", waiting: "Waiting for AI", running: "Running" };
+const STATUS_LABELS = { done: "Done", failed: "Failed", skipped: "Skipped", retry: "Will retry", waiting: "Waiting for AI", running: "Running", stopped: "Stopped" };
 let schedEditing = null;
 
 function schedError(message) {
@@ -1670,6 +1670,344 @@ async function saveSchedulerSettings() {
 $("sched-paused").addEventListener("change", saveSchedulerSettings);
 $("sched-notify").addEventListener("change", saveSchedulerSettings);
 $("sched-notify-done").addEventListener("change", saveSchedulerSettings);
+
+// ---- Automations --------------------------------------------------------------
+
+let autoState = null;
+let autoDevices = [];
+let autoLocalDevice = null;
+let autoNext = null;
+let autoBefore = null;
+let autoLoad = 0;
+let autoBusy = false;
+const AUTO_REASONS = { interrupted: "Interrupted", fanout: "Too many matching automations", rate: "Too many runs", invalid: "Needs review", failed: "Action failed", stopped: "Too many automations in a row", skip: "Skipped", expired: "Event expired" };
+
+function autoError(message) {
+  $("auto-error").textContent = message || "";
+  $("auto-error").hidden = !message;
+}
+
+async function autoCall(name, args = {}, space = currentSpace) {
+  try {
+    return await call("service", { name, args: { ...args, space } });
+  } catch (e) {
+    if (space === currentSpace) autoError(String(e));
+    return null;
+  }
+}
+
+function autoDeviceName(id) {
+  return autoDevices.find(d => d.device === id)?.name || (id === autoLocalDevice ? "This device" : "Unknown device");
+}
+
+function ruleSentence(rule, state) {
+  const pluginName = id => pluginList.plugins.find(p => p.id === id)?.name || id;
+  const trigger = state.events?.find(e => e.plugin === rule.trigger.plugin && e.event === rule.trigger.event);
+  const action = state.operations?.find(o => o.plugin === rule.action.plugin && o.operation === rule.action.operation);
+  return `When ${pluginName(rule.trigger.plugin)}: ${trigger?.description || rule.trigger.event}${rule.filter?.length ? " (with conditions)" : ""} → ${pluginName(rule.action.plugin)}: ${action?.description || rule.action.operation}`;
+}
+
+async function autoMutate(action) {
+  if (autoBusy) return;
+  autoBusy = true;
+  autoError("");
+  try { await action(); }
+  finally { autoBusy = false; await loadAutomations(autoBefore); }
+}
+
+function autoPluginName(id) {
+  return pluginList.plugins.find(p => p.id === id)?.name || id;
+}
+
+// Mirror rules::compatible for choices; the host still validates every save.
+function autoCompatible(source, target) {
+  if (target.required && !source.required) return false;
+  if (source.type === "enum" && target.type === "enum" && !(source.values || []).every(v => (target.values || []).includes(v))) return false;
+  return source.type === target.type || target.type === "json" ||
+    (source.type === "integer" && target.type === "number") ||
+    (["string", "text", "id", "date", "time", "enum"].includes(source.type) && ["string", "text"].includes(target.type));
+}
+
+function ruleFromForm(form) {
+  return { name: form.name, trigger: { ...form.trigger },
+    filter: form.filter.map(c => ({ field: c.field, op: c.op, value: c.value })),
+    action: { plugin: form.action.plugin, operation: form.action.operation,
+      args: Object.fromEntries(Object.entries(form.args).filter(([, a]) => !a.omit)
+        .map(([name, a]) => [name, a.source ? `{{event.${a.source}}}` : a.value])) },
+    enabled: form.enabled };
+}
+
+function consentText(rule, state, c) {
+  const trigger = state.events?.find(e => e.plugin === rule.trigger.plugin && e.event === rule.trigger.event);
+  const action = state.operations?.find(o => o.plugin === rule.action.plugin && o.operation === rule.action.operation);
+  const source = autoPluginName(rule.trigger.plugin), target = autoPluginName(rule.action.plugin);
+  const fields = values => values?.length ? [...new Set(values)].join(", ") : "None";
+  return [
+    `When ${source}: ${trigger?.description || rule.trigger.event}, ${target} will ${action?.description || rule.action.operation}.`,
+    `Passed from ${source} to ${target}: ${fields(c.passed_fields)}`,
+    `Used only for conditions: ${fields((c.condition_fields || []).filter(f => !c.passed_fields.includes(f)))}`,
+    `Conditions: ${JSON.stringify(c.conditions || [])}`,
+    `Fixed values: ${JSON.stringify(c.fixed_args || {})}`,
+    `It runs on ${c.device ? autoDeviceName(c.device) : "No device chosen"}.`,
+    ...(c.warnings || []),
+    c.device !== autoLocalDevice ? "Review again on the device that runs automations. Approval here applies only to this device." : "Approval applies only to this device.",
+  ].join("\n\n");
+}
+
+let autoEditing = null;
+function closeAutomationEditor() {
+  autoEditing = null;
+  $("auto-editor").replaceChildren();
+  $("auto-editor").hidden = true;
+}
+
+function automationEditor(rule, state, example = null) {
+  const initial = rule || example;
+  if (state.space !== currentSpace) return;
+  autoError("");
+  autoEditing = { space: state.space };
+  const session = autoEditing;
+  const form = el("form", { class: "sched-edit auto-edit", "aria-label": rule ? "Edit automation" : "New automation" });
+  const label = (name, control) => el("label", { class: "auto-field" }, el("span", {}, name), control);
+  const select = (entries, value, name) => {
+    const control = el("select", { class: "pp-input", "aria-label": name }, ...entries.map(([v, text]) => el("option", { value: v }, text)));
+    control.value = value ?? entries[0]?.[0] ?? "";
+    return control;
+  };
+  const inputFor = (spec, value, name) => {
+    let input;
+    if (spec.type === "enum") input = select((spec.values || []).map(v => [v, v]), value, name);
+    else {
+      const type = { integer: "number", number: "number", boolean: "checkbox", date: "date", time: "time" }[spec.type] || "text";
+      input = el("input", { class: "pp-input", type, "aria-label": name,
+        placeholder: spec.type === "id" ? "Paste the item's id" : spec.type === "json" ? "JSON value" : null,
+        step: spec.type === "integer" ? "1" : spec.type === "number" ? "any" : null, min: spec.min, max: spec.max });
+      input.value = value == null ? "" : spec.type === "json" ? JSON.stringify(value) : String(value);
+      input.checked = value === true;
+    }
+    return input;
+  };
+  const read = (input, spec) => {
+    if (spec.type === "boolean") return input.checked;
+    if (["integer", "number"].includes(spec.type)) {
+      if (input.value.trim() === "" || !Number.isFinite(Number(input.value))) throw new Error("Enter a number");
+      return Number(input.value);
+    }
+    if (spec.type === "json") return JSON.parse(input.value);
+    return input.value;
+  };
+  const key = item => JSON.stringify([item.plugin, item.event || item.operation]);
+  const name = el("input", { class: "pp-input", type: "text", maxlength: "60", required: true });
+  name.value = initial?.name || "";
+  const trigger = select([["", "Choose an event"], ...(state.events || []).map(e => [key(e), `${autoPluginName(e.plugin)}: ${e.description || e.event}`])], initial ? key(initial.trigger) : "", "When");
+  const action = select([["", "Choose an action"], ...(state.operations || []).map(o => [key(o), `${autoPluginName(o.plugin)}: ${o.description || o.operation}`])], initial ? key(initial.action) : "", "Then");
+  const conditions = el("div", { class: "auto-conditions" }), argumentsBox = el("div", { class: "auto-arguments" });
+  let rows = [], args = [];
+  const event = () => state.events?.find(e => key(e) === trigger.value);
+  const operation = () => state.operations?.find(o => key(o) === action.value);
+  const ops = [["eq", "is"], ["ne", "is not"], ["contains", "contains"], ["has_tag", "has tag"], ["gt", "is more than"], ["lt", "is less than"], ["exists", "is set"]];
+  const add = el("button", { type: "button", class: "pp-button", onclick: () => addCondition() }, "Add condition");
+  function addCondition(c = {}) {
+    const fields = Object.entries(event()?.payload || {});
+    if (!fields.length || rows.length >= 10) return;
+    const field = select(fields.map(([f]) => [f, f]), c.field, "Condition field");
+    const op = select(ops, c.op, "Condition comparison");
+    const holder = el("div", {});
+    const row = { field, op };
+    const update = value => {
+      const spec = event()?.payload[field.value] || { type: "string" };
+      row.spec = op.value === "exists" ? { type: "boolean" } : ["contains", "has_tag"].includes(op.value) ? { type: "string" } : spec;
+      row.input = inputFor(row.spec, value ?? (op.value === "exists" ? true : undefined), "Condition value");
+      holder.replaceChildren(row.input);
+    };
+    field.addEventListener("change", () => update());
+    op.addEventListener("change", () => update());
+    row.node = el("div", { class: "auto-condition" }, field, op, holder,
+      el("button", { type: "button", class: "pp-button", "aria-label": "Remove condition", onclick: () => {
+        rows = rows.filter(r => r !== row); conditions.replaceChildren(...rows.map(r => r.node)); add.disabled = rows.length >= 10;
+      } }, "Remove"));
+    rows.push(row); update(c.value); conditions.append(row.node); add.disabled = rows.length >= 10;
+  }
+  function renderArgs(values = {}) {
+    args = Object.entries(operation()?.params || {}).map(([param, spec]) => {
+      const value = values[param];
+      const binding = typeof value === "string" && value.match(/^\{\{event\.([^{}]+)\}\}$/)?.[1];
+      const sources = Object.entries(event()?.payload || {}).filter(([, s]) => autoCompatible(s, spec)).map(([f]) => [f, `From the event: ${f}`]);
+      // Preserve metadata bindings and unavailable sources on edits; never silently replace them.
+      if (binding && !sources.some(([f]) => f === binding)) sources.push([binding, `From the event: ${binding}`]);
+      const source = select([["", "Fixed value"], ...sources], binding || "", `${param} source`);
+      const input = inputFor(spec, binding ? undefined : value, param);
+      const include = el("input", { type: "checkbox", "aria-label": `Include ${param}` });
+      include.checked = spec.required || Object.hasOwn(values, param);
+      const update = () => { input.hidden = !!source.value; input.disabled = !spec.required && !include.checked; source.disabled = input.disabled; };
+      source.addEventListener("change", update); include.addEventListener("change", update); update();
+      const node = el("div", { class: "auto-field" }, el("span", {}, `${param}${spec.required ? " (required)" : ""}`), el("div", { class: "auto-argument" },
+        !spec.required ? el("label", {}, include, "Include") : null, source, input));
+      return { param, spec, source, input, include, node };
+    });
+    argumentsBox.replaceChildren(...args.map(a => a.node));
+  }
+  trigger.addEventListener("change", () => { rows = []; conditions.replaceChildren(); add.disabled = !Object.keys(event()?.payload || {}).length; renderArgs(); });
+  action.addEventListener("change", () => renderArgs());
+  (initial?.filter || []).forEach(addCondition); renderArgs(initial?.action.args);
+  add.disabled = rows.length >= 10 || !Object.keys(event()?.payload || {}).length;
+  const save = el("button", { type: "submit", class: "pp-button pp-primary" }, "Save");
+  form.addEventListener("submit", async e => {
+    e.preventDefault();
+    if (autoBusy || autoEditing !== session || state.space !== currentSpace) return;
+    autoError("");
+    try {
+      const t = event(), a = operation();
+      if (!t || !a) throw new Error("Choose an event and an action");
+      const input = ruleFromForm({ name: name.value, trigger: { plugin: t.plugin, event: t.event },
+        filter: rows.map(r => ({ field: r.field.value, op: r.op.value, value: read(r.input, r.spec) })),
+        action: a, args: Object.fromEntries(args.map(arg => [arg.param, {
+          omit: !arg.spec.required && !arg.include.checked, source: arg.source.value,
+          value: arg.source.value || (!arg.spec.required && !arg.include.checked) ? undefined : read(arg.input, arg.spec),
+        }])), enabled: rule?.enabled ?? true });
+      await autoMutate(async () => {
+        save.disabled = true;
+        try {
+          const saved = await autoCall(rule ? "rule_update" : "rule_create", { ...(rule ? { id: rule.id } : {}), rule: input }, state.space);
+          if (!saved || state.space !== currentSpace || autoEditing !== session) return;
+          closeAutomationEditor();
+          if (!saved.approved) await reviewAutomation(saved, state);
+        } finally { save.disabled = false; }
+      });
+    } catch (error) { if (state.space === currentSpace) autoError(String(error)); }
+  });
+  if (!rule && state.examples?.length) {
+    const examples = select([["", "Choose an example"], ...state.examples.map((e, i) => [String(i), e.name])], "", "Start from an example");
+    examples.addEventListener("change", () => {
+      if (examples.value !== "") automationEditor(null, state, state.examples[Number(examples.value)]);
+    });
+    form.append(label("Start from an example", examples));
+    if (example) form.append(el("p", { class: "muted small" }, "Paste the habit's id before saving, then review and allow the automation."));
+  }
+  form.append(label("Name", name)); form.append(label("When", trigger));
+  form.append(el("fieldset", {}, el("legend", {}, "Only if"), conditions, add));
+  form.append(label("Then", action)); form.append(argumentsBox);
+  form.append(el("div", { class: "sched-actions" }, save, el("button", { type: "button", class: "pp-button", onclick: closeAutomationEditor }, "Cancel")));
+  $("auto-editor").replaceChildren(form); $("auto-editor").hidden = false;
+  name.focus?.();
+}
+
+async function reviewAutomation(rule, state) {
+  const space = state.space;
+  const review = await autoCall("rule_review", { id: rule.id }, space);
+  if (!review || space !== currentSpace) return;
+  // The review token describes the current server rule, which may have changed
+  // since this row was rendered. Never label a new target with the old row.
+  const summary = `When ${rule.trigger.plugin} emits ${rule.trigger.event}, run ${rule.action.plugin}.${rule.action.operation}`;
+  if (review.consent.summary !== summary) {
+    autoError("Automation changed. Reopen it and review again.");
+    return;
+  }
+  const message = consentText(rule, state, review.consent);
+  if (await window.terrariumConfirm(message, { title: "Allow this automation?", confirm: "Allow", cancel: "Not now" })) {
+    if (space === currentSpace) await autoCall("rule_approve", { id: rule.id, digest: review.digest }, space);
+  }
+}
+
+function renderAutomations(state) {
+  if (autoEditing && autoEditing.space !== state.space) closeAutomationEditor();
+  autoState = state;
+  const primary = state.settings.primary_device;
+  const selected = autoDevices.find(d => d.device === primary);
+  $("auto-device").replaceChildren(el("option", { value: "" }, "Choose a device"),
+    ...autoDevices.map(d => el("option", { value: d.device }, d.name || "Device", d.this_device ? " (this device)" : "")),
+    ...(primary && !selected ? [el("option", { value: primary }, "Unknown device")] : []));
+  $("auto-device").value = primary || "";
+  $("auto-paused").checked = state.settings.paused;
+  const note = [];
+  if (!primary) note.push("Choose a device to start running automations.");
+  else if (!selected) note.push("Choose a device to run automations.");
+  else if (primary !== autoLocalDevice) note.push(`Waiting for ${autoDeviceName(primary)}. Review and start automations on that device.`);
+  else if (!state.armed && !state.settings.paused) note.push("Start on this device to run automations.");
+  if (state.settings.paused) note.push("All automations are paused.");
+  if (selected && ["phone", "android", "ios"].includes(selected.kind)) note.push("Phones run automations only while the app is open.");
+  if (state.waiting) note.push(`${state.waiting} events waiting. Events expire after seven days.`);
+  $("auto-device-note").textContent = note.join(" ");
+  $("auto-start").hidden = primary !== autoLocalDevice || !primary || state.armed || state.settings.paused;
+  const items = state.rules.map(rule => {
+    const toggle = el("input", { type: "checkbox", role: "switch", "aria-label": `Enable ${rule.name}`, checked: rule.enabled, disabled: !!rule.problem, onchange: e => {
+      const enabled = e.target.checked;
+      return autoMutate(() => state.space === currentSpace ? autoCall("rule_set_enabled", { id: rule.id, enabled }, state.space) : null);
+    } });
+    const last = rule.last_run;
+    return el("li", { class: "pp-list-item sched-item" },
+      el("div", { class: "sched-row" }, el("div", { class: "grow" },
+        el("div", { class: "sched-title" }, rule.name), el("div", { class: "muted small" }, ruleSentence(rule, state))),
+      last ? statusChip(last.status) : null),
+      last ? el("p", { class: "muted small" }, [when(last.started_ms), AUTO_REASONS[last.error]].filter(Boolean).join(" · ")) : null,
+      rule.problem ? el("p", { class: "pp-tone-danger small" }, rule.problem) : null,
+      !rule.approved ? el("p", { class: "muted small" }, "Needs your OK on this device") : null,
+      rule.waiting ? el("p", { class: "muted small" }, `${rule.waiting} events waiting`) : null,
+      el("div", { class: "sched-actions" }, el("label", { class: "pp-checkbox" }, toggle, "On"),
+        el("button", { type: "button", class: "pp-button", onclick: () => automationEditor(rule, state) }, "Edit"),
+        !rule.approved ? el("button", { type: "button", class: "pp-button", disabled: !!rule.problem, onclick: () => autoMutate(() => reviewAutomation(rule, state)) }, "Review") : null,
+        el("button", { type: "button", class: "pp-button pp-danger", onclick: () => autoMutate(async () => {
+          if (await window.terrariumConfirm("Delete this automation?", { confirm: "Delete", danger: true })) {
+            if (state.space === currentSpace) await autoCall("rule_remove", { id: rule.id }, state.space);
+          }
+        }) }, "Delete")));
+  });
+  $("auto-list").replaceChildren(...(items.length ? items : [el("li", { class: "pp-empty" }, "Create an automation to connect your apps.")]));
+  // State-level failures (for example the local claim limit) have no rule row.
+  if (state.problems?.length) autoError(state.problems.join("\n"));
+}
+
+function renderAutomationRuns(page) {
+  autoNext = page.next;
+  $("auto-more").hidden = !autoNext;
+  $("auto-latest").hidden = !autoBefore;
+  const rows = page.runs.map(run => el("li", { class: "pp-list-item sched-row" },
+    el("div", { class: "grow" }, el("div", {}, run.rule_name || "Deleted automation"),
+      el("div", { class: "muted small" }, [when(run.started_ms), autoDeviceName(run.device), AUTO_REASONS[run.error]].filter(Boolean).join(" · "))),
+    statusChip(run.status)));
+  $("auto-runs").replaceChildren(...(rows.length ? rows : [el("li", { class: "pp-empty" }, "Nothing has run yet.")]));
+}
+
+async function loadAutomations(before = null) {
+  const seq = ++autoLoad, space = currentSpace;
+  const [state, page, sync] = await Promise.all([
+    autoCall("rules", {}, space), autoCall("rule_runs", { limit: 20, before }, space),
+    call("sync_status").catch(() => null),
+  ]);
+  if (seq !== autoLoad || space !== currentSpace) return;
+  autoBefore = before;
+  autoLocalDevice = sync?.device || null;
+  autoDevices = sync?.devices?.length ? sync.devices : autoLocalDevice ? [{ device: autoLocalDevice, name: "This device", this_device: true }] : [];
+  if (state) renderAutomations({ ...state, space });
+  if (page) renderAutomationRuns(page);
+}
+
+async function saveAutomationSettings() {
+  const state = autoState;
+  if (!state || state.space !== currentSpace) return;
+  const primary_device = $("auto-device").value || null;
+  const paused = $("auto-paused").checked;
+  return autoMutate(async () => {
+    if (primary_device !== state.settings.primary_device && primary_device) {
+      if (!await window.terrariumConfirm("Changing devices can cause duplicate actions while another device is offline. Review and start automations on the chosen device.", { title: "Change automation device", confirm: "Choose device" })) return;
+    }
+    if (primary_device === autoLocalDevice && !paused) {
+      if (!await window.terrariumConfirm("Run approved automations on this device? Only new events will run. Phones run automations only while the app is open.", { title: "Start on this device", confirm: "Start" })) return;
+    }
+    if (state.space === currentSpace) await autoCall("rules_save_settings", { primary_device, paused }, state.space);
+  });
+}
+$("auto-new").addEventListener("click", () => { if (autoState) automationEditor(null, autoState); });
+$("auto-device").addEventListener("change", saveAutomationSettings);
+$("auto-paused").addEventListener("change", saveAutomationSettings);
+$("auto-start").addEventListener("click", () => autoMutate(async () => {
+  const space = currentSpace;
+  if (await window.terrariumConfirm("Run approved automations on this device? Only new events will run.", { title: "Start on this device", confirm: "Start" })) {
+    if (space === currentSpace) await autoCall("rules_start", {}, space);
+  }
+}));
+$("auto-more").addEventListener("click", () => loadAutomations(autoNext));
+$("auto-latest").addEventListener("click", () => loadAutomations());
 
 // ---- Backups ----------------------------------------------------------------
 
@@ -2102,7 +2440,7 @@ function commands() {
     out.push({ group: "Spaces", label: `Switch to ${sp.name}`, tile: spaceTile(sp, "space-tile space-tile-xs"), run: () => setSpace(sp.id) });
   }
   out.push({ group: "Spaces", label: "New space", tile: icon("plus"), run: () => { showSettings("spaces"); $("space-name").focus(); } });
-  const settings = [["Devices and sync", "devices"], ["Backups", "backups"], ["Appearance", "appearance"], ["AI", "ai"], ["Scheduled", "scheduled"], ["Plugins", "plugins"], ["Spaces", "spaces"], ["Developer", "developer"]];
+  const settings = [["Devices and sync", "devices"], ["Backups", "backups"], ["Appearance", "appearance"], ["AI", "ai"], ["Scheduled", "scheduled"], ["Automations", "automations"], ["Plugins", "plugins"], ["Spaces", "spaces"], ["Developer", "developer"]];
   for (const [label, section] of settings) {
     out.push({ group: "Settings", label: `Settings: ${label}`, tile: icon("sliders"), run: () => showSettings(section) });
   }
@@ -2570,6 +2908,7 @@ function showSection(section) {
   if (section === "backups") loadBackups();
   if (section === "ai") loadAi();
   if (section === "scheduled") loadSchedules();
+  if (section === "automations") loadAutomations();
   if (section === "appearance") {
     loadQuickCapture();
     renderThemes();
@@ -2655,6 +2994,7 @@ async function start() {
       loadThemes();
       if (currentView === "settings" && settingsSection === "developer") refresh();
       if (currentView === "settings" && settingsSection === "scheduled" && !schedEditing) loadSchedules();
+      if (currentView === "settings" && settingsSection === "automations") loadAutomations();
       if (currentView === "settings" && settingsSection === "ai") aiCall("ai_settings").then((st) => st && renderAi(st, false));
       if (currentView === "settings" && settingsSection === "developer") loadControl();
     });

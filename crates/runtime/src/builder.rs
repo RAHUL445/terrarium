@@ -32,8 +32,10 @@ pub fn build_plugin(dir: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    let module_path = dir
-        .join("target")
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("target"));
+    let module_path = target_dir
         .join(TARGET)
         .join("release")
         .join(format!("{crate_name}.wasm"));

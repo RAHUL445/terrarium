@@ -4,7 +4,7 @@
 //!
 //! Plugin commands come from manifests: each operation is an action and
 //! each query a query, named `<plugin>.<name>`. Host commands live under
-//! reserved namespaces (`app`, `plugin`, `space`, `page`, `search`,
+//! reserved namespaces (`app`, `plugin`, `space`, `page`, `rule`, `search`,
 //! `schedule`); plugin ids can't take those names.
 //!
 //! A command is identified by its kind and id, since a plugin may declare
@@ -28,8 +28,8 @@ use crate::spaces::DEFAULT_SPACE;
 
 /// Namespaces of host commands. Plugin ids can't use them.
 pub const HOST_NAMESPACES: &[&str] = &[
-    "app", "plugin", "space", "page", "search", "schedule", "theme", "sync", "backup", "ui", "ref",
-    "link", "blob",
+    "app", "plugin", "space", "page", "rule", "search", "schedule", "theme", "sync", "backup",
+    "ui", "ref", "link", "blob",
 ];
 
 const SEARCH_LIMIT: usize = 200;
@@ -429,6 +429,17 @@ const HOST_COMMANDS: &[HostCommand] = &[
             crate::export::export_space(host, space, &path, crate::export::ExportOptions { include_trash })
                 .map(|s| json!(s))
         },
+    },
+    HostCommand {
+        id: "rule.list", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Automations and settings for a space.", confirm: None, params: &[],
+        run: |host, space, args, d| service(host, "rule_list", Some(space), args, d),
+    },
+    HostCommand {
+        id: "rule.runs", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Recent automation history, without event values.", confirm: None,
+        params: &[("rule", ParamType::Id, false, "Rule id"), ("limit", ParamType::Integer, false, "Number of runs, 1–50"), ("before", ParamType::String, false, "History cursor")],
+        run: |host, space, args, d| service(host, "rule_runs", Some(space), args, d),
     },
     HostCommand {
         id: "page.list",

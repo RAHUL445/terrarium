@@ -10,11 +10,11 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
-def export(output):
+def export(output, development=False):
     if output.exists():
         raise ValueError('Choose a new SDK export directory')
     changed = subprocess.check_output(['git', '-C', str(ROOT), 'status', '--porcelain', '--', 'crates/guest', 'wit'])
-    if changed:
+    if changed and not development:
         raise ValueError('Commit SDK/contract changes before exporting')
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     files = subprocess.check_output(['git', '-C', str(ROOT), 'ls-files', '-z', 'crates/guest', 'wit']).decode().split('\0')
@@ -28,6 +28,8 @@ def export(output):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
         source = {'host_commit': revision, 'api': 'terrarium:plugin@0.1.0'}
+        if changed:
+            source['source_dirty'] = True
         (base / 'SOURCE.json').write_text(json.dumps(source, indent=2) + '\n')
         hashes = {f.relative_to(base).as_posix(): hashlib.sha256(f.read_bytes()).hexdigest()
                   for f in sorted(base.rglob('*')) if f.is_file()}
@@ -38,4 +40,6 @@ def export(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    export(parser.parse_args().output.resolve())
+    parser.add_argument('--development', action='store_true', help='Export uncommitted SDK changes with source_dirty metadata; never release this snapshot')
+    args = parser.parse_args()
+    export(args.output.resolve(), development=args.development)

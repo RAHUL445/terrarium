@@ -43,6 +43,13 @@ pub struct Manifest {
     /// Operations the host runs on a schedule.
     #[serde(default)]
     pub jobs: BTreeMap<String, JobDef>,
+    /// Typed events this plugin may emit for automations.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_events"
+    )]
+    pub events: BTreeMap<String, EventDef>,
     /// A declared query the host reads to schedule system notifications.
     /// It gets `now_ms` and returns rows with `id`, `at_ms`, `title`, and
     /// optionally `body` and `notify_on` (`phone`, `desktop` or `both`).
@@ -133,6 +140,31 @@ pub struct ExportDef {
 pub enum ExportFormat {
     Markdown,
     Csv,
+}
+
+// Keep the event name even in structural errors (unknown fields/types).
+fn deserialize_events<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, EventDef>, D::Error> {
+    let events = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    events
+        .into_iter()
+        .map(|(name, value)| {
+            serde_json::from_value(value)
+                .map(|event| (name.clone(), event))
+                .map_err(|e| serde::de::Error::custom(format!("event `{name}`: {e}")))
+        })
+        .collect()
+}
+
+/// An event advertised by a plugin; payload specifications also define consent.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventDef {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub payload: BTreeMap<String, ParamSpec>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -355,6 +387,11 @@ impl ParamSpec {
     }
 
     fn validate(&self, what: &str) -> std::result::Result<(), String> {
+        if !matches!(self.ty, ParamType::Integer | ParamType::Number)
+            && (self.min.is_some() || self.max.is_some())
+        {
+            return Err(format!("{what}: only numbers take `min` and `max`"));
+        }
         match self.ty {
             ParamType::Enum if self.values.is_empty() => {
                 Err(format!("{what}: an enum needs `values`"))
@@ -365,9 +402,6 @@ impl ParamSpec {
                 (Some(lo), Some(hi)) if lo > hi => Err(format!("{what}: `min` is above `max`")),
                 _ => Ok(()),
             },
-            _ if self.min.is_some() || self.max.is_some() => {
-                Err(format!("{what}: only numbers take `min` and `max`"))
-            }
             _ => Ok(()),
         }
     }
@@ -560,6 +594,35 @@ impl Manifest {
             ));
         }
         self.storage.validate()?;
+        if self.events.len() > 32 {
+            return bad("events: at most 32 events are allowed".into());
+        }
+        let valid_event_name = |name: &str| {
+            name.len() <= 40
+                && name.starts_with(|c: char| c.is_ascii_lowercase())
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        };
+        for (name, event) in &self.events {
+            let what = format!("event `{name}`");
+            if !valid_event_name(name) {
+                return bad(format!("{what}: name must match [a-z][a-z0-9_]{{0,39}}"));
+            }
+            if event.description.len() > 512 {
+                return bad(format!("{what}: description exceeds 512 bytes"));
+            }
+            if event.payload.len() > 32 {
+                return bad(format!("{what}: at most 32 payload fields are allowed"));
+            }
+            for (field, spec) in &event.payload {
+                if !valid_event_name(field) {
+                    return bad(format!("{what}: invalid payload field `{field}`"));
+                }
+                spec.validate(&format!("{what} payload `{field}`"))
+                    .map_err(RuntimeError::Manifest)?;
+            }
+        }
         let limits = self.limits;
         if limits.fuel == 0 || limits.fuel > MAX_FUEL {
             return bad(format!("limits.fuel must be 1..={MAX_FUEL}"));
@@ -1914,5 +1977,102 @@ mod tests {
             }),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn old_manifest() -> Value {
+        json!({"id":"sample","name":"Sample","version":"1.0.0","api":API_VERSION,
+            "storage":{"version":1,"tables":[]}})
+    }
+    fn parse(value: &Value) -> Result<Manifest> {
+        Manifest::parse(&serde_json::to_vec(value).unwrap())
+    }
+    #[test]
+    fn events_are_optional_and_old_manifests_load() {
+        let manifest = parse(&old_manifest()).unwrap();
+        assert!(manifest.events.is_empty());
+        assert!(serde_json::to_value(manifest)
+            .unwrap()
+            .get("events")
+            .is_none());
+    }
+    #[test]
+    fn event_names_and_payload_specs_are_validated() {
+        let mut value = old_manifest();
+        value["events"] =
+            json!({"pinged":{"payload":{"n":{"type":"integer","required":true,"min":0,"max":5}}}});
+        parse(&value).unwrap();
+        for name in ["", "Upper", "has-dash", "1number", &"a".repeat(41)] {
+            let mut bad = value.clone();
+            bad["events"] = json!({name:{}});
+            assert!(parse(&bad).unwrap_err().to_string().contains(name));
+        }
+        for spec in [
+            json!({"type":"enum"}),
+            json!({"type":"enum","values":["ok"],"min":0}),
+            json!({"type":"number","min":5,"max":1}),
+            json!({"type":"string","min":0}),
+            json!({"type":"string","values":["x"]}),
+            json!({"type":"wrong"}),
+            json!({"type":"integer","extra":true}),
+        ] {
+            let mut bad = value.clone();
+            bad["events"]["pinged"]["payload"]["n"] = spec;
+            assert!(parse(&bad).unwrap_err().to_string().contains("pinged"));
+        }
+        for event in [
+            json!({"unknown":true}),
+            json!({"description":"é".repeat(257)}),
+            json!({"payload":{"Bad":{"type":"json"}}}),
+        ] {
+            let mut bad = value.clone();
+            bad["events"]["pinged"] = event;
+            assert!(parse(&bad).unwrap_err().to_string().contains("pinged"));
+        }
+        value["events"] = json!((0..32)
+            .map(|i| (format!("e{i}"), json!({})))
+            .collect::<BTreeMap<_, _>>());
+        parse(&value).unwrap();
+        value["events"]["overflow"] = json!({});
+        assert!(parse(&value).is_err());
+        value["events"] = json!({"pinged":{"payload":(0..32).map(|i| (format!("f{i}"), json!({"type":"json"}))).collect::<BTreeMap<_,_>>()}});
+        parse(&value).unwrap();
+        value["events"]["pinged"]["payload"]["overflow"] = json!({"type":"json"});
+        assert!(parse(&value).is_err());
+    }
+    #[test]
+    fn event_capabilities_require_review_for_new_or_changed_payloads() {
+        let old = parse(&old_manifest()).unwrap();
+        let mut new = old.clone();
+        new.events.insert(
+            "pinged".into(),
+            EventDef {
+                description: "Ping".into(),
+                payload: BTreeMap::from([("n".into(), ParamSpec::new(ParamType::Integer))]),
+            },
+        );
+        let added = crate::added_capabilities(Some(&old), &new);
+        assert_eq!(added.len(), 1);
+        assert!(added[0].id.starts_with("events:pinged:"));
+        assert_eq!(added[0].label, "Sync Sample: Ping for automations");
+        assert!(crate::added_capabilities(Some(&new), &new).is_empty());
+        let mut changed = new.clone();
+        changed
+            .events
+            .get_mut("pinged")
+            .unwrap()
+            .payload
+            .get_mut("n")
+            .unwrap()
+            .required = true;
+        assert_eq!(crate::added_capabilities(Some(&new), &changed).len(), 1);
+        changed = new.clone();
+        changed.events.get_mut("pinged").unwrap().description = "Renamed".into();
+        assert!(crate::added_capabilities(Some(&new), &changed).is_empty());
     }
 }

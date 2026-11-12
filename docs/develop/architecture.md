@@ -51,6 +51,21 @@ Plugin implementations live in the separate
   user consent, and the previous version is kept for rollback.
 - The installed plugin set is part of space state and syncs between devices.
 
+## Events and automations
+
+Plugins declare typed events and emit through WIT; the host holds them until
+that operation commits. The synced host stores `_events` (bounded event log) and
+`_rules` (per-space rules, settings and run history) are inaccessible to plugins.
+Only the explicitly chosen primary device, locally armed and with locally
+approved rules, invokes mapped plugin actions. Root depth is 0; events at depth
+3 stop further actions. Fan-out and local hourly limits bound work. A durable
+local claim before invocation gives at-most-once attempts per device, converging
+across devices to one run-history row, but offline primaries can both act.
+Plugin commits and event persistence are separate transactions, so crash loss is
+possible; actions are never automatically retried. Consent, claims and arming
+stay local. See the [design](../design/events-and-automations.md) and
+[user guide](../guide/automations.md).
+
 ## Declarative UI
 
 Pages and widgets are **templates shipped as data**. The host renders them,

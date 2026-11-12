@@ -39,6 +39,7 @@ pub fn run(dirs: Vec<PathBuf>, port: u16, data: PathBuf) -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
     host.set_ai_sealer(preview_sealer(&data)?);
+    host.set_automation_context(true);
     let mut stamps = vec![0u128; dirs.len()];
     reload(&mut host, &dirs, &mut stamps);
 
@@ -59,6 +60,7 @@ pub fn run(dirs: Vec<PathBuf>, port: u16, data: PathBuf) -> Result<(), String> {
             for done in host.run_due(now_ms(), true) {
                 println!("run {} {}", done.run.id, done.run.status);
             }
+            host.run_rules(now_ms());
         }
         pump_ai(&mut host);
         host.index_step(terrarium_runtime::INDEX_STEP_ROWS);

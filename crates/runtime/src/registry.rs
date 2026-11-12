@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use terrarium_core::{DeviceId, Store as CoreStore, StoreConfig, SystemTime};
 
 use terrarium_ai::{Ai, AiConfig, AiError, Completion, Job, Sealer};
@@ -16,11 +16,13 @@ use terrarium_blobs::{BlobKey, BlobStore};
 use terrarium_scheduler::{Finished, Outcome, Repeat, ScheduleInput, Scheduler};
 
 use crate::error::{Result, RuntimeError};
+use crate::events::{EventLog, EventRecord, EVENTS_STORE_ID, EVENT_RETENTION_MS};
 use crate::host::{CallContext, Execution, HostState, PluginPre, Runtime, ScheduleChange};
 use crate::links::{Links, LINKS_STORE_ID};
 use crate::manifest::{Manifest, RunOn, Schedule};
 use crate::packages::{Packages, STORE_ID};
 use crate::pages::{Pages, PAGES_STORE_ID};
+use crate::rules::{RuleInfo, Rules, RULES_STORE_ID};
 use crate::spaces::{split_store_id, store_id, Spaces, DEFAULT_SPACE, SPACES_STORE_ID};
 
 /// Rows search.query indexes before answering, per plugin and space.
@@ -55,6 +57,7 @@ pub enum ViewKind {
 
 pub(crate) struct LoadedPlugin {
     manifest: Manifest,
+    identity: Value,
     dir: PathBuf,
     pre: PluginPre<HostState>,
     /// One store per open space; `None` while an operation runs in it.
@@ -79,6 +82,11 @@ pub struct PluginHost {
     assistant: crate::assistant::Assistant,
     /// Search index: None only while lent to a host indexing call.
     index: Option<crate::index::SearchIndex>,
+    events: EventLog,
+    rules: Rules,
+    automation: crate::automation::Local,
+    automation_context: bool,
+    automation_problem: Option<String>,
 }
 
 const BLOB_QUOTA_DEFAULT_MB: u64 = 2048;
@@ -95,6 +103,8 @@ impl PluginHost {
         std::fs::create_dir_all(&cfg.data_dir).map_err(|e| RuntimeError::io(&cfg.data_dir, e))?;
         let packages = Packages::open(&cfg.data_dir, store_config(&cfg, STORE_ID))?;
         let spaces = Spaces::open(&cfg.data_dir, store_config(&cfg, SPACES_STORE_ID))?;
+        let events = EventLog::open(&cfg.data_dir, store_config(&cfg, EVENTS_STORE_ID))?;
+        let rules = Rules::open(&cfg.data_dir, store_config(&cfg, RULES_STORE_ID))?;
         let pages = Pages::open(&cfg.data_dir, store_config(&cfg, PAGES_STORE_ID))?;
         let links = Links::open(&cfg.data_dir, store_config(&cfg, LINKS_STORE_ID))?;
         let ai = Ai::open(&cfg.data_dir, store_config(&cfg, terrarium_ai::STORE_ID))?;
@@ -106,6 +116,7 @@ impl PluginHost {
             &cfg.timezone,
         )?;
         let index = crate::index::SearchIndex::new(cfg.data_dir.join("index"));
+        let automation = crate::automation::Local::open(&cfg.data_dir)?;
         Ok(PluginHost {
             index: Some(index),
             runtime: Runtime::new(cfg.execution)?,
@@ -120,7 +131,332 @@ impl PluginHost {
             scheduler: Some(scheduler),
             blobs: Arc::new(Mutex::new(blobs)),
             assistant: crate::assistant::Assistant::default(),
+            events,
+            automation,
+            automation_context: false,
+            automation_problem: None,
+            rules,
         })
+    }
+
+    /// Only the trusted native membership path or isolated developer preview enables this.
+    /// Keyless serve leaves it false even when the configured device id matches.
+    pub fn set_automation_context(&mut self, authorized: bool) {
+        self.automation_context = authorized;
+    }
+
+    pub fn automations_armed(&self, space: &str) -> Result<bool> {
+        self.automation.observe(space, &self.rules.settings(space)?)
+    }
+
+    /// Trusted Settings gesture, routed only through Caller::App.
+    pub(crate) fn arm_automations(&self, space: &str) -> Result<bool> {
+        self.automation
+            .arm(space, &self.rules.settings(space)?, &self.cfg.device.0)
+    }
+
+    pub(crate) fn grant_rule(&self, rule: &RuleInfo) -> Result<()> {
+        if rule.enabled && rule.approved {
+            self.automation.grant(rule, now_ms())
+        } else {
+            self.automation.revoke(&rule.id)
+        }
+    }
+
+    fn automation_authorized(&self, space: &str) -> Result<bool> {
+        let settings = self.rules.settings(space)?;
+        let armed = self.automation.observe(space, &settings)?;
+        Ok(self.automation_context
+            && armed
+            && !settings.paused
+            && settings.primary_device.as_deref() == Some(&self.cfg.device.0))
+    }
+
+    /// A bounded snapshot; child events are intentionally left to the next pass.
+    pub fn run_rules(&mut self, now: u64) -> Vec<crate::RuleRunSummary> {
+        let mut summaries = Vec::new();
+        if let Err(error) = self.run_rules_checked(now, &mut summaries) {
+            let message = match error {
+                RuntimeError::Plugin { code, .. } if code == "automation_full" => {
+                    "Automation history is full"
+                }
+                _ => "Automation history is unavailable or full",
+            };
+            self.automation_problem = Some(message.into());
+            eprintln!("{message}");
+        } else {
+            self.automation_problem = None;
+        }
+        summaries
+    }
+
+    pub fn automation_problem(&self) -> Option<&str> {
+        self.automation_problem.as_deref()
+    }
+
+    fn publish_rule_runs(&mut self) -> Result<Vec<crate::RuleRunSummary>> {
+        let mut summaries = Vec::new();
+        for (id, mut summary, history) in self.automation.unpublished()? {
+            self.rules
+                .store_mut()
+                .write(|w| w.upsert("runs", &id, history.as_object().expect("host history")))?;
+            self.automation.audit(&summary)?;
+            self.automation.published(&id)?;
+            if summary.status == "failed" {
+                summary.notify = self.automation.notify(&summary.rule, summary.at_ms)?;
+            }
+            summaries.push(summary);
+        }
+        Ok(summaries)
+    }
+
+    fn run_rules_checked(
+        &mut self,
+        now: u64,
+        summaries: &mut Vec<crate::RuleRunSummary>,
+    ) -> Result<()> {
+        use crate::rules::{self, EVENTS_PER_TICK, MAX_RULES_PER_EVENT, MAX_RULE_DEPTH};
+        let now = self.automation.clock(now.min(i64::MAX as u64))?;
+        // Rebuild terminal history after interrupted work or a history-write failure.
+        summaries.extend(self.publish_rule_runs()?);
+        let mut snapshot = Vec::new();
+        for event in self.events.pending_at(usize::MAX, now)? {
+            if !self.open_spaces.contains(&event.space)
+                || !self.automation_authorized(&event.space)?
+            {
+                continue;
+            }
+            snapshot.push(event);
+            if snapshot.len() == EVENTS_PER_TICK {
+                break;
+            }
+        }
+        for event in snapshot {
+            let definition = self
+                .plugins
+                .get(&event.plugin)
+                .and_then(|p| p.manifest.events.get(&event.name));
+            if !definition.is_some_and(|d| {
+                crate::events::contract(d) == event.contract
+                    && crate::commands::check_args(&d.payload, &[], &event.payload).is_ok()
+            }) {
+                self.events.mark_handled(&event.id, now)?;
+                continue;
+            }
+            let mut matching = Vec::new();
+            for rule in self.rules.list(&event.space)? {
+                if !rule.enabled {
+                    self.automation.revoke(&rule.id)?;
+                    continue;
+                }
+                let rule = self.rule_info(rule)?;
+                if rule.approved
+                    && rule.problem.is_none()
+                    && rule.trigger.plugin == event.plugin
+                    && rule.trigger.event == event.name
+                    && self.automation.granted(&rule, event.emitted_ms)?
+                    && rules::matches(&rule.filter, &event.payload)
+                {
+                    matching.push(rule);
+                }
+            }
+            matching.sort_by(|a, b| a.id.cmp(&b.id));
+            let mut complete = true;
+            for (index, rule) in matching.into_iter().enumerate() {
+                let id = format!("{}@{}", rule.id, event.id);
+                if self.automation.has_claim(&id)? {
+                    continue;
+                }
+                let existing = self.rules.store().query(
+                    "SELECT status FROM runs WHERE id=?1 AND _deleted IS NULL",
+                    &[json!(id)],
+                )?;
+                if existing
+                    .first()
+                    .and_then(|r| r["status"].as_str())
+                    .is_some_and(|s| matches!(s, "done" | "failed" | "skipped" | "stopped"))
+                {
+                    continue;
+                }
+                // Re-resolve consent and settings immediately before claiming/invoking.
+                let rule = self.rule_info(self.rules.get(&rule.id)?.expect("listed rule"))?;
+                if !self.automation_authorized(&event.space)? {
+                    complete = false;
+                    break;
+                }
+                if !rule.enabled
+                    || !rule.approved
+                    || rule.problem.is_some()
+                    || !self.automation.granted(&rule, event.emitted_ms)?
+                {
+                    continue;
+                }
+                let stop = if event.depth >= MAX_RULE_DEPTH {
+                    Some(("stopped", "stopped"))
+                } else if index >= MAX_RULES_PER_EVENT {
+                    Some(("stopped", "fanout"))
+                } else if self.automation.limited(&rule.id, now)? {
+                    Some(("skipped", "rate"))
+                } else {
+                    None
+                };
+                self.automation.audit_ready()?;
+                let mut summary = crate::RuleRunSummary {
+                    at_ms: now,
+                    space: event.space.clone(),
+                    rule: rule.id.clone(),
+                    event: event.id.clone(),
+                    plugin: rule.action.plugin.clone(),
+                    operation: rule.action.operation.clone(),
+                    status: stop.map_or("failed", |s| s.0).into(),
+                    code: Some(stop.map_or("interrupted", |s| s.1).into()),
+                    change_count: 0,
+                    notify: false,
+                };
+                let history = |s: &crate::RuleRunSummary| json!({"space":s.space,"rule":s.rule,"rule_name":rule.name,"digest":rules::digest(&rule),"event":s.event,"status":s.status,"device":self.cfg.device.0,"error":s.code,"started_ms":now,"finished_ms":now});
+                let mut row = history(&summary);
+                self.automation
+                    .claim(&id, &rule, now, stop.is_none(), &row, &summary)?;
+                if stop.is_none() {
+                    let args = rules::map_args(&rule.action.args, &event);
+                    let op = &self.plugins[&rule.action.plugin].manifest.operations
+                        [&rule.action.operation];
+                    let validation = crate::commands::check_args(
+                        op.params.as_ref().expect("validated rule"),
+                        &[],
+                        &args,
+                    );
+                    let (result, changes) = if validation.is_err() {
+                        (
+                            Err(RuntimeError::Plugin {
+                                code: "invalid".into(),
+                                message: "Invalid automation arguments".into(),
+                            }),
+                            None,
+                        )
+                    } else {
+                        self.call_with(
+                            &event.space,
+                            &rule.action.plugin,
+                            &rule.action.operation,
+                            &Value::Object(args),
+                            None,
+                            false,
+                            true,
+                            event.depth + 1,
+                            Some(event.root.clone()),
+                        )
+                    };
+                    summary.change_count = changes.unwrap_or_default().len();
+                    let (status, code) = match result {
+                        Ok(_) => ("done", None),
+                        Err(RuntimeError::Plugin { code, .. }) if code == "skip" => {
+                            ("skipped", Some("skip"))
+                        }
+                        Err(_) => (
+                            "failed",
+                            Some(if validation.is_err() {
+                                "invalid"
+                            } else {
+                                "failed"
+                            }),
+                        ),
+                    };
+                    summary.status = status.into();
+                    summary.code = code.map(str::to_owned);
+                    row["status"] = json!(summary.status);
+                    row["error"] = json!(summary.code);
+                    self.automation.finish(&id, &summary, &row)?;
+                }
+                summaries.extend(self.publish_rule_runs()?);
+            }
+            if complete {
+                self.events.mark_handled(&event.id, now)?;
+            }
+        }
+        self.prune_rule_runs(now)?;
+        Ok(())
+    }
+
+    fn prune_rule_runs(&mut self, now: u64) -> Result<()> {
+        // Hourly cadence is local and durable; deleting synced history never removes claims.
+        let path = self.cfg.data_dir.join("automation-pruned.json");
+        let last = std::fs::read(&path)
+            .ok()
+            .and_then(|v| serde_json::from_slice::<u64>(&v).ok());
+        if last.is_some_and(|last| now.saturating_sub(last) < 3_600_000) {
+            return Ok(());
+        }
+        let rows = self.rules.store().query("SELECT id,rule,started_ms FROM runs WHERE _deleted IS NULL ORDER BY started_ms DESC,id DESC", &[])?;
+        let mut counts = BTreeMap::<String, usize>::new();
+        let mut remove = Vec::new();
+        for r in rows {
+            let count = counts
+                .entry(r["rule"].as_str().unwrap_or("").to_owned())
+                .or_default();
+            *count += 1;
+            if *count > 50
+                || r["started_ms"]
+                    .as_u64()
+                    .is_none_or(|at| at < now.saturating_sub(30 * 24 * 3_600_000))
+            {
+                if let Some(id) = r["id"].as_str() {
+                    remove.push(id.to_owned());
+                }
+            }
+        }
+        self.rules.store_mut().write(|w| {
+            for id in remove {
+                w.delete("runs", &id)?;
+            }
+            Ok(())
+        })?;
+        std::fs::write(&path, serde_json::to_vec(&now)?).map_err(|e| RuntimeError::io(&path, e))?;
+        Ok(())
+    }
+
+    pub fn rules(&self) -> &Rules {
+        &self.rules
+    }
+    pub fn rules_mut(&mut self) -> &mut Rules {
+        &mut self.rules
+    }
+
+    /// Revalidate synced configuration and resolve consent against the loaded code.
+    pub fn rule_info(&self, mut rule: RuleInfo) -> Result<RuleInfo> {
+        if rule.problem.is_none() {
+            rule.problem = crate::rules::check(self, &rule.input()).err();
+        }
+        rule.source_package = self
+            .plugins
+            .get(&rule.trigger.plugin)
+            .map(|p| p.identity.clone())
+            .unwrap_or(Value::Null);
+        rule.target_package = self
+            .plugins
+            .get(&rule.action.plugin)
+            .map(|p| p.identity.clone())
+            .unwrap_or(Value::Null);
+        rule.approved = rule.problem.is_none() && self.rules.is_approved(&rule)?;
+        let history = self.rules.runs(&rule.space, Some(&rule.id), 1, None)?;
+        rule.last_run = history["runs"].as_array().and_then(|a| a.first()).cloned();
+        let settings = self.rules.settings(&rule.space)?;
+        self.automation.observe(&rule.space, &settings)?;
+        if !rule.enabled {
+            self.automation.revoke(&rule.id)?;
+        }
+        if settings.primary_device.as_deref() != Some(&self.cfg.device.0) {
+            rule.waiting = self
+                .pending_events(usize::MAX)?
+                .iter()
+                .filter(|e| {
+                    e.space == rule.space
+                        && e.plugin == rule.trigger.plugin
+                        && e.name == rule.trigger.event
+                })
+                .count() as u64;
+        }
+        Ok(rule)
     }
 
     /// The space list (synced with the other devices).
@@ -249,6 +585,8 @@ impl PluginHost {
     /// storage version runs the additive migration.
     pub fn load(&mut self, dir: &Path) -> Result<&Manifest> {
         let manifest = Manifest::read(dir)?;
+        let package = crate::Package::from_dir(dir)?;
+        let identity = serde_json::json!({"digest":package.digest(),"signer":package.signer().unwrap_or("unsigned")});
         let wasm_path = dir.join("dist").join("plugin.wasm");
         let bytes = std::fs::read(&wasm_path).map_err(|e| RuntimeError::io(&wasm_path, e))?;
         let pre = self.runtime.prepare(&bytes)?;
@@ -293,6 +631,7 @@ impl PluginHost {
             id.clone(),
             LoadedPlugin {
                 manifest,
+                identity,
                 dir: dir.to_path_buf(),
                 pre,
                 stores,
@@ -461,7 +800,8 @@ impl PluginHost {
         args: &Value,
         dry_run: bool,
     ) -> Result<(Value, Vec<ChangeSummary>)> {
-        let (result, trace) = self.call_with(space, plugin, operation, args, None, dry_run, true);
+        let (result, trace) =
+            self.call_with(space, plugin, operation, args, None, dry_run, true, 0, None);
         result.map(|v| (v, trace.unwrap_or_default()))
     }
 
@@ -475,7 +815,7 @@ impl PluginHost {
         args: &Value,
         run: Option<String>,
     ) -> Result<Value> {
-        self.call_with(space, plugin, operation, args, run, false, false)
+        self.call_with(space, plugin, operation, args, run, false, false, 0, None)
             .0
     }
 
@@ -489,6 +829,8 @@ impl PluginHost {
         run: Option<String>,
         dry_run: bool,
         trace: bool,
+        event_depth: u8,
+        event_root: Option<String>,
     ) -> (Result<Value>, Option<Vec<ChangeSummary>>) {
         if !self.open_spaces.contains(space) {
             return (Err(RuntimeError::UnknownSpace(space.into())), None);
@@ -504,12 +846,56 @@ impl PluginHost {
             run,
             dry_run,
             trace: trace.then(Vec::new),
+            events: Vec::new(),
+            event_count: 0,
+            event_depth,
+            event_root,
+            device: self.cfg.device.0.clone(),
         };
         let (peers, result) = invoke(peers, plugin, operation, args, 0);
         self.plugins = peers.plugins;
         self.ai = peers.ai;
         self.scheduler = peers.scheduler;
+        for (_, event) in peers.events {
+            if self.events.record(&event).is_err() {
+                eprintln!("Event delivery failed after plugin commit");
+            }
+        }
         (result, peers.trace)
+    }
+
+    /// Valid, unexpired events across spaces, with source contracts revalidated.
+    pub fn pending_events(&self, limit: usize) -> Result<Vec<EventRecord>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut valid = Vec::new();
+        for event in self.events.pending(usize::MAX)? {
+            let definition = self
+                .plugins
+                .get(&event.plugin)
+                .and_then(|p| p.manifest.events.get(&event.name));
+            if definition.is_some_and(|definition| {
+                crate::events::contract(definition) == event.contract
+                    && crate::commands::check_args(&definition.payload, &[], &event.payload).is_ok()
+            }) {
+                if valid.len() == limit {
+                    break;
+                }
+                valid.push(event);
+            } else {
+                eprintln!("Invalid event contract or payload; event skipped");
+            }
+        }
+        Ok(valid)
+    }
+
+    pub fn mark_event_handled(&mut self, id: &str) -> Result<()> {
+        self.events.mark_handled(id, now_ms())
+    }
+
+    pub fn prune_events(&mut self, now_ms: u64) -> Result<usize> {
+        self.events.prune(now_ms.saturating_sub(EVENT_RETENTION_MS))
     }
 
     // ---- AI ------------------------------------------------------------
@@ -905,7 +1291,10 @@ pub(crate) struct Peers {
     /// The space the call runs in; interop stays inside it.
     pub space: String,
     runtime: Option<Runtime>,
-    timezone: String,
+    pub(crate) timezone: String,
+    pub(crate) device: String,
+    pub event_depth: u8,
+    pub event_root: Option<String>,
     pub speech: Option<crate::speech::SpeechConfig>,
     plugins: BTreeMap<String, LoadedPlugin>,
     pub ai: Option<Ai>,
@@ -917,6 +1306,9 @@ pub(crate) struct Peers {
     pub dry_run: bool,
     /// When set, each call appends the changes it made (or would make).
     pub trace: Option<Vec<ChangeSummary>>,
+    pub(crate) events: Vec<(String, crate::host::EmittedEvent)>,
+    /// Accepted emissions across this top-level call, including rolled back children.
+    pub(crate) event_count: usize,
 }
 
 /// One change an operation made, for dry runs and the audit log.
@@ -1062,6 +1454,7 @@ fn invoke(
         speech: loaded.manifest.permissions.iter().any(|p| p == "speech"),
         ai: loaded.manifest.permissions.iter().any(|p| p == "ai"),
         operations: loaded.manifest.operations.keys().cloned().collect(),
+        events: loaded.manifest.events.clone(),
         depth,
     };
     let (store, mut peers, result) = runtime.call(&loaded.pre, store, ctx, peers, operation, args);
@@ -1086,7 +1479,7 @@ fn notice(value: &Value) -> Option<String> {
     value["$run"]["notify"].as_str().map(str::to_string)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1156,6 +1549,8 @@ impl terrarium_core::StoreSet for PluginHost {
             SPACES_STORE_ID.to_string(),
             PAGES_STORE_ID.to_string(),
             LINKS_STORE_ID.to_string(),
+            EVENTS_STORE_ID.to_string(),
+            RULES_STORE_ID.to_string(),
             terrarium_ai::STORE_ID.to_string(),
             terrarium_scheduler::STORE_ID.to_string(),
         ];
@@ -1171,6 +1566,8 @@ impl terrarium_core::StoreSet for PluginHost {
             SPACES_STORE_ID => return Some(self.spaces.store_mut()),
             PAGES_STORE_ID => return Some(self.pages.store_mut()),
             LINKS_STORE_ID => return Some(self.links.store_mut()),
+            EVENTS_STORE_ID => return Some(self.events.store_mut()),
+            RULES_STORE_ID => return Some(self.rules.store_mut()),
             terrarium_ai::STORE_ID => return self.ai.as_mut().map(Ai::store_mut),
             terrarium_scheduler::STORE_ID => {
                 return self.scheduler.as_mut().map(Scheduler::store_mut)

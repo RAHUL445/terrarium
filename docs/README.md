@@ -16,6 +16,7 @@ for an overview.
 | [Export and import](guide/export-and-import.md) | Save readable copies of a space, import tasks from CSV and notes from Markdown |
 | [Plugins](guide/plugins.md) | Install, review, update, roll back and remove plugins |
 | [AI, schedules and voice](guide/ai-and-schedules.md) | AI provider, scheduled runs, reminders, local transcription |
+| [Automations](guide/automations.md) | Connect app events to actions, review consent, choose a device and troubleshoot runs |
 | [Appearance](guide/appearance.md) | Light and dark mode, themes, app icons, workspace layout |
 | [Command line](guide/command-line.md) | Read and change your data from the `terrarium` command line or an AI agent (MCP), with or without the app window |
 | [Troubleshooting](guide/troubleshooting.md) | Build errors, sync problems, conflicts, starting over |
@@ -25,7 +26,7 @@ for an overview.
 | Page | What it covers |
 | --- | --- |
 | [Architecture](develop/architecture.md) | How the host, plugins, storage and sync fit together |
-| [Writing a plugin](develop/plugin-authoring.md) | Manifest, storage, queries, templates, permissions, schedules, signing |
+| [Writing a plugin](develop/plugin-authoring.md) | Manifest, storage, queries, templates, permissions, schedules, events, signing |
 | [Making a theme](develop/themes.md) | Theme file format, tokens and contrast checks |
 | [Building from source](develop/building-from-source.md) | Debug builds, checks, plugin bundle lock, SDK export |
 | [Design: command-line control](design/cli-control.md) | The command registry, control socket and CLI, by phase |

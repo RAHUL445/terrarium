@@ -54,7 +54,12 @@ pub fn notification_id(key: &str) -> i32 {
     (hash & 0x7fff_ffff) as i32
 }
 
-pub fn start(plugins: Plugins, shell: Arc<dyn Shell>, state_path: PathBuf) {
+pub fn start(
+    plugins: Plugins,
+    shell: Arc<dyn Shell>,
+    state_path: PathBuf,
+    automation_context: bool,
+) {
     std::thread::spawn(move || {
         let mut state: State = std::fs::read(&state_path)
             .ok()
@@ -69,9 +74,10 @@ pub fn start(plugins: Plugins, shell: Arc<dyn Shell>, state_path: PathBuf) {
                 .retain(|key| !state.scheduled.values().any(|k| k == key));
         }
         let mut next_gc_ms = 0u64;
+        let mut last_event_prune = None;
         loop {
             std::thread::sleep(TICK);
-            let ran = run_due_jobs(&plugins, &*shell);
+            let ran = run_due_jobs(&plugins, &*shell, &mut last_event_prune, automation_context);
             let now = now_ms();
             if now >= next_gc_ms {
                 let _ = plugins.with_host(|host| host.blob_gc_collect(now));
@@ -106,15 +112,44 @@ pub fn notify_ended(shell: &dyn Shell, done: &Finished) {
     shell.notify(None, &title, &body);
 }
 
-fn run_due_jobs(plugins: &Plugins, shell: &dyn Shell) -> bool {
-    let ended = plugins
-        .with_host(|host| host.run_due(now_ms(), DESKTOP))
+fn run_due_jobs(
+    plugins: &Plugins,
+    shell: &dyn Shell,
+    last_event_prune: &mut Option<u64>,
+    automation_context: bool,
+) -> bool {
+    let (ended, rules) = plugins
+        .with_host(|host| {
+            let now = now_ms();
+            if last_event_prune.is_none_or(|last| now.saturating_sub(last) >= 3_600_000) {
+                *last_event_prune = Some(now);
+                if host.prune_events(now).is_err() {
+                    eprintln!("Event expiry failed");
+                }
+            }
+            let ended = host.run_due(now, DESKTOP);
+            let rules = if automation_context {
+                host.run_rules(now)
+            } else {
+                Vec::new()
+            };
+            (ended, rules)
+        })
         .unwrap_or_default();
     for done in &ended {
         eprintln!("run {} {}", done.run.id, done.run.status);
         notify_ended(shell, done);
     }
-    !ended.is_empty()
+    for run in &rules {
+        if run.notify {
+            shell.notify(
+                None,
+                "An automation could not run",
+                "Open Settings → Automations to review it.",
+            );
+        }
+    }
+    !ended.is_empty() || !rules.is_empty()
 }
 
 fn for_this_device(row: &serde_json::Map<String, Value>) -> bool {

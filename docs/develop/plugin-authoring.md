@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open`, `refs`, `export`, `import` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -153,6 +153,85 @@ schedule::set("friday", &json!({
 Changes apply when the operation commits. A due run calls the operation on whichever device is open, with `args.$run` = `{id, schedule, slot_ms, date, time, tz, previous_ms, attempt, manual}`. Make a run with the same id harmless to repeat (two devices may both run a slot while offline). Return error code `retry` for a temporary failure (tried again after 15 min, then 1 h) or `skip`; any other error fails the run and rolls back. To keep your changes and still end the run as failed, return `{"$run": {"status": "failed", "message": "…"}}`. A run that submits an AI request ends when the reply has been delivered. To tell the user a run produced something, return `{"$run": {"notify": "Weekly report is ready."}}` (from the operation, or from the AI `on-done` operation); it is shown as a notification when "Notify me when a run has something ready" is on. `list`, `runs`, `run_now`, `retry` and `remove` cover the rest.
 
 The user also sees what `uses`, `provides`, `jobs`, `reminders` and raised `limits` allow. An update that adds any of these asks for consent again.
+
+## Events
+
+Declare business events in the optional manifest `events` map (empty by default).
+For example, To-do 0.5.0 declares:
+
+```json
+"events": {
+  "task_done": {
+    "description": "A task was marked done.",
+    "payload": {
+      "task_id": {"type": "id", "required": true},
+      "title": {"type": "string", "required": true},
+      "tags": {"type": "string"},
+      "completed_date": {"type": "date", "required": true}
+    }
+  }
+}
+```
+
+After a real completion, emit with the Rust SDK:
+
+```rust
+use terrarium_guest::events;
+use serde_json::json;
+
+// Inside an operation, after updating the task; values come from that task.
+events::emit("task_done", &json!({
+    "task_id": task_id,
+    "title": title,
+    "tags": tags,
+    "completed_date": completed_date,
+}))?;
+```
+
+The WIT import `events.emit(name: string, payload: json) -> result<_, plugin-error>`
+accepts JSON text; the SDK's `events::emit(name: &str, payload: &Value)` serializes
+it. Events are delivered after the operation commits, dropped on rollback and
+dry runs. A committed interop call keeps its events even if its outer caller
+fails. Emit only on real changes: undoing or repeating the same completion must
+not announce another completion. Habits 0.3.0 emits `checked_in` with `habit_id`,
+`title`, `day` and effective `status` (`done`, `partial`, `skipped`, `cleared`).
+
+An event has `description` (default empty, at most 512 UTF-8 bytes) and `payload`
+(default empty), whose fields use the same ParamSpecs as command arguments.
+Unknown declaration keys are rejected. Declare at most 32 events with 32 fields
+each; event and field names match `^[a-z][a-z0-9_]{0,39}$`. Payloads must be objects,
+contain only declared fields and satisfy requiredness, types, enum values and
+bounds. Optional absent/null fields are allowed; required absent/null fields are
+not. Invalid declarations fail manifest validation; invalid emissions return
+`invalid`, naming fields without values. Serialized payloads are limited to 16,384 UTF-8 bytes, and at most 50
+accepted emissions per operation and across a top-level call including interop;
+exceeding these limits returns `quota`. Every attempt counts against the normal
+host-call quota, including dry runs.
+
+There is no new permission string. Install/update consent discloses each event
+as `events:<name>:<payload-sha256>` (the hash covers canonical payload ParamSpecs).
+Payloads sync to paired devices even without an automation using them. Never
+include credentials, audio, task notes or note bodies; declare the minimum useful
+fields. Plugins cannot subscribe, read event history or rules, or choose recipients.
+A locally approved host rule passes only explicitly mapped fields to its target.
+
+Automation actions must declare `effect: write` and explicit `params`, allow
+external calls (`cli != false`), have no `confirm` text and not be named `on_…`.
+Arguments are checked before execution. Operations used as automation actions
+must be safe to run twice for the same event. Delivery is best effort: a crash
+between the plugin commit and event-log write can lose an event. Invocation is
+at most once per device, converging across devices to one history row; offline
+primaries can still perform duplicate actions. Failed/interrupted actions are
+not automatically retried. Do not depend on a scheduler `$run` argument.
+
+The API remains `terrarium:plugin@0.1.0`. **Upgrade every host before publishing
+or syncing event-enabled packages**: old hosts reject the new manifest field
+and cannot link components importing events. New hosts still accept old plugins.
+Rollback to an old host requires explicitly installing compatible packages or
+upgrading again; never strip declarations or drop synced schema to roll back.
+Package digest/signer changes require fresh rule review on the execution device.
+See [automations](../guide/automations.md) and the
+[as-built design](../design/events-and-automations.md) for mappings and limits.
 
 ## Signing and publishing
 
@@ -377,7 +456,7 @@ Outside callers can't pass arguments you didn't declare, and their types and req
 
 Read-only operations cannot be bulk. Plugins that use `bulk` or `bulk_op` need a host version that supports bulk operations; older hosts reject those manifest fields.
 
-The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup`, `ui`, `ref` and `link` are reserved for host commands.
+The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `rule`, `search`, `schedule`, `theme`, `sync`, `backup`, `ui`, `ref`, `link` and `blob` are reserved for host commands.
 
 ## Viewable queries
 
@@ -646,3 +725,55 @@ A widget template may declare how it fits on a page:
 Settings are data for bindings only: they reach your own queries and operations, never another plugin's. Keep widget IDs and setting names stable between releases; removed plugins keep their placements (shown as Unavailable) until they return.
 
 The built-in View widget lets people choose an app, one viewable query from that app, and a layout (`list`, `table`, `board`, or `calendar`). They can also configure sort order, grouping ("Columns from" for board) and date columns, and filtering can follow the page focus. The widget only reads through the query declared in that app's manifest; it never reaches another plugin's data.
+## Declared events
+
+Declare events in the manifest before calling `terrarium_guest::events::emit`:
+
+```json
+"events": {
+  "pinged": {
+    "description": "A ping was recorded",
+    "payload": {"n": {"type": "integer", "required": true}}
+  }
+}
+```
+
+```rust,ignore
+terrarium_guest::events::emit("pinged", &serde_json::json!({"n": 1}))?;
+```
+
+The payload must be an object matching its ParamSpecs. Unknown fields and
+missing/null required fields are rejected. Optional missing/null fields are
+allowed. Event and field names match `[a-z][a-z0-9_]{0,39}`; declare at most
+32 events, 32 fields each, and descriptions of at most 512 UTF-8 bytes.
+Each serialized payload is limited to 16 KiB. At most 50 emissions are accepted
+per operation and across its whole interop call tree. Every attempt counts as a
+host call. Failed/trapped/rolled-back/dry-run calls discard their own events;
+an independently committed interop child retains its events if its parent fails.
+The host determines the source plugin and space. Never emit secrets, audio,
+notes or note bodies. Event declarations disclose future encrypted replication
+for automations through install/update capabilities bound to their payload
+contract. This contract stage buffers events only; delivery is a later stage.
+
+The API remains `terrarium:plugin@0.1.0`. Upgrade **every host/device before**
+installing event-enabled packages: older hosts reject the new manifest field
+and cannot link components importing `events`. New hosts still accept old
+manifests and components. Do not strip declarations to accommodate old hosts.
+
+### Automation rules
+
+The host owns the synced `_rules` store. Plugins cannot query it or manage
+automations. The `rule` plugin id is reserved. Command clients can read
+`rule.list` and paged `rule.runs` in an open space; creating, editing, reviewing
+and approving rules is available only through the trusted app services. Rule
+history never contains event payloads.
+
+Automation targets need typed `params`, write effect, `cli: true` (the default),
+no confirmation and a name outside the `on_` callback namespace. Whole-field
+bindings must preserve declared types and requiredness; enum bindings may only
+narrow the destination's allowed values. Each execution device must approve the
+exact mapping and package identities locally. Changing a mapping or either
+package requires review again; renaming does not. Upgrade all devices before
+installing event-enabled packages, as described above; older peers park the
+unknown `_rules` store without interpreting it. Rule execution is added
+separately from this configuration contract.

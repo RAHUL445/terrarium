@@ -338,6 +338,18 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
             format!("Offer {iface} to other plugins"),
         );
     }
+    for (name, event) in &manifest.events {
+        // BTreeMap keys and ParamSpec serialization give a stable canonical contract.
+        let payload = serde_json::to_vec(&event.payload).expect("event payload serializes");
+        let hash = format!("{:x}", Sha256::digest(payload));
+        add(
+            format!("events:{name}:{hash}"),
+            format!(
+                "Sync {}: {} for automations",
+                manifest.name, event.description
+            ),
+        );
+    }
     if manifest.reminders.is_some() {
         add("notifications".into(), "Show notifications".into());
     }

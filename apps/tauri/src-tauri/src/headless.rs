@@ -127,6 +127,7 @@ fn serve() -> Result<(), String> {
         plugins.clone(),
         shell.clone(),
         data_dir.join("jobs-state.json"),
+        false,
     );
     plugins.wait_ready(Duration::from_secs(60));
     control.apply(&plugins, &shell);

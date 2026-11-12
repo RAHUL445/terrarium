@@ -162,6 +162,17 @@ pub fn invoke(
     desktop: bool,
 ) -> Option<Result<Value, String>> {
     let result = match cmd {
+        "rules"
+        | "rule_list"
+        | "rule_runs"
+        | "rule_create"
+        | "rule_update"
+        | "rule_set_enabled"
+        | "rule_remove"
+        | "rule_review"
+        | "rule_approve"
+        | "rules_save_settings"
+        | "rules_start" => rule_service(host, cmd, args),
         "ai_settings" => Ok(ai_state(host)),
         "assistant_submit" => host.assistant_submit(args),
         "assistant_context" => (|| host.assistant_context(arg_str(args, "space")?))(),
@@ -437,5 +448,212 @@ pub fn ai_network(cmd: &str, config: &AiConfig, key: Option<&str>) -> Result<Val
             .map(|m| json!(m))
             .map_err(|e| e.message),
         _ => Err(format!("unknown command `{cmd}`")),
+    }
+}
+
+fn rule_service(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value, String> {
+    use crate::rules::{self, RuleInput};
+    let allowed: &[&str] = match cmd {
+        "rules" | "rule_list" | "rules_start" => &["space"],
+        "rule_runs" => &["space", "rule", "limit", "before"],
+        "rule_create" => &["space", "rule"],
+        "rule_update" => &["space", "id", "rule"],
+        "rule_set_enabled" => &["space", "id", "enabled"],
+        "rule_approve" => &["space", "id", "digest"],
+        "rules_save_settings" => &["space", "primary_device", "paused"],
+        _ => &["space", "id"],
+    };
+    let object = args.as_object().ok_or("Arguments must be an object")?;
+    if let Some(key) = object.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!("Unknown argument `{key}`"));
+    }
+    let space = arg_str(args, "space")?;
+    if !host.open_spaces().any(|s| s == space) {
+        return Err("Space is not open".into());
+    }
+    let error = |e: crate::RuntimeError| e.to_string();
+    // Every id-bearing mutation is fenced to the caller's open space.
+    let current = if allowed.contains(&"id") {
+        let id = arg_str(args, "id")?;
+        let rule = host.rules().get(id).map_err(error)?;
+        if rule.as_ref().is_some_and(|r| r.space != space) {
+            return Err("Rule is not in this space".into());
+        }
+        if rule.is_none() && cmd != "rule_remove" {
+            return Err("Rule was not found".into());
+        }
+        rule.map(|r| host.rule_info(r)).transpose().map_err(error)?
+    } else {
+        None
+    };
+    match cmd {
+        "rules" | "rule_list" => {
+            let mut rules = Vec::new();
+            let mut problems = Vec::<String>::new();
+            if let Some(problem) = host.automation_problem() {
+                problems.push(problem.to_owned());
+            }
+            for rule in host.rules().list(space).map_err(error)? {
+                let rule = host.rule_info(rule).map_err(error)?;
+                if let Some(problem) = &rule.problem {
+                    problems.push(problem.clone());
+                }
+                rules.push(rule);
+            }
+            let mut state = json!({"rules":rules,"settings":host.rules().settings(space).map_err(error)?,"armed":host.automations_armed(space).map_err(error)?,"waiting":rules.iter().map(|r|r.waiting).sum::<u64>(),"problems":problems});
+            if cmd == "rules" {
+                let mut events = Vec::new();
+                let mut operations = Vec::new();
+                for m in host.manifests() {
+                    for (name, event) in &m.events {
+                        events.push(json!({"plugin":m.id,"event":name,"description":event.description,"payload":event.payload}));
+                    }
+                    for (name, op) in &m.operations {
+                        if rules::eligible(name, op) {
+                            operations.push(json!({"plugin":m.id,"operation":name,"description":op.description,"params":op.params}));
+                        }
+                    }
+                }
+                state["events"] = json!(events);
+                state["operations"] = json!(operations);
+                state["examples"] = if events
+                    .iter()
+                    .any(|e| e["plugin"] == "todo" && e["event"] == "task_done")
+                    && operations
+                        .iter()
+                        .any(|o| o["plugin"] == "habits" && o["operation"] == "checkin")
+                {
+                    json!([{
+                        "name": "Gym task done → Gym habit",
+                        "trigger": {"plugin": "todo", "event": "task_done"},
+                        "filter": [{"field": "tags", "op": "has_tag", "value": "gym"}],
+                        "action": {"plugin": "habits", "operation": "checkin",
+                            "args": {"id": "", "status": "done", "day": "{{event.completed_date}}"}}
+                    }])
+                } else {
+                    json!([])
+                };
+            }
+            Ok(state)
+        }
+        "rule_create" | "rule_update" => {
+            let input: RuleInput = serde_json::from_value(arg(args, "rule")?.clone())
+                .map_err(|_| "Invalid rule fields")?;
+            rules::check(host, &input)?;
+            let rule = if cmd == "rule_create" {
+                host.rules_mut().create(space, &input)
+            } else {
+                host.rules_mut()
+                    .update(&current.expect("checked").id, &input)
+            }
+            .map_err(error)?;
+            Ok(json!(host.rule_info(rule).map_err(error)?))
+        }
+        "rule_set_enabled" => {
+            let enabled = arg(args, "enabled")?
+                .as_bool()
+                .ok_or("Enabled must be true or false")?;
+            let current = current.expect("checked");
+            if enabled {
+                rules::check(host, &current.input())?;
+            }
+            let rule = host
+                .rules_mut()
+                .set_enabled(&current.id, enabled)
+                .map_err(error)?;
+            let rule = host.rule_info(rule).map_err(error)?;
+            host.grant_rule(&rule).map_err(error)?;
+            Ok(json!(rule))
+        }
+        "rule_remove" => {
+            host.rules_mut()
+                .remove(arg_str(args, "id")?)
+                .map_err(error)?;
+            Ok(json!({"ok":true}))
+        }
+        "rule_review" => {
+            let rule = current.expect("checked");
+            if let Some(problem) = &rule.problem {
+                return Err(problem.clone());
+            }
+            let mut passed = Vec::new();
+            let mut fixed = serde_json::Map::new();
+            for (name, value) in &rule.action.args {
+                if let Some(field) = value
+                    .as_str()
+                    .and_then(|s| s.strip_prefix("{{event."))
+                    .and_then(|s| s.strip_suffix("}}"))
+                {
+                    passed.push(field.to_owned());
+                } else {
+                    fixed.insert(name.clone(), value.clone());
+                }
+            }
+            passed.sort();
+            passed.dedup();
+            Ok(json!({"digest":rules::digest(&rule),"consent":{
+                "summary":format!("When {} emits {}, run {}.{}",rule.trigger.plugin,rule.trigger.event,rule.action.plugin,rule.action.operation),
+                "passed_fields":passed,"condition_fields":rule.filter.iter().map(|c|c.field.clone()).collect::<Vec<_>>(),
+                "conditions":rule.filter,"fixed_args":fixed,"device":host.rules().settings(space).map_err(error)?.primary_device,
+                "warnings":["Only new events will run", "Events wait up to seven days", "Changing devices can cause duplicate actions"]
+            }}))
+        }
+        "rule_approve" => {
+            let rule = current.expect("checked");
+            host.rules_mut()
+                .approve(&rule, arg_str(args, "digest")?)
+                .map_err(error)?;
+            let rule = host.rule_info(rule).map_err(error)?;
+            host.grant_rule(&rule).map_err(error)?;
+            Ok(json!(rule))
+        }
+        "rules_save_settings" => {
+            let device = match object.get("primary_device") {
+                Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                _ => return Err("Primary device must be text or null".into()),
+            };
+            let paused = arg(args, "paused")?
+                .as_bool()
+                .ok_or("Paused must be true or false")?;
+            host.rules_mut()
+                .save_settings(
+                    space,
+                    &rules::Settings {
+                        primary_device: device.map(str::to_owned),
+                        paused,
+                    },
+                )
+                .map_err(error)?;
+            let mut result = json!(host.rules().settings(space).map_err(error)?);
+            result["armed"] = json!(host.arm_automations(space).map_err(error)?);
+            Ok(result)
+        }
+        "rules_start" => {
+            let mut result = json!(host.rules().settings(space).map_err(error)?);
+            result["armed"] = json!(host.arm_automations(space).map_err(error)?);
+            Ok(result)
+        }
+        "rule_runs" => {
+            let rule = match object.get("rule") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                _ => return Err("Rule must be an id".into()),
+            };
+            let before = match object.get("before") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(s)) => Some(s.as_str()),
+                _ => return Err("Invalid history cursor".into()),
+            };
+            let limit = match object.get("limit") {
+                None | Some(Value::Null) => 20,
+                Some(v) => v
+                    .as_u64()
+                    .filter(|n| (1..=50).contains(n))
+                    .ok_or("Run limit must be 1–50")? as usize,
+            };
+            host.rules().runs(space, rule, limit, before).map_err(error)
+        }
+        _ => unreachable!(),
     }
 }

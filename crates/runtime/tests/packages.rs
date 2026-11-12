@@ -249,3 +249,56 @@ fn themes_install_update_sync_and_remove() {
     laptop.packages_mut().store_mut().import(&batch).unwrap();
     assert!(laptop.packages().themes().unwrap().is_empty());
 }
+
+#[test]
+fn adding_or_widening_an_event_requires_fresh_device_consent() {
+    let root = TempDir::new().unwrap();
+    let mut host = host(&root, "events-consent");
+    let source = PackageSource::Folder("synthetic".into());
+    let old = Package::from_dir(&todo_dir()).unwrap();
+    host.packages_mut().approve_local(&old).unwrap();
+    let installed = host.packages_mut().install(&old, &source, None).unwrap();
+    assert!(host
+        .packages()
+        .materialize_approved(&installed, true)
+        .is_ok());
+    let new_dir = variant(&root, "with-event", |m| {
+        m["version"] = json!("9.0.0");
+        m["events"] = json!({"pinged":{"description":"A ping","payload":{"n":{"type":"integer"}}}});
+    });
+    let new = Package::from_dir(&new_dir).unwrap();
+    assert!(added_capabilities(Some(old.manifest()), new.manifest())
+        .iter()
+        .any(|c| c.id.starts_with("events:pinged:")));
+    let installed = host.packages_mut().install(&new, &source, None).unwrap();
+    assert!(host
+        .packages()
+        .materialize_approved(&installed, true)
+        .unwrap_err()
+        .to_string()
+        .contains("review"));
+    host.packages_mut().approve_local(&new).unwrap();
+    assert!(host
+        .packages()
+        .materialize_approved(&installed, true)
+        .is_ok());
+    let widened_dir = variant(&root, "widened-event", |m| {
+        m["version"] = json!("9.0.1");
+        m["events"] = json!({"pinged":{"description":"A ping","payload":{"n":{"type":"number"},"title":{"type":"string"}}}});
+    });
+    let widened = Package::from_dir(&widened_dir).unwrap();
+    assert_eq!(
+        added_capabilities(Some(new.manifest()), widened.manifest()).len(),
+        1
+    );
+    let installed = host
+        .packages_mut()
+        .install(&widened, &source, None)
+        .unwrap();
+    assert!(host
+        .packages()
+        .materialize_approved(&installed, true)
+        .unwrap_err()
+        .to_string()
+        .contains("review"));
+}

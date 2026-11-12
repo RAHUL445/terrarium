@@ -24,11 +24,13 @@ base64 = "0.22"
 ed25519-dalek = "2"
 getrandom = "0.2"
 sha2 = "0.10"
+uuid.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 tempfile.workspace = true
 
 [dev-dependencies]
+terrarium-sync = { path = "../sync" }
 tempfile.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 jiff = "0.2"

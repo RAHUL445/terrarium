@@ -208,11 +208,12 @@ pub fn run_query(
     params: Map<String, Value>,
 ) -> Result<Value, String> {
     let id = format!("{plugin}.{name}");
-    app_command(&state, Kind::Query, &id, space, Value::Object(params))
+    app_command(&state, Kind::Query, &id, space, Value::Object(params), None)
 }
 
 #[tauri::command]
 pub fn run_action(
+    app: AppHandle,
     state: State<'_, Plugins>,
     space: Option<String>,
     plugin: String,
@@ -220,7 +221,7 @@ pub fn run_action(
     args: Value,
 ) -> Result<Value, String> {
     let id = format!("{plugin}.{op}");
-    app_command(&state, Kind::Action, &id, space, args)
+    app_command(&state, Kind::Action, &id, space, args, Some(&app))
 }
 
 /// Runs a registry command for the app's own UI.
@@ -230,11 +231,16 @@ pub(crate) fn app_command(
     id: &str,
     space: Option<String>,
     args: Value,
+    app: Option<&AppHandle>,
 ) -> Result<Value, String> {
+    let authority = app.is_some_and(|app| app.state::<crate::sync::Sync>().automation_authorized());
     let space = space_or_default(space);
     state
         .with_host(|host| {
-            commands::invoke(
+            if app.is_some() {
+                host.set_automation_context(authority);
+            }
+            let result = commands::invoke(
                 host,
                 Caller::App,
                 kind,
@@ -243,7 +249,26 @@ pub(crate) fn app_command(
                 &args,
                 cfg!(desktop),
             )
-            .map_err(|e| e.message)
+            .map_err(|e| e.message);
+            if result.is_ok() && kind == Kind::Action {
+                let runs = host.run_rules(terrarium_host::now_ms());
+                if let Some(app) = app {
+                    if !runs.is_empty() {
+                        let _ = app.emit("data-changed", ());
+                    }
+                    for run in runs {
+                        if run.notify {
+                            use terrarium_host::Shell;
+                            crate::shell::AppShell(app.clone()).notify(
+                                None,
+                                "An automation could not run",
+                                "Open Settings → Automations to review it.",
+                            );
+                        }
+                    }
+                }
+            }
+            result
         })
         .ok_or("plugin host unavailable")?
 }
@@ -261,7 +286,7 @@ pub fn command(
     let args = args.unwrap_or(Value::Null);
     let importing = id == "space.import";
     let dry_run = args["dry_run"] == true;
-    let out = app_command(&state, kind, &id, space, args)?;
+    let out = app_command(&state, kind, &id, space, args, Some(&app))?;
     if kind == Kind::Action {
         if importing {
             if !dry_run {

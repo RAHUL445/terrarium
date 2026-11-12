@@ -1781,3 +1781,242 @@ fn notes_markdown_round_trip() {
             .unwrap()
     );
 }
+
+fn event_service(host: &mut PluginHost, command: &str, args: Value) -> Value {
+    terrarium_runtime::services::invoke(host, command, &args, true)
+        .unwrap()
+        .unwrap()
+}
+
+fn approve_event_rule(host: &mut PluginHost, rule: Value) {
+    let saved = event_service(
+        host,
+        "rule_create",
+        json!({"space":"personal", "rule":rule}),
+    );
+    let reviewed = event_service(
+        host,
+        "rule_review",
+        json!({"space":"personal", "id":saved["id"]}),
+    );
+    event_service(
+        host,
+        "rule_approve",
+        json!({"space":"personal", "id":saved["id"], "digest":reviewed["digest"]}),
+    );
+}
+
+fn event_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[test]
+fn todo_emits_task_done_once() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let id = h
+        .call(
+            "todo",
+            "create",
+            &json!({"title":"Exercise #gym", "notes":"Private"}),
+        )
+        .unwrap()["id"]
+        .clone();
+    for done in [true, true, false, false] {
+        h.call("todo", "toggle", &json!({"id":id,"done":done}))
+            .unwrap();
+    }
+    let events = h.pending_events(50).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].name, "task_done");
+    assert_eq!(
+        events[0].payload,
+        params(json!({"task_id":id,"title":"Exercise","tags":"gym","completed_date":today()}))
+    );
+}
+
+#[test]
+fn repeating_task_done_emits_once() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let id = h
+        .call(
+            "todo",
+            "create",
+            &json!({"title":"Walk #gym", "repeat":"daily"}),
+        )
+        .unwrap()["id"]
+        .clone();
+    let result = h
+        .call("todo", "toggle", &json!({"id":id,"done":true}))
+        .unwrap();
+    assert!(result["next"]["id"].is_string());
+    h.call("todo", "toggle", &json!({"id":id,"done":true}))
+        .unwrap();
+    assert_eq!(h.pending_events(50).unwrap().len(), 1);
+}
+
+#[test]
+fn habits_checkin_and_add_emit_checked_in() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    let id = h
+        .call("habits", "save", &json!({"title":"Water", "target":3}))
+        .unwrap()["id"]
+        .clone();
+    for status in ["done", "done", "skipped", "cleared"] {
+        h.call("habits", "checkin", &json!({"id":id,"status":status}))
+            .unwrap();
+    }
+    for by in [1, 0, 1, 1, 1] {
+        h.call("habits", "add", &json!({"id":id,"by":by})).unwrap();
+    }
+    let events = h.pending_events(50).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| e.payload["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["done", "skipped", "cleared", "partial", "partial", "done", "done"]
+    );
+    assert!(events
+        .iter()
+        .all(|e| e.name == "checked_in" && e.payload["title"] == "Water" && e.payload.len() == 4));
+    assert_eq!(
+        h.store("habits")
+            .unwrap()
+            .query("SELECT id FROM checkins", &[])
+            .unwrap()
+            .len(),
+        7
+    );
+    // Reload against the existing store: no migration or duplicate logical
+    // check-in is needed when the event-enabled package sees existing data.
+    h.unload("habits");
+    h.load(&package("habits")).unwrap();
+    h.call("habits", "add", &json!({"id":id,"by":0})).unwrap();
+    assert_eq!(
+        h.store("habits")
+            .unwrap()
+            .query("SELECT id FROM checkins", &[])
+            .unwrap()
+            .len(),
+        7
+    );
+    let simple = h.call("habits", "save", &json!({"title":"Walk"})).unwrap()["id"].clone();
+    h.call("habits", "checkin", &json!({"id":simple})).unwrap();
+    h.call("habits", "checkin", &json!({"id":simple,"count":1}))
+        .unwrap();
+    assert_eq!(
+        h.store("habits")
+            .unwrap()
+            .query("SELECT id FROM checkins", &[])
+            .unwrap()
+            .len(),
+        8
+    );
+    let before = h.pending_events(50).unwrap().len();
+    assert!(h
+        .call(
+            "habits",
+            "checkin",
+            &json!({"id":id,"note":"x".repeat(2001)})
+        )
+        .is_err());
+    assert_eq!(h.pending_events(50).unwrap().len(), before);
+}
+
+#[test]
+fn gym_rule_checks_in_habit() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    h.set_automation_context(true);
+    let id = h.call("habits", "save", &json!({"title":"Gym"})).unwrap()["id"].clone();
+    let state = event_service(&mut h, "rules", json!({"space":"personal"}));
+    let mut rule = state["examples"][0].clone();
+    assert!(terrarium_runtime::services::invoke(
+        &mut h,
+        "rule_create",
+        &json!({"space":"personal", "rule":rule}),
+        true
+    )
+    .unwrap()
+    .is_err());
+    rule["action"]["args"]["id"] = id.clone();
+    approve_event_rule(&mut h, rule);
+    event_service(
+        &mut h,
+        "rules_save_settings",
+        json!({"space":"personal", "primary_device":"test-device", "paused":false}),
+    );
+    for title in ["Exercise #gym", "Read"] {
+        let task = h.call("todo", "create", &json!({"title":title})).unwrap()["id"].clone();
+        h.call("todo", "toggle", &json!({"id":task,"done":true}))
+            .unwrap();
+        let runs = h.run_rules(event_now());
+        assert_eq!(runs.len(), usize::from(title.contains("#gym")));
+        if !runs.is_empty() {
+            assert_eq!(runs[0].status, "done");
+        }
+    }
+    let rows = h
+        .store("habits")
+        .unwrap()
+        .query("SELECT habit_id, day, status FROM checkins", &[])
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["habit_id"], id);
+    assert_eq!(rows[0]["day"], today());
+    assert_eq!(rows[0]["status"], "done");
+    assert_eq!(
+        event_service(&mut h, "rule_runs", json!({"space":"personal"}))["runs"][0]["status"],
+        "done"
+    );
+    h.unload("habits");
+    assert_eq!(
+        event_service(&mut h, "rules", json!({"space":"personal"}))["examples"],
+        json!([])
+    );
+}
+
+#[test]
+fn habit_rule_chain_stops() {
+    let data = TempDir::new().unwrap();
+    let mut h = host(&data);
+    h.set_automation_context(true);
+    let id = h
+        .call("habits", "save", &json!({"title":"Water", "target":100}))
+        .unwrap()["id"]
+        .clone();
+    approve_event_rule(
+        &mut h,
+        json!({"name":"Increment", "trigger":{"plugin":"habits","event":"checked_in"}, "action":{"plugin":"habits","operation":"add","args":{"id":id}}}),
+    );
+    event_service(
+        &mut h,
+        "rules_save_settings",
+        json!({"space":"personal", "primary_device":"test-device", "paused":false}),
+    );
+    let source = h
+        .call("habits", "save", &json!({"title":"Trigger"}))
+        .unwrap()["id"]
+        .clone();
+    h.call("habits", "checkin", &json!({"id":source})).unwrap();
+    let mut runs = Vec::new();
+    for _ in 0..10 {
+        runs.extend(h.run_rules(event_now()));
+    }
+    assert!(runs.iter().any(|r| r.code.as_deref() == Some("stopped")));
+    assert!(h.run_rules(event_now()).is_empty());
+    assert!(
+        h.store("habits")
+            .unwrap()
+            .query("SELECT id FROM checkins", &[])
+            .unwrap()
+            .len()
+            <= 5
+    );
+}

@@ -243,6 +243,16 @@ impl Sync {
         })
     }
 
+    /// Local key membership, never inferred from a runtime device-name string.
+    pub fn automation_authorized(&self) -> bool {
+        self.inner.lock().ok().is_some_and(|inner| {
+            inner
+                .member
+                .as_ref()
+                .is_some_and(|m| m.file.roster.contains_key(&inner.keys.device))
+        })
+    }
+
     /// Starts hosting (if this device hosts) and the background sync loop.
     pub fn start(app: AppHandle) {
         std::thread::spawn(move || loop {
@@ -250,6 +260,8 @@ impl Sync {
             state.ensure_hosting();
             state.refresh_host_roster();
             let plugins = app.state::<Plugins>();
+            let authorized = state.automation_authorized();
+            plugins.with_host(|host| host.set_automation_context(authorized));
             if let Some(last) = state.run(&plugins) {
                 if last.report.as_ref().is_some_and(|r| r.applied > 0) {
                     let _ = app.emit("data-changed", ());

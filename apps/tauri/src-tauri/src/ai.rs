@@ -1,5 +1,5 @@
 //! Host services on this device: AI requests and Settings → AI /
-//! Settings → Scheduled commands.
+//! Settings → Scheduled / Automations commands.
 //!
 //! AI requests run on threads started here, never while holding the plugin
 //! host: a job is taken under the lock, the HTTP call runs without it, and
@@ -79,7 +79,7 @@ pub fn start(app: AppHandle) {
     });
 }
 
-/// Settings → AI and Settings → Scheduled commands answered from host state.
+/// Settings → AI and Settings → Scheduled / Automations commands answered from host state.
 #[tauri::command]
 pub fn service(
     app: AppHandle,
@@ -92,7 +92,15 @@ pub fn service(
         .with_host(|host| services::invoke(host, &name, &args, cfg!(desktop)))
         .ok_or("plugin host unavailable")?
         .ok_or_else(|| format!("unknown command `{name}`"))?;
-    if result.is_ok() && name.starts_with("schedule") {
+    // Read services must not trigger a refresh that calls the same service again.
+    if result.is_ok()
+        && (name.starts_with("schedule")
+            || (name.starts_with("rule")
+                && !matches!(
+                    name.as_str(),
+                    "rules" | "rule_list" | "rule_runs" | "rule_review"
+                )))
+    {
         let _ = app.emit("data-changed", ());
     }
     result

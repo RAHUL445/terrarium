@@ -1,7 +1,7 @@
 //! Test fixture: operations that misbehave on purpose.
 
-use terrarium_guest::{storage, Args, Error, Plugin, Result};
 use serde_json::{json, Map, Value};
+use terrarium_guest::{storage, Args, Error, Plugin, Result};
 
 struct Limits;
 
@@ -9,29 +9,150 @@ impl Plugin for Limits {
     fn handle(operation: &str, args: Args) -> Result<Value> {
         match operation {
             "note" => {
-                let id = storage::insert("notes", &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                let id = storage::insert(
+                    "notes",
+                    &json!({"note": args.str("text")?})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )?;
                 Ok(json!({"id": id}))
             }
             "mark" => {
-                storage::update("notes", args.str("id")?, &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                storage::update(
+                    "notes",
+                    args.str("id")?,
+                    &json!({"note": args.str("text")?})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )?;
                 Ok(Value::Null)
             }
             "mark_many" => {
-                let ids = args.get("ids").and_then(Value::as_array).ok_or_else(|| Error::invalid("`ids` must be a list"))?;
+                let ids = args
+                    .get("ids")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| Error::invalid("`ids` must be a list"))?;
                 for id in ids {
-                    let id = id.as_str().ok_or_else(|| Error::invalid("`ids` must be a list"))?;
-                    storage::update("notes", id, &json!({"note": args.str("text")?}).as_object().unwrap().clone())?;
+                    let id = id
+                        .as_str()
+                        .ok_or_else(|| Error::invalid("`ids` must be a list"))?;
+                    storage::update(
+                        "notes",
+                        id,
+                        &json!({"note": args.str("text")?})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    )?;
                 }
                 Ok(json!({"marked": ids.len()}))
             }
+            "record" | "record_fail" | "chain" => {
+                storage::insert(
+                    "notes",
+                    &json!({"note": serde_json::to_string(&args.0)?})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )?;
+                if operation == "record_fail" {
+                    return Err(Error::invalid("private-plugin-error"));
+                }
+                if operation == "chain" {
+                    terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                }
+                Ok(Value::Null)
+            }
+            "emit_write" => {
+                let id = storage::insert(
+                    "notes",
+                    &json!({"note":"committed"}).as_object().unwrap().clone(),
+                )?;
+                terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                Ok(json!({"id":id}))
+            }
+            "emit_ok" => {
+                terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                Ok(Value::Null)
+            }
+            "emit_then_fail" | "emit_then_trap" => {
+                terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                if operation == "emit_then_trap" {
+                    panic!("trap after emit");
+                }
+                Err(Error::invalid("failed after emit"))
+            }
+            "emit_undeclared" => {
+                terrarium_guest::events::emit("other", &json!({}))?;
+                Ok(Value::Null)
+            }
+            "emit_bad_payload" => {
+                terrarium_guest::events::emit("pinged", &json!({"n":"wrong"}))?;
+                Ok(Value::Null)
+            }
+            "emit_payload" => {
+                terrarium_guest::events::emit(
+                    "pinged",
+                    args.get("payload").unwrap_or(&Value::Null),
+                )?;
+                Ok(Value::Null)
+            }
+            "emit_many" | "emit_count" => {
+                let n = args.get("count").and_then(Value::as_u64).unwrap_or(51);
+                for _ in 0..n {
+                    terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                }
+                Ok(Value::Null)
+            }
+            "emit_failed_child_budget" => {
+                let failed = terrarium_guest::interop::call(
+                    "event_sink",
+                    "emit_count",
+                    &json!({"count":51}),
+                );
+                if failed.is_ok() {
+                    return Err(Error::invalid("expected child failure"));
+                }
+                terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                Ok(Value::Null)
+            }
+            "emit_child"
+            | "emit_child_then_fail"
+            | "emit_child_budget"
+            | "emit_child_then_trap" => {
+                terrarium_guest::interop::call("event_sink", "emit_count", &json!({"count":50}))?;
+                if operation == "emit_child_then_trap" {
+                    panic!("outer traps");
+                }
+                if operation == "emit_child_then_fail" {
+                    return Err(Error::invalid("outer failed"));
+                }
+                if operation == "emit_child_budget" {
+                    terrarium_guest::events::emit("pinged", &json!({"n":1}))?;
+                }
+                Ok(Value::Null)
+            }
             "ok" => Ok(json!({ "ok": true })),
             "oversized_reply" => {
-                storage::insert("notes", &json!({"note":"must roll back"}).as_object().unwrap().clone())?;
+                storage::insert(
+                    "notes",
+                    &json!({"note":"must roll back"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )?;
                 Ok(json!({"data": "x".repeat(4 * 1024 * 1024 + 1)}))
             }
             "oversized_writes" => {
-                let payload = json!({"note":"x".repeat(1024 * 1024)}).as_object().unwrap().clone();
-                for _ in 0..34 { storage::insert("notes", &payload)?; }
+                let payload = json!({"note":"x".repeat(1024 * 1024)})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                for _ in 0..34 {
+                    storage::insert("notes", &payload)?;
+                }
                 Ok(Value::Null)
             }
             "spin" => {
@@ -71,7 +192,9 @@ impl Plugin for Limits {
                 &json!({"title": "from another plugin"}),
             ),
             "undeclared" => terrarium_guest::interop::call("habits", "summary", &json!({})),
-            "forbidden_op" => terrarium_guest::interop::call("tasks", "delete", &json!({"id": "x"})),
+            "forbidden_op" => {
+                terrarium_guest::interop::call("tasks", "delete", &json!({"id": "x"}))
+            }
             "make_then_fail" => {
                 terrarium_guest::interop::call(
                     "tasks",

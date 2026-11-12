@@ -28,7 +28,7 @@ pub mod bindings {
 }
 
 use bindings::terrarium::plugin::{
-    ai as host_ai, clock as host_clock, interop as host_interop, log as host_log,
+    ai as host_ai, clock as host_clock, events as host_events, interop as host_interop, log as host_log,
     schedule as host_schedule, speech as host_speech, storage as host,
 };
 
@@ -203,6 +203,16 @@ pub mod ai {
     /// Returns the request id.
     pub fn submit(request: &Value, on_done: &str) -> Result<String> {
         Ok(host_ai::submit(&request.to_string(), on_done)?)
+    }
+}
+
+/// Events declared under `events` in the manifest. Delivered after the
+/// operation commits.
+pub mod events {
+    use super::*;
+
+    pub fn emit(name: &str, payload: &Value) -> Result<()> {
+        Ok(host_events::emit(name, &payload.to_string())?)
     }
 }
 
