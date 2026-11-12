@@ -242,7 +242,7 @@ fn todo_templates_are_served() {
     let mut host = host(&data);
     host.load(&todo_dir()).unwrap();
     let page = host.template("todo", ViewKind::Page, "main").unwrap();
-    assert_eq!(page["state"]["filter"], json!("today"));
+    assert_eq!(page["state"]["filter"], json!("my_day"));
     assert!(host.template("todo", ViewKind::Widget, "quick-add").is_ok());
     assert!(host.template("todo", ViewKind::Page, "missing").is_err());
 }
@@ -410,6 +410,16 @@ fn todo_v4_to_v5_additive_schema_preserves_tasks_and_steps() {
             "task_lists",
             "task_groups",
             "task_statuses",
+            "workspace_tasks",
+            "task",
+            "list_choices",
+            "group_choices",
+            "status_choices",
+            "all_group_choices",
+            "all_status_choices",
+            "list_detail",
+            "group_detail",
+            "status_detail",
         ] {
             queries.remove(query);
         }

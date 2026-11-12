@@ -777,6 +777,27 @@
   }
 
   const COMPONENTS = {
+    "view-library"(spec) {
+      const node = el("div", "pp-view-library");
+      if (!this.bridge.mountViewLibrary) { node.textContent = "Saved views are unavailable in this host."; return node; }
+      const library = this.bridge.mountViewLibrary(node, spec);
+      this.cleanups.push(() => library?.dispose());
+      this.lists.push(() => library?.refresh());
+      return node;
+    },
+    /** Host-themed navigation and content, stacked on narrow screens. */
+    workspace(spec, scope) {
+      const node = el("div", "pp-workspace");
+      const nav = el("nav", "pp-workspace-nav");
+      nav.setAttribute("aria-label", resolve(spec.label || "Collections", scope));
+      const content = el("div", "pp-workspace-content");
+      const navigation = this.node(spec.navigation, scope);
+      const main = this.node(spec.content, scope);
+      if (navigation) nav.append(navigation);
+      if (main) content.append(main);
+      node.append(nav, content);
+      return node;
+    },
     /** An item from any plugin; incomplete refs draw nothing. */
     ref(spec, scope) {
       const ref = String(resolve(spec.ref, scope) ?? "");
@@ -1576,46 +1597,86 @@
       const select = el("select", "pp-input");
       select.id = id;
       if (spec.name) select.dataset.ppName = spec.name;
+      const paramsScope = () => ({ ...scope, state: this.state });
+      const fixedOptions = () => (spec.options || []).map(option => {
+        const opt = el("option", "", resolve(option.label, paramsScope()));
+        opt.value = String(resolve(option.value, paramsScope()) ?? "");
+        return opt;
+      });
+      const wanted = spec.bind ? String(lookup(paramsScope(), spec.bind) ?? "") : "value" in spec ? String(resolve(spec.value, paramsScope()) ?? "") : null;
+      const readValue = () => spec.bind ? String(lookup(paramsScope(), spec.bind) ?? "") : select.value;
+      const showSelection = (value, options, unavailable = true) => {
+        const exists = options.some(option => option.value === value);
+        select.replaceChildren(...options);
+        if (unavailable && value && !exists) {
+          const missing = el("option", "", "Unavailable selection");
+          missing.value = value;
+          select.append(missing);
+        }
+        select.value = value;
+        if (select.selectedIndex < 0 && select.options.length) select.selectedIndex = 0;
+      };
+      showSelection(wanted ?? "", fixedOptions(), true);
       if (spec.bind) {
         select.addEventListener("change", () => {
-          const option = (spec.options || []).find(option => String(option.value) === select.value);
-          this.setState(spec.bind, option ? option.value : select.value);
+          const option = (spec.options || []).find(option => String(resolve(option.value, paramsScope())) === select.value);
+          this.setState(spec.bind, option ? resolve(option.value, paramsScope()) : select.value);
         });
-        this.watchers.push(() => { select.value = String(lookup(this.scope(), spec.bind) ?? ""); });
+        this.watchers.push(() => { select.value = readValue(); });
       }
-      for (const option of spec.options || []) {
-        const opt = el("option", "", resolve(option.label, scope));
-        opt.value = resolve(option.value, scope);
-        select.append(opt);
-      }
-      const wanted = spec.bind ? String(lookup(this.scope(), spec.bind) ?? "") : "value" in spec ? String(resolve(spec.value, scope) ?? "") : null;
-      if (wanted != null) select.value = wanted;
       // More options from a query, after the fixed ones:
       // {"options_query": {"query": "skills", "value": "id", "label": "name"}}.
       const more = spec.options_query;
       if (more?.query) {
+        const error = el("p", "pp-error");
+        error.setAttribute("role", "alert");
+        error.hidden = true;
+        let paramsKey = null;
+        let loadingKey = null;
+        let sequence = 0;
+        const defaultValue = String(resolve(spec.options?.[0]?.value, paramsScope()) ?? "");
         const loadOptions = async () => {
-          const rows = await this.bridge.query(more.query, resolve(more.params || {}, this.scope()));
           if (this.disposed) return;
-          const current = spec.bind ? String(lookup(this.scope(), spec.bind) ?? "") : select.value;
-          select.replaceChildren(...(spec.options || []).map(option => {
-            const opt = el("option", "", resolve(option.label, scope));
-            opt.value = resolve(option.value, scope);
-            return opt;
-          }));
-            for (const row of rows) {
+          const params = resolve(more.params || {}, paramsScope());
+          const key = JSON.stringify(params);
+          if (loadingKey === key || (paramsKey === key && !error.hidden)) return;
+          const changed = paramsKey !== null && paramsKey !== key;
+          const current = changed ? defaultValue : readValue();
+          const request = ++sequence;
+          loadingKey = key;
+          paramsKey = key;
+          if (changed) {
+            showSelection(current, fixedOptions(), false);
+            if (spec.bind) this.setState(spec.bind, current);
+          }
+          try {
+            const rows = await this.bridge.query(more.query, params);
+            if (this.disposed || request !== sequence) return;
+            const options = fixedOptions();
+            for (const row of rows || []) {
               const opt = el("option", "", String(row[more.label || "label"] ?? ""));
               opt.value = String(row[more.value || "value"] ?? "");
-              select.append(opt);
+              options.push(opt);
             }
-          if (spec.bind) select.value = current;
-          else {
-            if (wanted != null) select.value = wanted;
-            if (select.selectedIndex < 0 && select.options.length) select.selectedIndex = 0;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
+            showSelection(readValue(), options, true);
+            error.hidden = true;
+            error.textContent = "";
+          } catch (cause) {
+            if (this.disposed || request !== sequence) return;
+            error.textContent = `Could not load options: ${String(cause?.message || cause)}`;
+            error.hidden = false;
+          } finally {
+            if (request === sequence) loadingKey = null;
           }
         };
-        this.lists.push(() => loadOptions().catch(() => {}));
+        this.watchers.push(() => {
+          const key = JSON.stringify(resolve(more.params || {}, paramsScope()));
+          if (key !== paramsKey) void loadOptions();
+          else select.value = readValue();
+        });
+        this.lists.push(loadOptions);
+        node.append(label, select, error);
+        return node;
       }
       node.append(label, select);
       return node;

@@ -392,6 +392,15 @@ ul.plain li strong { color: var(--ink); font-weight: 600; }
 
 /* ---- Declarative UI v1 components (renderer.js) ---- */
 .pp-stack { display: flex; min-width: 0; }
+.pp-workspace { display: grid; grid-template-columns: minmax(160px, 210px) minmax(0, 1fr); gap: 24px; align-items: start; }
+.pp-workspace-nav { min-width: 0; padding-right: 20px; border-right: 1px solid var(--border); }
+.pp-workspace-content { min-width: 0; }
+.pp-workspace-nav .pp-button { justify-content: flex-start; text-align: left; }
+.pp-workspace-content .pp-list > li > .pp-stack > .pp-button { align-self: flex-start; margin: 0 12px 8px 42px; }
+@media (max-width: 760px) {
+  .pp-workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .pp-workspace-nav { padding: 0 0 12px; border-right: 0; border-bottom: 1px solid var(--border); }
+}
 .pp-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .widget .pp-card { border: 0; padding: 0; }
 .pp-section { display: flex; flex-direction: column; gap: 8px; }
