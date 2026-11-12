@@ -57,6 +57,21 @@ connected by a link. In a note, **Link to…** connects an item without
 adding text. **Remove link** removes that connection; it leaves the items
 and any mentions in note text intact. Links stay within the current space.
 
+## Quick capture and sharing
+
+On macOS, press **⌥Space** from anywhere to open **Quick capture**. Type your
+text, choose where to save it, then press Enter. Press Esc to close. You can
+change or turn off this shortcut in **Settings → Appearance → Quick capture**.
+
+On Android, share text or a link from another app and choose **Terrarium**.
+Terrarium asks where to save it. Nothing is saved until you pick an app.
+
+You can also open pages with links in this form:
+`terrarium://open/<app>/<page>?item=<id>&space=<id>`. For example, a note or a
+shortcut can open one task directly. These links only open existing items and
+pages; they never change data. On macOS, open Terrarium once from
+`/Applications` before using these links from other apps.
+
 ## Companion
 
 The sparkle button opens the **Companion** panel beside any page:

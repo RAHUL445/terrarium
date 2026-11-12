@@ -41,3 +41,15 @@ test('a synced pending version can be reviewed without selecting another file', 
   assert.deepEqual(request, { command: 'stage_install', args: { source: { kind: 'synced', id: 'notes' } } });
   assert.equal(reviewed.token, 'review');
 });
+
+test('the quick capture window can only list plugins and run actions', () => {
+  const cap = JSON.parse(fs.readFileSync(path.join(app, 'capabilities/quick.json'), 'utf8'));
+  assert.deepEqual(cap.windows, ['quick']);
+  assert.equal(cap.remote, undefined);
+  assert.deepEqual(cap.permissions, [
+    'core:default',
+    'allow-plugins',
+    'allow-run-action',
+    'allow-quick-capture-done',
+  ]);
+});

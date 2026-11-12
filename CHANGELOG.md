@@ -14,6 +14,12 @@ All notable changes to this project are documented here. The format follows
 - Board and matrix card drag-and-drop (plus keyboard move) through declared
   move operations.
 
+- Deep links with `terrarium://open/...` now open a specific app page or item.
+- Quick capture on desktop: a global shortcut opens a small save window from
+  anywhere on the computer.
+- Android share sheet support for text and links, with a picker so you choose
+  where the shared text is saved.
+
 ## [0.1.0-alpha.1] - 2026-11-10
 
 ### Added

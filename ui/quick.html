@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quick capture</title>
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="quick.css">
+</head>
+<body>
+  <main class="quick">
+    <form id="quick-form" class="quick-form">
+      <label for="quick-text" class="sr-only">Text to save</label>
+      <input id="quick-text" class="pp-input" type="text" autocomplete="off" maxlength="2000" placeholder="Type, then press Enter">
+      <div class="quick-row">
+        <label for="quick-action">Save as</label>
+        <select id="quick-action" class="pp-input"></select>
+      </div>
+      <p id="quick-status" class="muted" role="status" aria-live="polite"></p>
+      <p id="quick-error" class="error" role="alert" hidden></p>
+    </form>
+  </main>
+  <script src="quick.js"></script>
+</body>
+</html>

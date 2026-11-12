@@ -51,6 +51,7 @@ struct PluginInfo {
     search: Option<String>,
     views: BTreeMap<String, terrarium_runtime::QueryView>,
     quick_actions: Vec<terrarium_runtime::QuickAction>,
+    share_target: Option<terrarium_runtime::ShareTarget>,
 }
 
 #[derive(Serialize)]
@@ -96,6 +97,7 @@ impl From<&Manifest> for PluginInfo {
                 .filter_map(|(name, query)| query.view.clone().map(|view| (name.clone(), view)))
                 .collect(),
             quick_actions: m.quick_actions.clone(),
+            share_target: m.share_target.clone(),
         }
     }
 }

@@ -1036,6 +1036,45 @@ if (isPhone) {
 }
 updateInstallKind();
 
+// ---- Quick capture ----------------------------------------------------------
+
+function renderQuickCapture(state) {
+  const card = $("quick-card");
+  card.hidden = !state.available;
+  if (!state.available) return;
+  const enabled = !!state.enabled;
+  $("quick-enabled").checked = enabled;
+  $("quick-shortcut").value = state.shortcut || "Alt+Space";
+  $("quick-shortcut").disabled = !enabled;
+  const message = state.error || "";
+  $("quick-error").textContent = message;
+  $("quick-error").hidden = !message;
+}
+
+async function loadQuickCapture() {
+  if (!invoke) return;
+  try {
+    renderQuickCapture(await call("quick_capture_settings"));
+  } catch (_) {}
+}
+
+async function saveQuickCapture() {
+  if (!invoke) return;
+  const enabled = $("quick-enabled").checked;
+  const shortcut = $("quick-shortcut").value;
+  $("quick-shortcut").disabled = !enabled;
+  try {
+    renderQuickCapture(await call("quick_capture_set", { enabled, shortcut }));
+  } catch (error) {
+    $("quick-error").textContent = String(error);
+    $("quick-error").hidden = false;
+    await loadQuickCapture();
+  }
+}
+
+$("quick-enabled").addEventListener("change", saveQuickCapture);
+$("quick-shortcut").addEventListener("change", saveQuickCapture);
+
 // ---- Appearance -------------------------------------------------------------
 
 let themes = []; // installed: [{ theme, warnings }]
@@ -2191,26 +2230,144 @@ $("control-token-copy").addEventListener("click", async () => {
 
 // `ui.open` and `ui.notify` from a command-line client.
 async function controlUi(event) {
-  if (!event) return;
+  if (!event) return false;
   if (event.action === "notify") {
     toast(String(event.text || ""));
-    return;
+    return true;
   }
-  if (event.action !== "open") return;
+  if (event.action !== "open") return false;
   const plugin = pluginList.plugins.find((p) => p.id === event.plugin);
-  if (!plugin || !plugin.pages.some((p) => p.id === event.page)) return;
+  if (!plugin) return false;
+  const page = event.page || plugin.pages[0]?.id;
+  if (!page || !plugin.pages.some((p) => p.id === page)) return false;
   if (event.space && event.space !== currentSpace) {
-    if (await setSpace(event.space, { reload: false }) === false) return;
+    if (await setSpace(event.space, { reload: false }) === false) return false;
     renderSpaceChrome();
     renderHome();
     loadBadges();
   }
-  await openPage(plugin.id, event.page, { item: event.item || null });
+  return await openPage(plugin.id, page, { item: event.item || null }) === true;
+}
+
+// Plugins that accept shared text of this type, last used first.
+function shareTargets(plugins, type, last) {
+  const out = [];
+  for (const plugin of plugins || []) {
+    const target = plugin?.share_target;
+    if (!target || !Array.isArray(target.types) || !target.types.includes(type)) continue;
+    out.push({ plugin, target });
+  }
+  out.sort((a, b) => {
+    if (a.plugin.id === last) return -1;
+    if (b.plugin.id === last) return 1;
+    return 0;
+  });
+  return out;
+}
+
+function showShare(link) {
+  if (!pluginList.plugins.length) return false;
+  const preview = String(link?.text || "");
+  const previewText = preview.length > 300 ? `${preview.slice(0, 300)}…` : preview;
+  $("share-preview").textContent = previewText;
+  $("share-space").textContent = `Saves to ${current().name}`;
+  const type = String(link?.type || "text/plain");
+  let last = null;
+  try {
+    last = localStorage.getItem("share-target");
+  } catch (_) {}
+  const targets = shareTargets(pluginList.plugins, type, last);
+  $("share-error").hidden = true;
+  $("share-error").textContent = "";
+  const closeButton = $("share-cancel");
+  closeButton.textContent = targets.length ? "Cancel" : "Close";
+  $("share-targets").replaceChildren(
+    ...(targets.length
+      ? targets.map(({ plugin, target }) =>
+          el(
+            "button",
+            {
+              type: "button",
+              onclick: async () => {
+                const buttons = [...$("share-targets").querySelectorAll("button")];
+                buttons.forEach((button) => {
+                  button.disabled = true;
+                });
+                $("share-error").hidden = true;
+                $("share-error").textContent = "";
+                try {
+                  await call("run_action", {
+                    space: currentSpace,
+                    plugin: plugin.id,
+                    op: target.op,
+                    args: { [target.arg]: link.text },
+                  });
+                  $("share-dialog").close();
+                  toast(`Saved to ${plugin.name}`);
+                  try {
+                    localStorage.setItem("share-target", plugin.id);
+                  } catch (_) {}
+                  refreshPluginViews();
+                } catch (error) {
+                  $("share-error").textContent = String(error);
+                  $("share-error").hidden = false;
+                  buttons.forEach((button) => {
+                    button.disabled = false;
+                  });
+                }
+              },
+            },
+            `Save to ${plugin.name}`
+          )
+        )
+      : [el("p", { class: "muted" }, "No app here can save shared text.")])
+  );
+  if ($("share-dialog").open) {
+    // Keep a single modal instance; a newer share replaces the current one.
+  } else {
+    $("share-dialog").showModal();
+  }
+  $("share-targets").querySelector("button")?.focus();
+  return true;
+}
+
+// Links from the operating system (terrarium://…), queued by the backend.
+let waitingLinks = [];
+async function drainLinks(now = Date.now()) {
+  let fresh = [];
+  try {
+    fresh = await call("take_links");
+  } catch (_) {
+    return false;
+  }
+  let openedAny = false;
+  for (const link of fresh || []) waitingLinks.push({ link, received: now });
+  const retry = [];
+  for (const entry of waitingLinks) {
+    let opened = false;
+    if (entry.link?.action === "open") opened = await controlUi(entry.link);
+    else if (entry.link?.action === "share") opened = showShare(entry.link);
+    if (opened) {
+      openedAny = true;
+      continue;
+    }
+    if (now - entry.received >= 20000) {
+      toast("This link points to something that isn't available here.", "error");
+      continue;
+    }
+    retry.push(entry);
+  }
+  waitingLinks = retry;
+  return openedAny;
 }
 
 $("control-token-done").addEventListener("click", () => {
   $("control-token-value").textContent = "";
   $("control-token").hidden = true;
+});
+
+$("share-cancel").addEventListener("click", () => {
+  $("share-dialog").close();
 });
 
 function showSettings(section) {
@@ -2231,6 +2388,7 @@ function showSection(section) {
   if (section === "ai") loadAi();
   if (section === "scheduled") loadSchedules();
   if (section === "appearance") {
+    loadQuickCapture();
     renderThemes();
     loadThemes();
     if (!gallery) loadGallery();
@@ -2301,6 +2459,7 @@ async function start() {
       else if (!payload.dir) toast(`${payload.plugin} removed`, "ok");
       else if (!payload.initial) toast(`${payload.plugin} loaded`, "ok");
       await loadPlugins();
+      if (waitingLinks.length) drainLinks();
       if (!navigated && currentView !== "home") showView("home");
     });
   }
@@ -2316,6 +2475,7 @@ async function start() {
       if (currentView === "settings" && settingsSection === "developer") loadControl();
     });
     await window.__TAURI__.event.listen("control-ui", (e) => controlUi(e.payload));
+    await window.__TAURI__.event.listen("deep-link", () => drainLinks());
   }
   const location = workspaceSession.read(currentSpace);
   await showView("home");
@@ -2324,6 +2484,7 @@ async function start() {
   await loadSyncStatus();
   await loadThemes();
   if (!navigated) await restoreWorkspace(location);
+  if (await drainLinks()) navigated = true;
   // Android uses an HTTPS local origin. The backend alone decides whether to
   // emit opt-in duration-only diagnostics; regular builds emit nothing.
   if (window.__TAURI__) {

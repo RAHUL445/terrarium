@@ -8,6 +8,31 @@
     "beforeBuildCommand": "",
     "beforeBundleCommand": "cargo build --locked --release -p terrarium-cli"
   },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": [
+            "terrarium"
+          ],
+          "host": "open",
+          "appLink": false
+        },
+        {
+          "scheme": [
+            "terrarium"
+          ],
+          "host": "share",
+          "appLink": false
+        }
+      ],
+      "desktop": {
+        "schemes": [
+          "terrarium"
+        ]
+      }
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [

@@ -305,6 +305,7 @@ fn plugin_info(m: &Manifest) -> Value {
         ("search", json!(m.search)),
         ("views", json!(views_of(m))),
         ("quick_actions", json!(m.quick_actions)),
+        ("share_target", json!(m.share_target)),
     ] {
         info.insert(k.into(), v);
     }

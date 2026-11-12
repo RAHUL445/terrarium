@@ -31,9 +31,9 @@ pub use index::{IndexProgress, INDEX_CHUNK};
 pub use links::{LinkInfo, Links, LINKS_STORE_ID, LINK_KINDS};
 pub use manifest::{
     Effect, IndexDef, InterfaceDef, JobDef, Limits, Manifest, MoveDef, OpenDef, OperationDef,
-    ParamSpec, ParamType, QueryDef, QueryView, QuickAction, RefDef, RemindersDef, RunOn,
-    Schedule, ViewColumn, ViewDef, API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES,
-    PERMISSIONS,
+    ParamSpec, ParamType, QueryDef, QueryView, QuickAction, RefDef, RemindersDef, RunOn, Schedule,
+    ShareTarget, ViewColumn, ViewDef, API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES,
+    PERMISSIONS, SHARE_TYPES,
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,

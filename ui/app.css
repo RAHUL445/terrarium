@@ -1170,6 +1170,16 @@ input.page-add-search { width: 100%; min-height: 40px; padding: 0 12px; border: 
 .confirm-dialog { width: min(420px, calc(100vw - 32px)); }
 .confirm-dialog h2 { margin: 0 0 8px; font-size: 18px; }
 .confirm-dialog p { margin: 0 0 20px; color: var(--muted); line-height: 1.5; }
+.share-preview {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.share-targets { display: flex; flex-direction: column; gap: 8px; margin: 0 0 16px; }
+.share-targets > button { width: 100%; min-height: 44px; justify-content: center; }
 button.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
 :root[data-mode="dark"] button.danger-solid { color: #18181b; }
 @media (prefers-color-scheme: dark) { :root:not([data-mode="light"]) button.danger-solid { color: #18181b; } }

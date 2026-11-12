@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "quick-capture",
+  "description": "The quick-capture window lists plugins and runs their quick actions; nothing else.",
+  "windows": [
+    "quick"
+  ],
+  "platforms": [
+    "macOS",
+    "windows",
+    "linux"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-plugins",
+    "allow-run-action",
+    "allow-quick-capture-done"
+  ]
+}

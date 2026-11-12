@@ -130,10 +130,22 @@ carries `space` and `user_id` so shared team spaces need no data migration.
 
 - macOS and Android arm64 run Wasmtime. iOS would need the Pulley interpreter
   and is not a current target.
+- Deep links use the `terrarium://open/...` scheme registered by the bundled
+  app (`Info.plist`) and by Android intent filters. The app parses links in
+  `apps/tauri/src-tauri/src/links.rs`, then the UI drains queued links before
+  navigation.
+- Quick capture is desktop-only: a global shortcut opens a separate `quick`
+  window (`ui/quick.html`) and uses the `quick-capture` capability file
+  (`apps/tauri/src-tauri/capabilities/quick.json`).
+- Android text sharing is routed through `MainActivity.kt`, which rewrites
+  `ACTION_SEND` text into `terrarium://share?...` links handled by the same
+  link queue.
 - Android builds are sideloaded; app-store policy for downloadable code has not
   been reviewed.
 - Reminders are scheduled as local notifications on the device chosen per
   reminder (`phone`, `desktop` or `both`).
+- The current home-screen widget direction is tracked in the design note
+  [home widgets](../design/home-widgets.md).
 
 Security boundaries and known gaps: [threat model](../security/threat-model.md),
 [SECURITY.md](../../SECURITY.md) and the [roadmap](../roadmap.md).

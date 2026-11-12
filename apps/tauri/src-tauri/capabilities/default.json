@@ -42,6 +42,9 @@
     "allow-control-set-enabled",
     "allow-control-add-client",
     "allow-control-remove-client",
+    "allow-quick-capture-settings",
+    "allow-quick-capture-set",
+    "allow-quick-capture-done",
     "allow-list-spaces",
     "allow-create-space",
     "allow-rename-space",
@@ -54,6 +57,7 @@
     "allow-sync-now",
     "allow-recovery-phrase",
     "allow-connect-drive",
-    "allow-disconnect-drive"
+    "allow-disconnect-drive",
+    "allow-take-links"
   ]
 }

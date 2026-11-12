@@ -1,5 +1,7 @@
 package io.github.rahul445.terrarium
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.view.View
 import androidx.activity.enableEdgeToEdge
@@ -8,6 +10,7 @@ import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    intent = shareAsLink(intent)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     // Edge-to-edge leaves the WebView behind the IME even with adjustResize.
@@ -24,5 +27,29 @@ class MainActivity : TauriActivity() {
       insets
     }
     ViewCompat.requestApplyInsets(content)
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    val link = shareAsLink(intent)
+    setIntent(link)
+    super.onNewIntent(link)
+  }
+
+  /** Text shared from another app becomes terrarium://share?…, which the
+   *  deep-link plugin delivers like any other link. */
+  private fun shareAsLink(intent: Intent): Intent {
+    if (intent.action != Intent.ACTION_SEND) return intent
+    val type = intent.type ?: return intent
+    if (type != "text/plain" && type != "text/uri-list") return intent
+    val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.take(10000) ?: return intent
+    val builder = Uri.Builder()
+      .scheme("terrarium")
+      .authority("share")
+      .appendQueryParameter("text", text)
+      .appendQueryParameter("type", type)
+    intent.getStringExtra(Intent.EXTRA_SUBJECT)
+      ?.take(200)
+      ?.let { builder.appendQueryParameter("subject", it) }
+    return Intent(Intent.ACTION_VIEW, builder.build())
   }
 }

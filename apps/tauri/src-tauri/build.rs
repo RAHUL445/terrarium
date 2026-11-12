@@ -51,6 +51,9 @@ fn main() {
             "control_set_enabled",
             "control_add_client",
             "control_remove_client",
+            "quick_capture_settings",
+            "quick_capture_set",
+            "quick_capture_done",
             "list_spaces",
             "create_space",
             "rename_space",
@@ -64,6 +67,7 @@ fn main() {
             "recovery_phrase",
             "connect_drive",
             "disconnect_drive",
+            "take_links",
         ]),
     ))
     .expect("build application permissions")

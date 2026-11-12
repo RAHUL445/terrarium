@@ -37,7 +37,10 @@ function harness(responses = {}, confirmAnswer = true) {
     pluginList: { plugins: [{ id: 'todo', pages: [{ id: 'main' }] }] },
     async setSpace(id) { spaces.push(id); context.currentSpace = id; },
     renderSpaceChrome() {}, renderHome() {}, loadBadges() {},
-    async openPage(plugin, page, options) { opened.push({ plugin, page, item: options.item }); },
+    async openPage(plugin, page, options) {
+      opened.push({ plugin, page, item: options.item });
+      return true;
+    },
     async call(command, args) {
       calls.push({ command, args });
       const r = responses[command];
@@ -113,15 +116,73 @@ test('a client that can change data needs a confirmation first', async () => {
 
 test('ui.open and ui.notify reach the window', async () => {
   const h = harness();
-  await h.context.controlUi({ action: 'notify', text: 'Report ready' });
+  assert.equal(await h.context.controlUi({ action: 'notify', text: 'Report ready' }), true);
   assert.deepEqual(h.toasts, ['Report ready']);
-  await h.context.controlUi({ action: 'open', space: 'work', plugin: 'todo', page: 'main', item: 'abc' });
+  assert.equal(await h.context.controlUi({ action: 'open', space: 'work', plugin: 'todo', page: 'main', item: 'abc' }), true);
   assert.deepEqual(h.spaces, ['work']);
   assert.deepEqual(JSON.parse(JSON.stringify(h.opened)), [{ plugin: 'todo', page: 'main', item: 'abc' }]);
   // Unknown plugins and pages are ignored.
-  await h.context.controlUi({ action: 'open', plugin: 'nope', page: 'main' });
-  await h.context.controlUi({ action: 'open', plugin: 'todo', page: 'nope' });
+  assert.equal(await h.context.controlUi({ action: 'open', plugin: 'nope', page: 'main' }), false);
+  assert.equal(await h.context.controlUi({ action: 'open', plugin: 'todo', page: 'nope' }), false);
   assert.equal(h.opened.length, 1);
+});
+
+test('a link without a page opens the plugin first page', async () => {
+  const h = harness();
+  assert.equal(await h.context.controlUi({ action: 'open', plugin: 'todo' }), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.opened)), [{ plugin: 'todo', page: 'main', item: null }]);
+});
+
+test('an unknown plugin is reported and not opened', async () => {
+  const h = harness();
+  assert.equal(await h.context.controlUi({ action: 'open', plugin: 'nope' }), false);
+  assert.deepEqual(h.opened, []);
+});
+
+test('links waiting for plugins are dropped after 20 seconds', async () => {
+  let sent = false;
+  const h = harness({
+    take_links: () => {
+      if (sent) return [];
+      sent = true;
+      return [{ action: 'open', plugin: 'later' }];
+    },
+  });
+  await h.context.drainLinks(1000);
+  assert.deepEqual(h.opened, []);
+  assert.deepEqual(h.toasts, []);
+  await h.context.drainLinks(22000);
+  assert.deepEqual(h.toasts, ["This link points to something that isn't available here."]);
+});
+
+test('shared text lists only plugins that accept its type, last used first', () => {
+  const h = harness();
+  const plain = h.context.shareTargets(
+    [
+      { id: 'notes', share_target: { types: ['text/plain'] } },
+      { id: 'bookmarks', share_target: { types: ['text/plain', 'text/uri-list'] } },
+      { id: 'todo' },
+    ],
+    'text/plain',
+    'bookmarks'
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(plain.map((x) => x.plugin.id))), ['bookmarks', 'notes']);
+  const uri = h.context.shareTargets(
+    [
+      { id: 'notes', share_target: { types: ['text/plain'] } },
+      { id: 'bookmarks', share_target: { types: ['text/plain', 'text/uri-list'] } },
+      { id: 'todo' },
+    ],
+    'text/uri-list',
+    'bookmarks'
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(uri.map((x) => x.plugin.id))), ['bookmarks']);
+});
+
+test('a share waits until plugins have loaded', () => {
+  const h = harness();
+  h.context.pluginList.plugins = [];
+  assert.equal(h.context.showShare({ action: 'share', text: 'hello', type: 'text/plain' }), false);
 });
 
 test('activity shows dry runs and how many rows changed', () => {

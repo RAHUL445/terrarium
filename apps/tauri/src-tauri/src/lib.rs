@@ -7,7 +7,9 @@ mod control;
 #[cfg(desktop)]
 mod headless;
 mod install;
+mod links;
 mod plugins;
+mod quick;
 mod secrets;
 mod shell;
 mod sync;
@@ -24,6 +26,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use tauri::{Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use terrarium_core::{
     ChangeRecord, ConflictRecord, DeviceId, NoticeRecord, PluginSchema, Store, StoreConfig,
     SystemTime,
@@ -399,9 +402,17 @@ pub(crate) fn open_host(app_data: &Path) -> Result<Opened, Box<dyn std::error::E
 pub fn run() {
     let launched = Instant::now();
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
+            app.manage(links::Inbox::default());
+            let handle = app.handle().clone();
+            app.deep_link()
+                .on_open_url(move |event| links::receive(&handle, event.urls()));
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                links::receive(app.handle(), urls);
+            }
             // Explicit developer profiling uses a separate, absolute data root.
             let profile_dir = std::env::var_os("TERRA_PROFILE_DIR").map(PathBuf::from);
             if profile_dir.as_ref().is_some_and(|path| !path.is_absolute()) {
@@ -434,6 +445,7 @@ pub fn run() {
             ai::start(app.handle().clone());
             app.manage(control::Control::open(&app_data));
             control::start(app.handle());
+            quick::start(app.handle(), &app_data)?;
             // Development aid: start pairing at launch and log the code.
             if cfg!(debug_assertions) && std::env::var_os("TERRA_DEV_PAIR").is_some() {
                 match app.state::<sync::Sync>().begin_pairing() {
@@ -491,6 +503,9 @@ pub fn run() {
             control::control_set_enabled,
             control::control_add_client,
             control::control_remove_client,
+            quick::quick_capture_settings,
+            quick::quick_capture_set,
+            quick::quick_capture_done,
             plugins::list_spaces,
             plugins::create_space,
             plugins::rename_space,
@@ -503,7 +518,8 @@ pub fn run() {
             sync::sync_now,
             sync::recovery_phrase,
             sync::connect_drive,
-            sync::disconnect_drive
+            sync::disconnect_drive,
+            links::take_links
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Terrarium");

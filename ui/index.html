@@ -252,6 +252,19 @@
               </select>
               <p class="muted" id="icon-style-note">Use quiet outlines or each app’s color across navigation, widgets and app pages. Saved on this device.</p>
             </div>
+            <div class="card" id="quick-card" hidden>
+              <h2>Quick capture</h2>
+              <p class="muted">Press a shortcut anywhere on this computer to add a task, note or link without switching to Terrarium.</p>
+              <label class="pp-checkbox"><input type="checkbox" id="quick-enabled"> Use a keyboard shortcut</label>
+              <label for="quick-shortcut">Shortcut</label>
+              <select class="pp-input" id="quick-shortcut">
+                <option value="Alt+Space">⌥ Space</option>
+                <option value="Control+Alt+Space">⌃⌥ Space</option>
+                <option value="CommandOrControl+Shift+Space">⌘⇧ Space</option>
+                <option value="CommandOrControl+Alt+N">⌥⌘ N</option>
+              </select>
+              <p id="quick-error" class="error" role="alert" hidden></p>
+            </div>
             <div class="card">
               <h2 id="themes-title">Themes</h2>
               <div class="theme-grid" role="radiogroup" aria-labelledby="themes-title" id="theme-list"></div>
@@ -589,6 +602,15 @@
     </div>
   </section>
 </div>
+
+<dialog id="share-dialog" class="confirm-dialog" aria-labelledby="share-title" aria-describedby="share-preview">
+  <h2 id="share-title">Save shared text</h2>
+  <p id="share-preview" class="share-preview"></p>
+  <p id="share-space" class="muted"></p>
+  <div id="share-targets" class="share-targets" role="group" aria-label="Save to"></div>
+  <p id="share-error" class="error" role="alert" hidden></p>
+  <div class="confirm-dialog-actions"><button type="button" id="share-cancel">Cancel</button></div>
+</dialog>
 
 <div id="toasts" class="toasts" role="status" aria-live="polite" popover="manual"></div>
 <script src="confirm.js"></script>

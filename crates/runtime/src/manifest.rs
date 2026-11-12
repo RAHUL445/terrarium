@@ -70,6 +70,9 @@ pub struct Manifest {
     /// passed to `op` as the `arg` argument.
     #[serde(default)]
     pub quick_actions: Vec<QuickAction>,
+    /// Accepts text shared from other apps (Android).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_target: Option<ShareTarget>,
     /// Where search hits and items named by id open. Defaults to the
     /// first page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +94,17 @@ pub struct QuickAction {
 }
 
 pub const MAX_INDEX_ENTRIES: usize = 8;
+
+/// Android share sheet: shared text goes to `op` as `arg`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareTarget {
+    pub types: Vec<String>,
+    pub op: String,
+    pub arg: String,
+}
+
+pub const SHARE_TYPES: &[&str] = &["text/plain", "text/uri-list"];
 
 /// Icon names the host can draw.
 pub const ICONS: &[&str] = &[
@@ -650,6 +664,55 @@ impl Manifest {
             }
             if action.label.trim().is_empty() || action.label.chars().count() > 40 {
                 return bad("quick action labels must be 1-40 characters".into());
+            }
+        }
+        if let Some(target) = &self.share_target {
+            if target.types.is_empty() {
+                return bad("share_target: types must list text/plain or text/uri-list".into());
+            }
+            if let Some(ty) = target
+                .types
+                .iter()
+                .find(|ty| !SHARE_TYPES.contains(&ty.as_str()))
+            {
+                return bad(format!(
+                    "share_target: unknown type `{ty}` (known: text/plain, text/uri-list)"
+                ));
+            }
+            let unique = target
+                .types
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len();
+            if unique != target.types.len() {
+                return bad("share_target: types repeat".into());
+            }
+            let op = match self.operations.get(&target.op) {
+                Some(op) => op,
+                None => {
+                    return bad(format!(
+                        "share_target: `{}` is not a declared operation",
+                        target.op
+                    ))
+                }
+            };
+            if op.effect_of(&target.op) == Effect::Destructive {
+                return bad(format!(
+                    "share_target: `{}` must not be destructive",
+                    target.op
+                ));
+            }
+            let arg_len = target.arg.chars().count();
+            if arg_len == 0 || arg_len > 40 {
+                return bad("share_target: arg must be 1-40 characters".into());
+            }
+            if let Some(params) = &op.params {
+                if !params.contains_key(&target.arg) {
+                    return bad(format!(
+                        "share_target: `{}` has no parameter `{}`",
+                        target.op, target.arg
+                    ));
+                }
             }
         }
         for (name, op) in &self.operations {
@@ -1233,5 +1296,58 @@ mod tests {
             },
             "unknown field `extra`",
         );
+    }
+
+    #[test]
+    fn an_old_manifest_without_share_target_still_loads() {
+        assert_eq!(check(|_| {}), None);
+    }
+
+    #[test]
+    fn share_target_is_checked() {
+        assert_eq!(
+            check(|m| {
+                m["share_target"] =
+                    serde_json::json!({"types":["text/plain"],"op":"ok","arg":"text"});
+            }),
+            None
+        );
+        assert!(check(|m| {
+            m["share_target"] = serde_json::json!({"types":[],"op":"ok","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("must list")));
+        assert!(check(|m| {
+            m["share_target"] = serde_json::json!({"types":["image/png"],"op":"ok","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("unknown type")));
+        assert!(check(|m| {
+            m["share_target"] =
+                serde_json::json!({"types":["text/plain", "text/plain"],"op":"ok","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("types repeat")));
+        assert!(check(|m| {
+            m["share_target"] =
+                serde_json::json!({"types":["text/plain"],"op":"nope","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("not a declared operation")));
+        assert!(check(|m| {
+            m["operations"]["ok"]["effect"] = serde_json::json!("destructive");
+            m["share_target"] = serde_json::json!({"types":["text/plain"],"op":"ok","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("must not be destructive")));
+        assert!(check(|m| {
+            m["share_target"] = serde_json::json!({"types":["text/plain"],"op":"ok","arg":""});
+        })
+        .is_some_and(|e| e.contains("1-40")));
+        assert!(check(|m| {
+            m["operations"]["ok"]["params"] = serde_json::json!({"url": {"type":"string"}});
+            m["share_target"] = serde_json::json!({"types":["text/plain"],"op":"ok","arg":"text"});
+        })
+        .is_some_and(|e| e.contains("has no parameter")));
+        assert!(check(|m| {
+            m["share_target"] =
+                serde_json::json!({"types":["text/plain"],"op":"ok","arg":"text","extra":"x"});
+        })
+        .is_some());
     }
 }

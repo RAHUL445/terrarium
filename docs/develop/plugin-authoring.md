@@ -165,8 +165,9 @@ Optional manifest fields for the shell:
 | `search` | A declared query taking `q` and returning `id`, `title` and optionally `subtitle`, for ⌘K search (this space or all spaces) and the host's `search.query` command; used while the index is being built, and for plugins without `index`. |
 | `index` | `[{"table": "tasks", "query": "index_tasks", "kind": "Task"}]`: tables the host's search index holds. The query takes exactly `ids` (a JSON array) and returns `id`, `title` and optionally `body`, `keywords`, `subtitle`; filter out trashed or hidden rows in its SQL. At most 8 entries, with each table listed once. |
 | `refs` | `[{"table": "tasks", "resolve": "ref_tasks", "kind": "Task", "icon": "check"}]`: item descriptions for host chips. The query takes exactly `ids`, returns `id`, `title`, optional `subtitle` and `done`. Keep it slim (no long text). At most 8 entries, one per declared table; `icon` is optional. |
-| `open` | `{"page": "main"}`: the page a search hit opens, with the hit's `id` as the item. Defaults to the first page. |
+| `open` | `{"page": "main"}`: the page a search hit opens, with the hit's `id` as the item. Defaults to the first page. `terrarium://open/<plugin>` links also land on that default page when no page is provided. |
 | `quick_actions` | `[{"label": "New task", "op": "create", "arg": "title"}]`: offered in search, quick add and the Apps screen; the typed text goes to `op` as `arg`. |
+| `share_target` | `{"types": ["text/plain", "text/uri-list"], "op": "create", "arg": "text"}`: offered in Android's share sheet; the shared text goes to `op` as `arg`. The operation must not be destructive, and people pick the plugin each time. |
 
 ### Search index
 
