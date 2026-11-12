@@ -1301,3 +1301,21 @@ host before distributing packages with fields older hosts do not recognise.
 
 Home Screen widgets and JavaScript guest authoring are designs or experiments,
 not additional supported manifest contracts in this release.
+
+Badge queries may return a `noun` column alongside `count` (for example,
+`unread` for articles). The host defaults to `due` when it is absent.
+Older hosts still display the count and ignore the optional noun.
+
+Display-only UI values may opt into `format: "local-time"` on text/chips
+or `subtitle_format: "local-time"` on items. This formats embedded HH:MM
+wall-clock times with the host locale; `format: "datetime"` on a chip
+formats an epoch-millisecond timestamp. Inputs and stored values stay unchanged.
+Bar charts may declare `suffix` (for example `%`) and `empty` text.
+An item may set `strike_done: false` to keep a completed title readable.
+Fields may use `enabled_when` with a form expression; while disabled their
+value is cleared. Selects may bind to host view state with `bind` and refresh
+choices from their existing `options_query` declaration.
+Grouped lists may use `collapse_group: {value, when, bind}` to offer a
+collapsible group whose expanded choice is saved with the view state.
+These template options are additive; older hosts ignore the presentation
+options, so update the host before using dependent controls such as a bound select.

@@ -307,25 +307,26 @@ test('review refuses a token for a trigger or action different from the displaye
   assert.equal(h.requests.some(r=>r.name==='rule_approve'),false);
 });
 
-test('example fills a new draft, requires a habit id, and saves through review', async () => {
+test('examples needing an unrelated habit ID are hidden', async () => {
   const h = harness(); editorState(h);
-  const example = { name: 'Gym task done → Gym habit', trigger: { plugin: 'todo', event: 'done' },
-    filter: [{ field: 'tags', op: 'has_tag', value: 'gym' }],
-    action: { plugin: 'habits', operation: 'check', args: { habit: '', day: '{{event.day}}' } } };
-  h.state.examples = [example]; await h.render(); await h.$('auto-new').fire('click');
-  const examples = control(h, 'Start from an example'); examples.value = '0'; await examples.fire('change');
-  assert.equal(control(h, 'habit').value, '');
-  assert.equal(control(h, 'Condition value').value, 'gym');
-  assert.equal(control(h, 'day source').value, 'day');
-  assert.match(text(h.$('auto-editor')), /habit's id before saving/);
-  assert.equal(h.requests.some(r => r.name === 'rule_create'), false);
-  control(h, 'habit').value = 'real-gym'; h.answer = false;
-  h.respond = async (cmd, args) => args?.name === 'rule_create' ? rule({ ...args.args.rule, approved: false }) : undefined;
-  await submit(h);
-  const saved = h.requests.find(r => r.name === 'rule_create').args.rule;
-  assert.deepEqual(saved, { ...example, enabled: true, action: { ...example.action, args: { habit: 'real-gym', day: '{{event.day}}' } } });
-  assert.ok(h.requests.some(r => r.name === 'rule_review'));
-  assert.equal(h.requests.some(r => r.name === 'rule_approve'), false);
+  h.state.operations[0].operation = 'checkin';
+  h.state.examples = [{ name: 'Gym task done → Gym habit', trigger: { plugin: 'todo', event: 'done' },
+    action: { plugin: 'habits', operation: 'checkin', args: { habit: '', day: '{{event.day}}' } } }];
+  await h.render(); await h.$('auto-new').fire('click');
+  assert.equal(control(h, 'Start from an example'), undefined);
+  assert.equal(control(h, 'Then').children.length, 1);
+});
+
+test('action labels are curated and ID actions require a matching app event', () => {
+  const h = harness();
+  assert.equal(h.run('autoActionLabel({plugin:"todo",operation:"create"})'), 'Create a task');
+  assert.equal(h.run('autoActionAvailable({plugin:"voice",operation:"capture_audio"}, {})'), false);
+  assert.equal(h.run('autoActionAvailable({plugin:"reports",operation:"on_draft"}, {})'), false);
+  const operation = {plugin:'habits', operation:'checkin', params:{id:{type:'id',required:true}}};
+  const event = {plugin:'habits',payload:{id:{type:'id',required:true}}};
+  assert.equal(h.run(`autoActionAvailable(${JSON.stringify(operation)}, ${JSON.stringify(event)})`), true);
+  event.plugin='todo';
+  assert.equal(h.run(`autoActionAvailable(${JSON.stringify(operation)}, ${JSON.stringify(event)})`), false);
 });
 
 test('example chooser is absent without available examples', async () => {

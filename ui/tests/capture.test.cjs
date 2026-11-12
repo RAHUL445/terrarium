@@ -41,12 +41,12 @@ function capture(action, snapshot) {
   return { view, form, input: form.querySelector('[data-pp-name]'), button: form.children[1], status: form.children[2] };
 }
 
-test('pending capture retains text and blocks duplicate submission until success', async () => {
+test('pending capture clears the input and blocks duplicate submission until success', async () => {
   let finish, calls = 0;
   const ui = capture(() => { calls++; return new Promise(resolve => { finish = resolve; }); });
   ui.input.value = 'Keep this thought';
   const pending = ui.form.submit();
-  assert.equal(ui.input.value, 'Keep this thought');
+  assert.equal(ui.input.value, '');
   assert.equal(ui.button.disabled, true);
   assert.equal(ui.form.attrs['aria-busy'], 'true');
   const detail = { waits: [] };
@@ -84,7 +84,7 @@ test('edits during a successful save remain available as the next draft', async 
   ui.input.value = 'New draft';
   finish({}); await pending;
   assert.equal(ui.input.value, 'New draft');
-  assert.match(ui.status.textContent, /new draft is ready/);
+  assert.equal(ui.status.textContent, 'Saved on this device');
 });
 
 
@@ -107,4 +107,20 @@ test('restoring a draft never overwrites typing during initial loading', async (
   second.form.dispatchEvent({ type: 'input' });
   await second.view.ready;
   assert.equal(second.input.value, 'Fresh typing');
+});
+
+test('a failed earlier capture can be retried without overwriting a newer draft', async () => {
+  let reject; const calls = [];
+  const ui = capture((op, args) => {
+    calls.push(args.body);
+    return calls.length === 1 ? new Promise((resolve, fail) => { reject = fail; }) : Promise.resolve({});
+  });
+  ui.input.value = 'First entry'; const pending = ui.form.submit();
+  assert.equal(ui.input.value, ''); ui.input.value = 'Second draft';
+  reject(Error('offline')); await pending;
+  assert.equal(ui.input.value, 'Second draft');
+  const retry = ui.status.children.find(node => node.tag === 'button');
+  assert.ok(retry); await retry.listeners.click[0]();
+  assert.deepEqual(calls, ['First entry', 'First entry']);
+  assert.equal(ui.input.value, 'Second draft');
 });

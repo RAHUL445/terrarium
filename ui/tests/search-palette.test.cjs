@@ -36,3 +36,17 @@ test('stale results are ignored', async () => {
   resolve({results:[], indexing:['todo']}); await pending;
   assert.equal(h.rendered.length, 1); assert.equal(h.rendered[0].length, 0);
 });
+
+test('search retains both context and snippet for equal titles', async () => {
+  const h = harness({results:[{plugin:'todo',title:'Lamp',kind:'Task',subtitle:'Tomorrow · home',snippet:'Replace lamp bulb'}]});
+  await h.ctx.updatePalette();assert.equal(h.rendered.at(-1)[0].sub,'Task · Tomorrow · home · Replace lamp bulb');
+  assert.equal(h.rendered.at(-1)[0].match,'lamp');
+});
+
+test('search highlights all query words as safe text DOM nodes', () => {
+  const ctx = {el:(tag,attrs,...children)=>({tag,children,append(...nodes){this.children.push(...nodes);}})};
+  vm.runInNewContext(source.slice(source.indexOf('function highlightedText('),source.indexOf('function renderPalette(')),ctx);
+  const node=ctx.highlightedText('<img src=x> Buy MILK and milk','buy milk');
+  assert.equal(node.children[0],'<img src=x> ');
+  assert.deepEqual(node.children.filter(n=>n.tag==='mark').map(n=>n.children[0]),['Buy','MILK','milk']);
+});

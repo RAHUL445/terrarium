@@ -201,7 +201,8 @@
       const mode = this.mode, space = this.space?.id;
       document.querySelectorAll("[data-rail-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.railMode === this.mode)));
       const selected = this.ids(mode);
-      this.$("rail-layout-preview").textContent = `Preview: ${this.ids("home").length} Home widgets · ${this.ids("nav").length} apps · ${this.ids("widgets").length} widgets · ${this.ids("actions").length} quick actions. Apply to keep changes.`;
+      const count = (kind, noun) => `${this.ids(kind).length} ${noun}${this.ids(kind).length === 1 ? "" : "s"}`;
+      this.$("rail-layout-preview").textContent = `Preview: ${count("home", "Home widget")} · ${count("nav", "app")} · ${count("widgets", "widget")} · ${count("actions", "quick action")}. Apply to keep changes.`;
       const items = this.catalog[mode];
       const ordered = [...selected.map((id) => items.find((item) => item.key === id)), ...items.filter((item) => !selected.includes(item.key))];
       this.$("rail-custom-list").replaceChildren(...ordered.map((item) => {

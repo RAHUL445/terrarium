@@ -15,6 +15,11 @@ use tiny_http::{Header, Method, Response, Server};
 /// Injected ahead of `app.js`: routes `invoke` to the preview server.
 const SHIM: &str = r#"window.__TAURI__ = {
   core: { invoke: async (cmd, args) => {
+    if (cmd === "open_external") {
+      if (!/^https?:\/\//i.test(args?.url || "")) throw "Only web links can be opened";
+      window.open(args.url, "_blank", "noopener,noreferrer");
+      return null;
+    }
     const res = await fetch("/invoke", { method: "POST", body: JSON.stringify({ cmd, args: args || {} }) });
     const body = await res.json();
     if (!res.ok) throw body.error;

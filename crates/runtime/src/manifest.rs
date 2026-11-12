@@ -111,7 +111,8 @@ pub struct Manifest {
     #[serde(default)]
     pub color: Option<String>,
     /// A declared query returning one row with `count`, shown next to the
-    /// app in navigation. Its params may only be `today` and `weekday`.
+    /// app in navigation. An optional `noun` column labels the count (default: due).
+    /// Its params may only be `today` and `weekday`.
     #[serde(default)]
     pub badge: Option<String>,
     /// A declared query taking `q` and returning rows with `title` (and
@@ -2171,7 +2172,7 @@ mod event_tests {
         let added = crate::added_capabilities(Some(&old), &new);
         assert_eq!(added.len(), 1);
         assert!(added[0].id.starts_with("events:pinged:"));
-        assert_eq!(added[0].label, "Sync Sample: Ping for automations");
+        assert_eq!(added[0].label, "Shares Sample events with automations");
         assert!(crate::added_capabilities(Some(&new), &new).is_empty());
         let mut changed = new.clone();
         changed

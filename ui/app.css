@@ -263,7 +263,7 @@ button.primary { display: inline-flex; align-items: center; gap: 8px; }
   .space-chip { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 6px; border-radius: 999px; font-size: 15px; }
   .space-chip .space-tile { width: 30px; height: 30px; font-size: 10px; }
   .sync-dot { margin-left: auto; }
-  .content { padding: 12px 16px calc(104px + var(--inset-bottom)); }
+  .content { padding: 12px 16px calc(164px + var(--inset-bottom)); }
   body[data-view="settings"] .content { padding-top: calc(16px + var(--inset-top)); }
   .view { gap: 14px; }
   .home-head h1 { font-size: 26px; }
@@ -1276,3 +1276,12 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 #backup-health:empty, #backup-dir:empty { display: none; }
 #control-cli-path, #control-cli-link { display: block; white-space: pre; overflow-x: auto; padding: 10px; background: var(--surface); user-select: all; }
 .pp-sheet-modal .pp-sheet-body > .pp-button { width: auto; align-self: start; }
+
+/* Capture feedback and labelled habit activity. */
+.pp-form-feedback:empty { display: none; }
+.pp-heatmap-grid { display: flex; gap: 6px; align-items: start; overflow-x: auto; }
+.pp-heatmap-axis { display: grid; grid-template-rows: repeat(7, 12px); gap: 3px; font-size: 9px; line-height: 12px; color: var(--muted); }
+.pp-heatmap-legend { display: flex; align-items: center; gap: 3px; font-size: 11px; }
+.pp-heatmap-legend .pp-heat { width: 12px; height: 12px; }
+.palette-text mark { background: var(--accent-soft); color: var(--ink); }
+.pp-heatmap-months { display: grid; grid-auto-flow: column; grid-auto-columns: 15px; padding-left: 28px; margin-bottom: 4px; font-size: 9px; color: var(--muted); }

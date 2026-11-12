@@ -341,7 +341,12 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
     for iface in &manifest.uses {
         add(
             format!("uses:{iface}"),
-            format!("Read and change data through other plugins' {iface}"),
+            match iface.as_str() {
+                "tasks" => "Can read and change your tasks (To-do)".into(),
+                "notes" => "Can read and change your notes (Notes)".into(),
+                "habits" => "Can read your habit history (Habits)".into(),
+                _ => format!("Can use {iface} from other apps"),
+            },
         );
     }
     for iface in manifest.provides.keys() {
@@ -356,11 +361,11 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
         let hash = format!("{:x}", Sha256::digest(payload));
         add(
             format!("events:{name}:{hash}"),
-            format!(
-                "Sync {}: {} for automations",
-                manifest.name,
-                event.description.trim_end_matches(['.', '!', '?'])
-            ),
+            match name.as_str() {
+                "checked_in" => "Shares habit check-ins with automations".into(),
+                "task_done" => "Shares completed tasks with automations".into(),
+                _ => format!("Shares {} events with automations", manifest.name),
+            },
         );
     }
     if manifest.reminders.is_some() {
@@ -428,7 +433,7 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
                 limits.fuel, limits.memory_mb, limits.timeout_ms
             ),
             format!(
-                "Use more resources: up to {} MB and {:.1} s per action",
+                "Can use extra memory and time ({} MB, {} s per action)",
                 limits.memory_mb,
                 limits.timeout_ms as f64 / 1000.0
             ),

@@ -102,6 +102,12 @@ fn bookmarks_validate_count_visits_and_search() {
         .as_str()
         .unwrap()
         .to_string();
+    // All includes unfiled bookmarks even before the first project exists.
+    let projects = host
+        .query("bookmarks", "projects", &params(json!({"project": ""})))
+        .unwrap();
+    assert_eq!(projects[0]["label"], json!("All"));
+    assert_eq!(projects[0]["count"], json!(1));
     host.call("bookmarks", "visit", &json!({"id": id})).unwrap();
     host.call("bookmarks", "visit", &json!({"id": id})).unwrap();
     let rows = host

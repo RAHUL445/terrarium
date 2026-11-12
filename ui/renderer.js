@@ -63,6 +63,16 @@
     return input;
   }
 
+  function displayValue(value, format) {
+    if (value == null || value === "") return "";
+    if (format === "datetime") return Number(value) ? new Date(Number(value)).toLocaleString() : "";
+    if (format === "local-time") return String(value).replace(/\b([01]\d|2[0-3]):([0-5]\d)\b/g, (_, hour, minute) => {
+      const date = new Date(2000, 0, 1, Number(hour), Number(minute));
+      return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    });
+    return value;
+  }
+
   // Adds `$ref` ("plugin/table/id") to a row when the node names its table.
   function withRef(row, table, plugin) {
     if (!row || !table || !plugin || row.id == null || !/^[a-z][a-z0-9_]*$/.test(table)) return row;
@@ -936,7 +946,7 @@
     },
 
     text(spec, scope) {
-      return el("p", `pp-text${spec.tone === "muted" ? " pp-muted" : ""}`, resolve(spec.text, scope));
+      return el("p", `pp-text${spec.tone === "muted" ? " pp-muted" : ""}`, displayValue(resolve(spec.text, scope), spec.format));
     },
 
     badge(spec, scope) {
@@ -1233,22 +1243,50 @@
         submit.disabled = true;
         form.setAttribute("aria-busy", "true");
         feedback.textContent = "Saving…";
+        const reset = () => {
+          for (const input of inputs) {
+            if (input.dataset.ppKind === "toggle") input.checked = input.defaultChecked;
+            else if (input.dataset.ppKind !== "choice") input.value = input.defaultValue;
+          }
+          for (const choice of form.querySelectorAll(".pp-choice")) choice.dispatchEvent(new Event("pp-reset"));
+          syncForm();
+        };
+        if (spec.submit?.reset) reset();
+        const cleared = JSON.stringify(readValues());
         try {
           const ok = await (submission = this.act(spec.submit, { ...scope, form: values }));
           feedback.classList.toggle("pp-tone-danger", !ok);
           feedback.textContent = ok ? (spec.submit?.reset ? "Saved on this device" : "Done") : "Couldn’t save. Your entry is still here; try again.";
-          // Keep the submitted text visible until success. If the user edits
-          // while saving, leave the newer draft intact for the next submit.
-          if (ok && spec.submit?.reset && JSON.stringify(readValues()) === JSON.stringify(values)) {
-            for (const input of inputs) {
-              if (input.dataset.ppKind === "toggle") input.checked = input.defaultChecked;
-              else if (input.dataset.ppKind !== "choice") input.value = input.defaultValue;
+          if (!ok && spec.submit?.reset) {
+            if (JSON.stringify(readValues()) === cleared) {
+              for (const input of inputs) {
+                if (input.dataset.ppKind === "toggle") input.checked = values[input.dataset.ppName];
+                else input.value = values[input.dataset.ppName] ?? "";
+                input.dispatchEvent(new Event("pp-value"));
+              }
+              syncForm();
+            } else {
+              feedback.textContent = "Couldn’t save the previous entry. Your new draft is kept. ";
+              const retry = el("button", "pp-button pp-ghost", "Retry previous entry");
+              retry.type = "button";
+              retry.addEventListener("click", async () => {
+                retry.disabled = true;
+                submit.disabled = true;
+                form.setAttribute("aria-busy", "true");
+                try {
+                  const saved = await (submission = this.act(spec.submit, { ...scope, form: values }));
+                  if (saved) {
+                    feedback.classList.remove("pp-tone-danger");
+                    feedback.textContent = "Previous entry saved. Your new draft is kept.";
+                  } else retry.disabled = false;
+                } finally {
+                  submission = null;
+                  submit.disabled = false;
+                  form.removeAttribute("aria-busy");
+                }
+              });
+              feedback.append(retry);
             }
-            for (const choice of form.querySelectorAll(".pp-choice")) choice.dispatchEvent(new Event("pp-reset"));
-            syncForm();
-            if (form.isConnected && form.contains(document.activeElement)) inputs.find((input) => input.type !== "hidden")?.focus();
-          } else if (ok && spec.submit?.reset) {
-            feedback.textContent = "Previous entry saved. Your new draft is ready to save.";
           }
         } finally {
           submission = null;
@@ -1535,31 +1573,47 @@
       label.htmlFor = id;
       const select = el("select", "pp-input");
       select.id = id;
-      select.dataset.ppName = spec.name;
+      if (spec.name) select.dataset.ppName = spec.name;
+      if (spec.bind) {
+        select.addEventListener("change", () => {
+          const option = (spec.options || []).find(option => String(option.value) === select.value);
+          this.setState(spec.bind, option ? option.value : select.value);
+        });
+        this.watchers.push(() => { select.value = String(lookup(this.scope(), spec.bind) ?? ""); });
+      }
       for (const option of spec.options || []) {
         const opt = el("option", "", resolve(option.label, scope));
         opt.value = resolve(option.value, scope);
         select.append(opt);
       }
-      const wanted = "value" in spec ? String(resolve(spec.value, scope) ?? "") : null;
+      const wanted = spec.bind ? String(lookup(this.scope(), spec.bind) ?? "") : "value" in spec ? String(resolve(spec.value, scope) ?? "") : null;
       if (wanted != null) select.value = wanted;
       // More options from a query, after the fixed ones:
       // {"options_query": {"query": "skills", "value": "id", "label": "name"}}.
       const more = spec.options_query;
       if (more?.query) {
-        this.bridge
-          .query(more.query, resolve(more.params || {}, this.scope()))
-          .then((rows) => {
+        const loadOptions = async () => {
+          const rows = await this.bridge.query(more.query, resolve(more.params || {}, this.scope()));
+          if (this.disposed) return;
+          const current = spec.bind ? String(lookup(this.scope(), spec.bind) ?? "") : select.value;
+          select.replaceChildren(...(spec.options || []).map(option => {
+            const opt = el("option", "", resolve(option.label, scope));
+            opt.value = resolve(option.value, scope);
+            return opt;
+          }));
             for (const row of rows) {
               const opt = el("option", "", String(row[more.label || "label"] ?? ""));
               opt.value = String(row[more.value || "value"] ?? "");
               select.append(opt);
             }
+          if (spec.bind) select.value = current;
+          else {
             if (wanted != null) select.value = wanted;
             if (select.selectedIndex < 0 && select.options.length) select.selectedIndex = 0;
             select.dispatchEvent(new Event("change", { bubbles: true }));
-          })
-          .catch(() => {});
+          }
+        };
+        this.lists.push(() => loadOptions().catch(() => {}));
       }
       node.append(label, select);
       return node;
@@ -1618,7 +1672,7 @@
      */
     item(spec, scope) {
       const flag = Number(resolve(spec.flag, scope)) || 0;
-      const done = truthy(resolve(spec.done, scope));
+      const done = spec.strike_done !== false && truthy(resolve(spec.done, scope));
       const node = el("div", `pp-item${flag ? ` pp-flag-${Math.min(flag, 3)}` : ""}${done ? " pp-item-done" : ""}`);
       const title = String(resolve(spec.title, scope) ?? "");
       if (spec.check) {
@@ -1627,11 +1681,11 @@
         input.checked = truthy(resolve(spec.check.checked, scope));
         input.setAttribute("aria-label", `${input.checked ? "Mark not done" : "Mark done"}: ${title}`);
         input.addEventListener("change", async () => {
-          node.classList.toggle("pp-item-done", input.checked);
+          node.classList.toggle("pp-item-done", spec.strike_done !== false && input.checked);
           const ok = await this.act(spec.check.action, { ...scope, value: input.checked });
           if (!ok) {
             input.checked = !input.checked;
-            node.classList.toggle("pp-item-done", input.checked);
+            node.classList.toggle("pp-item-done", spec.strike_done !== false && input.checked);
           }
         });
         node.append(input);
@@ -1653,7 +1707,7 @@
       }
       main.append(el("span", "pp-item-title", title));
       if (flag) main.append(el("span", "pp-meta", `${["", "Low", "Medium", "High"][Math.min(flag, 3)]} priority`));
-      const subtitle = resolve(spec.subtitle, scope);
+      const subtitle = displayValue(resolve(spec.subtitle, scope), spec.subtitle_format);
       // Snippets may end inside a blob reference after query truncation.
       // Only display text is cleaned; markdown bodies retain their images.
       const preview = typeof subtitle === "string" ? subtitle
@@ -1661,7 +1715,7 @@
         .replace(/!\[([^\]]*)\]\([^)]+\)/g, (_, name) => `[image: ${name || "Image"}]`) : subtitle;
       if (truthy(preview)) main.append(el("span", "pp-item-subtitle", preview));
       const chips = (spec.chips || [])
-        .map((c) => ({ text: resolve(c.text, scope), tone: resolve(c.tone, scope), icon: resolve(c.icon, scope) }))
+        .map((c) => ({ text: displayValue(resolve(c.text, scope), c.format), tone: resolve(c.tone, scope), icon: resolve(c.icon, scope) }))
         .filter((c) => truthy(c.text));
       if (chips.length) {
         const row = el("span", "pp-item-chips");
@@ -1900,7 +1954,18 @@
     /** Days with a count, e.g. habit check-ins: {query, params, weeks}. */
     "calendar-heatmap"(spec, scope) {
       const weeks = Number(spec.weeks) || 12;
+      const wrapper = el("div", "pp-heatmap-chart");
+      const range = el("p", "pp-muted");
+      const months = el("div", "pp-heatmap-months");
+      const axis = el("div", "pp-heatmap-axis");
+      for (const day of ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]) axis.append(el("span", "", day));
       const node = el("div", "pp-heatmap");
+      const grid = el("div", "pp-heatmap-grid");
+      grid.append(axis, node);
+      const legend = el("p", "pp-heatmap-legend pp-muted", "Check-ins per day: Less ");
+      for (let level = 0; level <= 4; level++) legend.append(el("span", `pp-heat pp-heat-${level}`));
+      legend.append(" More");
+      wrapper.append(range, months, grid, legend);
       node.setAttribute("role", "img");
       node.setAttribute("aria-label", resolve(spec.label || "Activity by day", scope));
       const load = async () => {
@@ -1912,6 +1977,16 @@
         // Start on the Monday `weeks` weeks back so columns are whole weeks.
         const start = new Date(today);
         start.setDate(start.getDate() - ((start.getDay() + 6) % 7) - (weeks - 1) * 7);
+        range.textContent = `${start.toLocaleDateString([], { month: "short", day: "numeric" })} – ${today.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" })}`;
+        months.replaceChildren();
+        let previousMonth = -1;
+        for (let week = 0; week < weeks; week++) {
+          const date = new Date(start);
+          date.setDate(start.getDate() + week * 7);
+          const month = date.getMonth();
+          months.append(el("span", "", month !== previousMonth ? date.toLocaleDateString([], { month: "short" }) : ""));
+          previousMonth = month;
+        }
         node.replaceChildren();
         for (let i = 0; i < weeks * 7; i++) {
           const d = new Date(start);
@@ -1924,7 +1999,7 @@
         }
       };
       this.lists.push(load);
-      return node;
+      return wrapper;
     },
 
     /**
@@ -1938,7 +2013,6 @@
       const end = new Date(`${resolve(spec.end, scope) || this.bridge.today()}T12:00:00`);
       const words = { d: "done", p: "partly done", s: "skipped", m: "missed", o: "not done yet", "-": "not scheduled" };
       const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-      const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
       const node = el("div", "pp-weekstrip");
       node.setAttribute("role", "group");
       node.setAttribute("aria-label", `${resolve(spec.label, scope) || "Habit"}, last ${marks.length} days`);
@@ -1949,11 +2023,12 @@
         let mark = words[ch] ? ch : "-";
         const cell = el("span", "pp-weekday");
         const dot = el(spec.action ? "button" : "span", `pp-wdot pp-wdot-${mark === "-" ? "off" : mark}${i === marks.length - 1 ? " pp-wdot-today" : ""}`);
-        const name = `${names[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+        const name = d.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long", year: "numeric" });
         const paint = () => {
           dot.className = dot.className.replace(/pp-wdot-(?!today)\S+/, `pp-wdot-${mark === "-" ? "off" : mark}`);
           dot.replaceChildren(...(mark === "d" ? [icon("check")] : []));
           dot.setAttribute("aria-label", `${name}: ${words[mark]}`);
+          dot.title = `${name}: ${words[mark]}`;
           if (spec.action) dot.setAttribute("aria-pressed", String(mark === "d"));
         };
         paint();
@@ -2194,7 +2269,7 @@
         }
         node.classList.remove("pp-chart-empty");
         const max = Number(spec.max) || Math.max(1, ...rows.map((r) => Number(r[spec.value]) || 0));
-        const shown = (r, value) => (spec.value_label && r[spec.value_label] != null ? r[spec.value_label] : value);
+        const shown = (r, value) => (spec.value_label && r[spec.value_label] != null ? r[spec.value_label] : `${value}${spec.suffix || ""}`);
         node.replaceChildren(
           ...rows.map((r) => {
             const value = Number(r[spec.value]) || 0;
@@ -2708,6 +2783,9 @@
           }
         };
         let group;
+        const collapse = spec.collapse_group;
+        const collapseActive = collapse && truthy(resolve(collapse.when, this.scope()));
+        const expanded = collapse && truthy(lookup(this.scope(), collapse.bind));
         // Bound each synchronous task instead of monopolizing the main thread
         // for all 300–500 rows. Never leave an interrupted partial render cached.
         for (let index = 0; index < rows.length;) {
@@ -2721,8 +2799,19 @@
               if (!board && spec.group && row[spec.group] !== group) {
                 group = row[spec.group];
                 const tone = spec.group_tone ? row[spec.group_tone] : null;
-                if (group != null) fragment.append(el("li", `pp-group${tone ? ` pp-tone-${tone}` : ""}`, group));
+                if (group != null) {
+                  const heading = el("li", `pp-group${tone ? ` pp-tone-${tone}` : ""}`, collapseActive && group === collapse.value ? "" : group);
+                  if (collapseActive && group === collapse.value) {
+                    const toggle = el("button", "pp-button pp-ghost", `${group} (${rows.filter(r => r[spec.group] === group).length})`);
+                    toggle.type = "button";
+                    toggle.setAttribute("aria-expanded", String(expanded));
+                    toggle.addEventListener("click", () => this.setState(collapse.bind, !expanded));
+                    heading.append(toggle);
+                  }
+                  fragment.append(heading);
+                }
               }
+              if (collapseActive && group === collapse.value && !expanded) continue;
               const item = el("li", "pp-list-item");
               const rowScope = { ...scope, row };
               if (board && spec.move) {
@@ -3171,6 +3260,10 @@
       const value = resolve(spec.value, scope);
       if (value != null) input.value = String(value);
     }
+    if (spec.enabled_when) this.watchers.push(() => {
+      input.disabled = !truthy(resolve(spec.enabled_when, scope));
+      if (input.disabled) input.value = "";
+    });
     if (tag === "textarea" && spec.rows) input.rows = Number(spec.rows);
     node.append(label, input);
     return node;

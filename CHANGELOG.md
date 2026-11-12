@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed in UI review round 2
+
+- Capture inputs clear on submit and recover failed entries without replacing a newer draft.
+- Automation choices use short action labels, selected-action help and suitable actions with usable event IDs.
+- The automation device picker shows “This device” once.
+- Plugin permissions use plain descriptions for shared events, app data and extra resources.
+- Plugin account sections sit below their action buttons and hide when unavailable.
+- Navigation badges use an optional plugin query noun; Feeds reports unread articles.
+- Browser preview opens article links in a separate browser tab.
+- Display times can follow the user locale without changing stored times.
+- Today can collapse undated tasks while preserving their membership and the saved view choice.
+- Habit day dots show full-date tooltips, and heatmaps include months, weekdays and a check-in legend.
+- Search highlights matched words and shows both item context and matching snippets.
+- Workspace customization uses singular and plural count labels.
+- Phone content clears the floating add button at the bottom of a list.
+- Reminder fields can stay blank and disabled until a due date is set.
+- Empty capture feedback no longer leaves a blank row above inbox status.
+- Wildcard network access is shown as “Any website”.
+
 ### Added
 
 - Ranked global search across apps and spaces, with full-text indexes and

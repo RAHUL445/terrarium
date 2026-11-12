@@ -190,6 +190,7 @@ let searchReturn = null; // Search text and scope when opening a result.
 let pageSeq = 0;
 let navigated = false; // the user has picked a view themselves
 let badges = {}; // plugin id -> count
+let badgeNouns = {};
 
 if (/Android/.test(navigator.userAgent)) document.documentElement.classList.add("platform-android");
 
@@ -542,7 +543,7 @@ function refreshPluginViews() {
 let badgeSeq = 0;
 async function loadBadges() {
   const seq = ++badgeSeq, space = currentSpace;
-  const next = {};
+  const next = {}, nouns = {};
   await Promise.all(pluginList.plugins.filter((p) => p.badge).map(async (p) => {
     try {
       const rows = await call("run_query", {
@@ -551,10 +552,12 @@ async function loadBadges() {
       });
       const count = Number(rows[0]?.count) || 0;
       if (count > 0) next[p.id] = count;
+      nouns[p.id] = String(rows[0]?.noun || "due");
     } catch (_) {}
   }));
   if (seq !== badgeSeq || space !== currentSpace) return;
   badges = next;
+  badgeNouns = nouns;
   renderAppNav();
   renderApps();
 }
@@ -635,9 +638,9 @@ function renderAppNav() {
     const count = badges[p.id];
     return el("button", {
       type: "button", class: "nav-item", "data-view": "plugin", "data-plugin": p.id,
-      "aria-label": count ? `${p.name}, ${count} due` : p.name, title: count ? `${p.name} · ${count} due` : p.name,
+      "aria-label": count ? `${p.name}, ${count} ${badgeNouns[p.id] || "due"}` : p.name, title: count ? `${p.name} · ${count} ${badgeNouns[p.id] || "due"}` : p.name,
       onclick: () => openApp(p),
-    }, appTile(p, "sm"), el("span", {}, p.name), count ? el("span", { class: "nav-count", "aria-label": `${count} due` }, count) : "");
+    }, appTile(p, "sm"), el("span", {}, p.name), count ? el("span", { class: "nav-count", "aria-label": `${count} ${badgeNouns[p.id] || "due"}` }, count) : "");
   }));
   markNav();
 }
@@ -648,7 +651,7 @@ function renderApps() {
       const count = badges[p.id];
       return el("button", { type: "button", class: "app-card", onclick: () => openApp(p) },
         appTile(p, "lg"), el("span", { class: "app-card-name" }, p.name),
-        count ? el("span", { class: "app-card-badge", "aria-label": `${count} due` }, count) : "");
+        count ? el("span", { class: "app-card-badge", "aria-label": `${count} ${badgeNouns[p.id] || "due"}` }, count) : "");
     }),
     el("button", { type: "button", class: "app-card app-card-add", onclick: () => showSettings("plugins") },
       el("span", { class: "app-tile app-tile-lg app-tile-ghost", "aria-hidden": "true" }, icon("plus")),
@@ -1157,7 +1160,10 @@ function accountCard(plugin, patterns, oauth = {}) {
       el("p", { class: "muted" }, `Sign-in server: ${authHost}. Token server: ${new URL(provider.token_url).hostname}. API websites: ${provider.api_hosts.join(", ")}. Permissions: ${provider.scopes.join(", ") || "None"}.`),
       el("label", {}, "Account name", account), el("label", {}, "Client ID", clientId), el("label", {}, "Client secret (optional)", secret), submit, cancel, status));
   }
-  invoke("vault_accounts").then(render).catch((e) => { error.textContent = String(e); });
+  invoke("vault_accounts").then(render).catch((errorValue) => {
+    if (/unknown command|unavailable|not supported/i.test(String(errorValue))) card.hidden = true;
+    else error.textContent = "Accounts couldn’t load. Try opening Settings again.";
+  });
   return card;
 }
 
@@ -1198,7 +1204,7 @@ function renderInstalled() {
           catch (e) { pluginsError(String(e)); }
         } }, "Clear network activity"));
         actions.append(activity);
-        actions.append(accountCard(p.id, hosts, p.oauth));
+
       }
       return el("li", { class: "pp-list-item plugin-row" },
         el("div", { class: "widget-head" },
@@ -1207,11 +1213,11 @@ function renderInstalled() {
         p.description ? el("p", { class: "muted" }, p.description) : "",
         registryView.warningFor(p.id) ? el("p", { class: "muted" }, registryView.warningFor(p.id)) : "",
         p.capabilities.length
-          ? el("p", { class: "muted" }, "Can: ", p.capabilities.map((c) => c.label).join("; "))
+          ? el("p", { class: "muted" }, p.capabilities.map((c) => c.label).join("; "))
           : "",
-        hosts.length ? el("p", { class: "muted" }, `Network: ${hosts.join(", ")}`) : "",
+        hosts.length ? el("p", { class: "muted" }, `Network: ${hosts.map(host => host === "*" ? "Any website" : host).join(", ")}`) : "",
         p.source && p.origin === "installed" ? el("p", { class: "muted" }, `From ${p.source}`) : "",
-        actions);
+        actions, hosts.length ? accountCard(p.id, hosts, p.oauth) : "");
     }));
   }
   $("pending-plugins-card").hidden = !pluginList.pending?.length;
@@ -1965,6 +1971,22 @@ async function autoMutate(action) {
   finally { autoBusy = false; await loadAutomations(autoBefore); }
 }
 
+const AUTO_ACTION_LABELS = {
+  "todo.create": "Create a task", "notes.create": "Create a note",
+  "bookmarks.create": "Save a link", "voice.capture_text": "Save a thought",
+  "habits.checkin": "Record a check-in", "habits.sleep_save": "Log sleep",
+  "feeds.add": "Add a feed", "feeds.refresh": "Refresh feeds",
+  "reports.generate": "Create a report",
+};
+function autoActionLabel(operation) {
+  return AUTO_ACTION_LABELS[`${operation.plugin}.${operation.operation}`];
+}
+function autoActionAvailable(operation, event) {
+  if (!autoActionLabel(operation)) return false;
+  return Object.values(operation.params || {}).every(spec => !spec.required || spec.type !== "id" ||
+    event?.plugin === operation.plugin && Object.values(event?.payload || {}).some(source => source.type === "id" && autoCompatible(source, spec)));
+}
+
 function autoPluginName(id) {
   return pluginList.plugins.find(p => p.id === id)?.name || id;
 }
@@ -2059,11 +2081,20 @@ function automationEditor(rule, state, example = null) {
   const key = item => JSON.stringify([item.plugin, item.event || item.operation]);
   const name = el("input", { class: "pp-input", type: "text", maxlength: "60", required: true });
   name.value = initial?.name || "";
-  const trigger = select([["", "Choose an event"], ...(state.events || []).map(e => [key(e), `${autoPluginName(e.plugin)}: ${e.description || e.event}`])], initial ? key(initial.trigger) : "", "When");
-  const action = select([["", "Choose an action"], ...(state.operations || []).map(o => [key(o), `${autoPluginName(o.plugin)}: ${o.description || o.operation}`])], initial ? key(initial.action) : "", "Then");
+  const trigger = select([["", "Choose an event"], ...(state.events || []).map(e => [key(e), `${autoPluginName(e.plugin)}: ${String(e.description || e.event).trim().replace(/\.+$/, "")}`])], initial ? key(initial.trigger) : "", "When");
+  const action = select([["", "Choose an action"], ...(state.operations || []).filter(o => autoActionAvailable(o, state.events?.find(e => initial && key(e) === key(initial.trigger)))).map(o => [key(o), `${autoPluginName(o.plugin)}: ${autoActionLabel(o)}`])], initial ? key(initial.action) : "", "Then");
+  const actionHelp = el("p", { class: "muted" });
   const conditions = el("div", { class: "auto-conditions" }), argumentsBox = el("div", { class: "auto-arguments" });
   let rows = [], args = [];
   const event = () => state.events?.find(e => key(e) === trigger.value);
+  trigger.addEventListener("change", () => {
+    const previous = action.value;
+    action.replaceChildren(el("option", { value: "" }, "Choose an action"), ...(state.operations || [])
+      .filter(o => autoActionAvailable(o, event()))
+      .map(o => el("option", { value: key(o) }, `${autoPluginName(o.plugin)}: ${autoActionLabel(o)}`)));
+    action.value = [...(state.operations || [])].some(o => key(o) === previous && autoActionAvailable(o, event())) ? previous : "";
+    renderArgs();
+  });
   const operation = () => state.operations?.find(o => key(o) === action.value);
   const ops = AUTO_CONDITION_OPS;
   const add = el("button", { type: "button", class: "pp-button", onclick: () => addCondition() }, "Add condition");
@@ -2089,13 +2120,15 @@ function automationEditor(rule, state, example = null) {
     rows.push(row); update(c.value); conditions.append(row.node); add.disabled = rows.length >= 10;
   }
   function renderArgs(values = {}) {
+    actionHelp.textContent = operation()?.description || "";
     args = Object.entries(operation()?.params || {}).map(([param, spec]) => {
       const value = values[param];
       const binding = typeof value === "string" && value.match(/^\{\{event\.([^{}]+)\}\}$/)?.[1];
       const sources = Object.entries(event()?.payload || {}).filter(([, s]) => autoCompatible(s, spec)).map(([f]) => [f, `From the event: ${f}`]);
       // Preserve metadata bindings and unavailable sources on edits; never silently replace them.
       if (binding && !sources.some(([f]) => f === binding)) sources.push([binding, `From the event: ${binding}`]);
-      const source = select([["", "Fixed value"], ...sources], binding || "", `${param} source`);
+      const idFromEvent = spec.required && spec.type === "id" && !value;
+      const source = select([...(idFromEvent ? [] : [["", "Fixed value"]]), ...sources], binding || (idFromEvent ? sources[0]?.[0] : ""), `${param} source`);
       const input = inputFor(spec, binding ? undefined : value, param);
       const include = el("input", { type: "checkbox", "aria-label": `Include ${param}` });
       include.checked = spec.required || Object.hasOwn(values, param);
@@ -2136,17 +2169,18 @@ function automationEditor(rule, state, example = null) {
       });
     } catch (error) { if (state.space === currentSpace) autoError(String(error)); }
   });
-  if (!rule && state.examples?.length) {
-    const examples = select([["", "Choose an example"], ...state.examples.map((e, i) => [String(i), e.name])], "", "Start from an example");
+  const examplesAvailable = (state.examples || []).filter(example => state.operations?.some(operation => operation.plugin === example.action.plugin && operation.operation === example.action.operation && autoActionAvailable(operation, state.events?.find(event => event.plugin === example.trigger.plugin && event.event === example.trigger.event))));
+  if (!rule && examplesAvailable.length) {
+    const examples = select([["", "Choose an example"], ...examplesAvailable.map((e, i) => [String(i), e.name])], "", "Start from an example");
     examples.addEventListener("change", () => {
-      if (examples.value !== "") automationEditor(null, state, state.examples[Number(examples.value)]);
+      if (examples.value !== "") automationEditor(null, state, examplesAvailable[Number(examples.value)]);
     });
     form.append(label("Start from an example", examples));
-    if (example) form.append(el("p", { class: "muted small" }, "Paste the habit's id before saving, then review and allow the automation."));
+
   }
   form.append(label("Name", name)); form.append(label("When", trigger));
   form.append(el("fieldset", {}, el("legend", {}, "Only if"), conditions, add));
-  form.append(label("Then", action)); form.append(argumentsBox);
+  form.append(label("Then", action)); form.append(actionHelp); form.append(argumentsBox);
   form.append(el("div", { class: "sched-actions" }, save, el("button", { type: "button", class: "pp-button", onclick: closeAutomationEditor }, "Cancel")));
   $("auto-editor").replaceChildren(form); $("auto-editor").hidden = false;
   name.focus?.();
@@ -2175,7 +2209,7 @@ function renderAutomations(state) {
   const primary = state.settings.primary_device;
   const selected = autoDevices.find(d => d.device === primary);
   $("auto-device").replaceChildren(el("option", { value: "" }, "Choose a device"),
-    ...autoDevices.map(d => el("option", { value: d.device }, d.name || "Device", d.this_device ? " (this device)" : "")),
+    ...autoDevices.map(d => el("option", { value: d.device }, d.name || "Device", d.this_device && d.name !== "This device" ? " (this device)" : "")),
     ...(primary && !selected ? [el("option", { value: primary }, "Unknown device")] : []));
   $("auto-device").value = primary || "";
   $("auto-paused").checked = state.settings.paused;
@@ -2746,7 +2780,8 @@ async function searchPlugins(q, seq) {
     found.push({
       group: p.name,
       label: String(hit.title ?? ""),
-      sub: [hit.kind, hit.subtitle || hit.snippet, palette.allSpaces ? sp?.name : null].filter(Boolean).join(" · "),
+      sub: [hit.kind, hit.subtitle, hit.snippet, palette.allSpaces ? sp?.name : null].filter(Boolean).join(" · "),
+      match: q,
       tile: appTile(p, "xs"),
       run: async () => {
         if (!hit.open) return;
@@ -2797,6 +2832,22 @@ async function updatePalette() {
   }
 }
 
+function highlightedText(text, query) {
+  const node = el("span", {});
+  const value = String(text || "");
+  const terms = [...new Set(String(query || "").toLocaleLowerCase().split(/\s+/).filter(Boolean))];
+  let pos = 0;
+  while (pos < value.length) {
+    const lower = value.toLocaleLowerCase();
+    const matches = terms.map(term => ({ term, at: lower.indexOf(term, pos) })).filter(m => m.at >= 0).sort((a, b) => a.at - b.at || b.term.length - a.term.length);
+    const match = matches[0];
+    if (!match) { node.append(value.slice(pos)); break; }
+    node.append(value.slice(pos, match.at), el("mark", {}, value.slice(match.at, match.at + match.term.length)));
+    pos = match.at + match.term.length;
+  }
+  return node;
+}
+
 function renderPalette(items) {
   palette.items = items;
   palette.index = Math.min(palette.index, Math.max(items.length - 1, 0));
@@ -2817,7 +2868,7 @@ function renderPalette(items) {
       "aria-selected": String(i === palette.index), disabled: item.run ? false : true,
       onclick: () => choose(i),
       onmousemove: () => { if (palette.index !== i) { palette.index = i; markSelected(); } },
-    }, item.tile || "", el("span", { class: "palette-text" }, el("span", {}, item.label), item.sub ? el("span", { class: "muted" }, item.sub) : "")));
+    }, item.tile || "", el("span", { class: "palette-text" }, highlightedText(item.label, item.match), item.sub ? el("span", { class: "muted" }, highlightedText(item.sub, item.match)) : "")));
   });
   box.replaceChildren(...nodes);
 }

@@ -61,7 +61,7 @@ function rendererHarness(environment = {}) {
       if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return nodes.filter(node => String(node.className || '').split(/\s+/).includes(selector.slice(1)));
       if (selector === '[data-pp-name]') return nodes.filter(node => node.dataset.ppName);
       if (selector === 'form[data-pp-draft]') return nodes.filter(node => node.tag === 'form' && node.attrs['data-pp-draft']);
-      if (selector === 'input') return nodes.filter(node => node.tag === 'input');
+      if (selector === 'input' || selector === 'select') return nodes.filter(node => node.tag === selector);
       if (selector === 'form') return nodes.filter(node => node.tag === 'form');
       return [];
     }
