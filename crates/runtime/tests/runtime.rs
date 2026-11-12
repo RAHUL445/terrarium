@@ -348,6 +348,147 @@ fn reload_with_additive_migration_keeps_data() {
 }
 
 #[test]
+fn todo_v4_to_v5_additive_schema_preserves_tasks_and_steps() {
+    let data = TempDir::new().unwrap();
+    let pkg = data.path().join("todo-pkg");
+    copy_package(&todo_dir(), &pkg);
+    let manifest_path = pkg.join("manifest.json");
+    let v5_manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    assert_eq!(v5_manifest["storage"]["version"], json!(5));
+
+    // Model the shipped v4 package against the v5 plugin source. Keep its old
+    // operations, but remove every schema addition and all new organization queries.
+    let mut v4_manifest = v5_manifest.clone();
+    v4_manifest["storage"]["version"] = json!(4);
+    let new_task_columns = [
+        "list_id",
+        "group_id",
+        "status_id",
+        "previous_status_id",
+        "planned_for",
+        "sort_order",
+    ];
+    v4_manifest["storage"]["tables"][0]["columns"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|column| {
+            !new_task_columns.contains(&column["name"].as_str().unwrap_or_default())
+        });
+    v4_manifest["storage"]["tables"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|table| {
+            !["task_lists", "task_groups", "task_statuses"]
+                .contains(&table["name"].as_str().unwrap_or_default())
+        });
+    if let Some(queries) = v4_manifest["queries"].as_object_mut() {
+        for query in [
+            "organization_tasks",
+            "task_lists",
+            "task_groups",
+            "task_statuses",
+        ] {
+            queries.remove(query);
+        }
+    }
+    std::fs::write(&manifest_path, v4_manifest.to_string()).unwrap();
+
+    let mut host = host(&data);
+    host.load(&pkg).unwrap();
+    let task = host
+        .call(
+            "todo",
+            "create",
+            &json!({
+                "title": "Recurring preservation fixture",
+                "notes": "Keep these notes byte for byte.",
+                "due": "2026-11-20",
+                "remind_time": "09:15",
+                "priority": 3,
+                "repeat": "weekly",
+                "tags": "work, migration",
+                "in_progress": true,
+                "urgent": true,
+                "important": true
+            }),
+        )
+        .unwrap();
+    let task_id = task["id"].as_str().unwrap();
+    let step = host
+        .call(
+            "todo",
+            "add_step",
+            &json!({"task_id": task_id, "title": "Preserve this step"}),
+        )
+        .unwrap();
+    host.call(
+        "todo",
+        "toggle_step",
+        &json!({"id": step["id"], "done": true}),
+    )
+    .unwrap();
+    let completion = host
+        .call("todo", "toggle", &json!({"id": task_id, "done": true}))
+        .unwrap();
+    let next_id = completion["next"]["id"].as_str().unwrap();
+    host.call(
+        "todo",
+        "save_note",
+        &json!({"id": task_id, "text": "Preserve completion note."}),
+    )
+    .unwrap();
+    host.call("todo", "clear_done", &json!({})).unwrap();
+
+    let trashed = host
+        .call("todo", "create", &json!({"title": "Preserve trash state"}))
+        .unwrap();
+    host.call("todo", "delete", &json!({"id": trashed["id"]}))
+        .unwrap();
+
+    let before = host.store("todo").unwrap().dump().unwrap();
+    assert_eq!(before["tasks"].len(), 3);
+    assert_eq!(before["steps"].len(), 2);
+    assert!(before["tasks"].iter().any(|row| row["cleared_at"].is_number()));
+    assert!(before["tasks"].iter().any(|row| !row["_deleted"].is_null()));
+    let original_step = before["steps"]
+        .iter()
+        .find(|row| row["task_id"] == task_id)
+        .unwrap();
+    let repeated_step = before["steps"]
+        .iter()
+        .find(|row| row["task_id"] == next_id)
+        .unwrap();
+    assert_eq!(original_step["done"], json!(1));
+    assert_eq!(repeated_step["done"], json!(0));
+
+    // Upgrade the same package/store. All old columns, including hidden and
+    // trashed state, and every step field must survive exactly; only the six
+    // new task columns and three new tables may be introduced.
+    std::fs::write(&manifest_path, v5_manifest.to_string()).unwrap();
+    host.load(&pkg).unwrap();
+    let after = host.store("todo").unwrap().dump().unwrap();
+    let mut expected_tasks = before["tasks"].clone();
+    for row in &mut expected_tasks {
+        row.insert("list_id".into(), Value::Null);
+        row.insert("group_id".into(), Value::Null);
+        row.insert("status_id".into(), Value::Null);
+        row.insert("previous_status_id".into(), Value::Null);
+        row.insert("planned_for".into(), Value::Null);
+        row.insert("sort_order".into(), json!(0));
+    }
+    assert_eq!(after["tasks"], expected_tasks);
+    assert_eq!(after["steps"], before["steps"]);
+    for table in ["task_lists", "task_groups", "task_statuses"] {
+        assert!(after[table].is_empty(), "{table}");
+    }
+
+    // Loading v5 again must neither rewrite prior records nor seed duplicates.
+    host.load(&pkg).unwrap();
+    assert_eq!(host.store("todo").unwrap().dump().unwrap(), after);
+}
+
+#[test]
 fn bad_packages_are_rejected() {
     let data = TempDir::new().unwrap();
     let pkg = data.path().join("bad");
