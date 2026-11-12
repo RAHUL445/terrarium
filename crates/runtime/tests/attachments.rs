@@ -54,7 +54,7 @@ fn todo_with_file_column(root: &Path) -> PathBuf {
         .unwrap()
         .push(json!({"name":"attachment","type":"file"}));
     std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-    build_plugin(&to).unwrap();
+    // Only the host schema changed; walk copied the already-built component.
     to
 }
 

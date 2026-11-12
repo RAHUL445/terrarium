@@ -156,7 +156,7 @@ test('space changes and closing during confirmation prevent stale writes', async
 
 test('bridge fixes plugin and space identity and ignores calls after changing spaces', async () => {
   const opened = [];
-  const context = { toast() {}, localToday() {}, currentSpace: 'personal', openHistory: (...args) => opened.push(plain(args)) };
+  const context = { window: {}, toast() {}, localToday() {}, currentSpace: 'personal', openHistory: (...args) => opened.push(plain(args)) };
   vm.runInNewContext(source.slice(source.indexOf('function bridge(plugin)'), source.indexOf('// ---- History ----')), context);
   const bridge = context.bridge('todo');
   const spec = { table: 'tasks', id: 'r1', title: 'Pay rent', plugin: 'notes', space: 'work' };

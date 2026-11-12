@@ -28,8 +28,8 @@ fn build_uses_plugin_target_directory() {
             "#[no_mangle]\npub extern \"C\" fn current_build() -> u32 { 42 }\n",
         )
         .unwrap();
-        // A stale artifact must be replaced, rather than packaged after Cargo
-        // silently sends the current build to a different target directory.
+        // Never package a stale local artifact when an explicit environment
+        // target is set. Otherwise build locally, overriding Cargo config.
         let module = plugin.join("target/wasm32-unknown-unknown/release/target_dir_fixture.wasm");
         fs::create_dir_all(module.parent().unwrap()).unwrap();
         fs::write(&module, b"stale wasm").unwrap();
@@ -61,11 +61,20 @@ fn build_uses_plugin_target_directory() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let compiled = fs::read(&module).unwrap();
+        let compiled = fs::read(if use_env {
+            redirected.join("wasm32-unknown-unknown/release/target_dir_fixture.wasm")
+        } else {
+            module.clone()
+        })
+        .unwrap();
         assert_eq!(
             fs::read(plugin.join("dist/plugin.wasm")).unwrap(),
             componentize(&compiled).unwrap(),
         );
-        assert_eq!(fs::read_dir(&redirected).unwrap().count(), 0);
+        if use_env {
+            assert_eq!(fs::read(&module).unwrap(), b"stale wasm");
+        } else {
+            assert_eq!(fs::read_dir(&redirected).unwrap().count(), 0);
+        }
     }
 }

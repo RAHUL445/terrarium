@@ -126,8 +126,7 @@ fn quota_error_text(quota_mb: u64) -> String {
     )
 }
 
-fn quota_allows_blob(host: &PluginHost, bytes: usize) -> Result<(), String> {
-    let current = host.blob_usage_bytes();
+fn quota_allows_blob(host: &PluginHost, current: u64, bytes: usize) -> Result<(), String> {
     let limit = host.blob_quota_bytes();
     if current.saturating_add(bytes as u64) > limit {
         return Err(quota_error_text(host.blob_quota_mb()));
@@ -225,10 +224,10 @@ pub fn invoke(
             let maybe_existing = store.id_of(&bytes).ok();
             if let Some(id) = &maybe_existing {
                 if !store.has(id) {
-                    quota_allows_blob(host, bytes.len())?;
+                    quota_allows_blob(host, store.total_bytes(), bytes.len())?;
                 }
             } else {
-                quota_allows_blob(host, bytes.len())?;
+                quota_allows_blob(host, store.total_bytes(), bytes.len())?;
             }
             let blob = store.put(&bytes).map_err(blob_error)?;
             let value = FileRef {

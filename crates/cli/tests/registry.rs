@@ -9,7 +9,17 @@ fn structured_package_verification_and_explicit_separate_registry_signing() {
     std::fs::create_dir(root.join("dist")).unwrap();
     std::fs::write(
         root.join("manifest.json"),
-        include_bytes!("../../runtime/tests/fixtures/limits/manifest.json"),
+        // Keep publisher verification independent of the runtime's growing fixture.
+        serde_json::to_vec(&serde_json::json!({
+            "id": "limits",
+            "name": "Registry verification fixture",
+            "version": "0.1.0",
+            "api": "terrarium:plugin@0.1.0",
+            "storage": { "version": 1, "tables": [] },
+            "limits": { "fuel": 50000000, "memory_mb": 16, "timeout_ms": 5000 },
+            "uses": ["tasks"]
+        }))
+        .unwrap(),
     )
     .unwrap();
     std::fs::write(root.join("dist/plugin.wasm"), b"synthetic").unwrap();
