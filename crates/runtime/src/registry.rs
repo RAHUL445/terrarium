@@ -19,7 +19,7 @@ use crate::error::{Result, RuntimeError};
 use crate::events::{EventLog, EventRecord, EVENTS_STORE_ID, EVENT_RETENTION_MS};
 use crate::host::{CallContext, Execution, HostState, PluginPre, Runtime, ScheduleChange};
 use crate::links::{Links, LINKS_STORE_ID};
-use crate::manifest::{Manifest, RunOn, Schedule};
+use crate::manifest::{Kind, Manifest, RunOn, Schedule};
 use crate::packages::{Packages, STORE_ID};
 use crate::pages::{Pages, PAGES_STORE_ID};
 use crate::rules::{RuleInfo, Rules, RULES_STORE_ID};
@@ -55,11 +55,16 @@ pub enum ViewKind {
     Widget,
 }
 
+enum Code {
+    Wasm(PluginPre<HostState>),
+    Declarative,
+}
+
 pub(crate) struct LoadedPlugin {
     manifest: Manifest,
     identity: Value,
     dir: PathBuf,
-    pre: PluginPre<HostState>,
+    code: Code,
     /// One store per open space; `None` while an operation runs in it.
     stores: BTreeMap<String, Option<CoreStore>>,
     templates: BTreeMap<(ViewKind, String), Value>,
@@ -642,8 +647,21 @@ impl PluginHost {
         let package = crate::Package::from_dir(dir)?;
         let identity = serde_json::json!({"digest":package.digest(),"signer":package.signer().unwrap_or("unsigned")});
         let wasm_path = dir.join("dist").join("plugin.wasm");
-        let bytes = std::fs::read(&wasm_path).map_err(|e| RuntimeError::io(&wasm_path, e))?;
-        let pre = self.runtime.prepare(&bytes)?;
+        let code = match manifest.kind {
+            Kind::Wasm => {
+                let bytes =
+                    std::fs::read(&wasm_path).map_err(|e| RuntimeError::io(&wasm_path, e))?;
+                Code::Wasm(self.runtime.prepare(&bytes)?)
+            }
+            Kind::Declarative => {
+                if std::fs::symlink_metadata(&wasm_path).is_ok() {
+                    return Err(RuntimeError::Manifest(
+                        "declarative plugins cannot contain dist/plugin.wasm".into(),
+                    ));
+                }
+                Code::Declarative
+            }
+        };
 
         let mut templates = BTreeMap::new();
         for (kind, views) in [
@@ -687,7 +705,7 @@ impl PluginHost {
                 manifest,
                 identity,
                 dir: dir.to_path_buf(),
-                pre,
+                code,
                 stores,
                 templates,
             },
@@ -869,6 +887,9 @@ impl PluginHost {
         args: &Value,
         run: Option<String>,
     ) -> Result<Value> {
+        if run.is_some() {
+            self.validate_schedule_target(plugin)?;
+        }
         self.call_with(space, plugin, operation, args, run, false, false, 0, None)
             .0
     }
@@ -1697,6 +1718,21 @@ impl PluginHost {
             .expect("scheduler is only lent during a call")
     }
 
+    /// Declarative v1 deliberately excludes background execution.
+    pub(crate) fn validate_schedule_target(&self, plugin: &str) -> Result<()> {
+        if self
+            .plugins
+            .get(plugin)
+            .is_some_and(|p| p.manifest.kind == Kind::Declarative)
+        {
+            return Err(RuntimeError::Plugin {
+                code: "invalid".into(),
+                message: "Simple plugins cannot run on a schedule".into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Makes the manifest's jobs schedules of `plugin` in `space`.
     fn sync_jobs(&mut self, space: &str, plugin: &str) {
         let Some(loaded) = self.plugins.get(plugin) else {
@@ -2038,7 +2074,34 @@ fn invoke(
         events: loaded.manifest.events.clone(),
         depth,
     };
-    let (store, mut peers, result) = runtime.call(&loaded.pre, store, ctx, peers, operation, args);
+    let (store, mut peers, result) = match &loaded.code {
+        Code::Wasm(pre) => runtime.call(pre, store, ctx, peers, operation, args),
+        Code::Declarative => {
+            let checked = crate::host::bounded_json(args, crate::host::MAX_ARGS);
+            match checked {
+                Err(e) => (store, peers, Err(e)),
+                Ok(_) => crate::host::transaction(store, ctx, peers, |mut state| {
+                    let empty = Map::new();
+                    let result = if args.is_null() || args.is_object() {
+                        crate::declarative::run(
+                            &mut state.store,
+                            &loaded.manifest,
+                            operation,
+                            args.as_object().unwrap_or(&empty),
+                            now_ms(),
+                            &timezone,
+                        )
+                    } else {
+                        Err(RuntimeError::Plugin {
+                            code: "invalid".into(),
+                            message: "arguments must be an object".into(),
+                        })
+                    };
+                    (state, result)
+                }),
+            }
+        }
+    };
     loaded.stores.insert(peers.space.clone(), Some(store));
     peers.plugins.insert(id.to_string(), loaded);
     (peers, result)

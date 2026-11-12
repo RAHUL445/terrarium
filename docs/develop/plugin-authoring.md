@@ -1169,3 +1169,64 @@ existing manifests without it. Upgrade every peer to HIST-05 before relying
 on the same retention behavior across devices.
 The host namespace `item` is reserved.
 
+### Registry publishing tools
+
+Registry discovery is disabled in release builds until the activation gates in
+[`registry.md`](../design/registry.md) close. Listing a plugin grants neither
+publisher trust nor permission to execute it. Every version uses the normal
+package review; existing hosts and manifests need no migration.
+
+`terra verify package.terrapkg --json` emits checked manifest identity, signer,
+content digest and capability ids. The digest is over package contents, not
+ZIP bytes. `terrarium-plugins/scripts/build-index.py --help` describes the
+reviewed catalog metadata and explicit artifact inputs. After sequence one,
+pass `--previous` to retain release identities and old versions. The script
+validates its unsigned output using `terra check-index`.
+
+Sign the exact output bytes separately, with an explicit registry key and the
+approved origin:
+
+```sh
+terra sign-index index.json --origin https://plugins.example.org --key /private/registry.key
+```
+
+This writes `index.sig.json`. The example origin is illustrative. Signing does
+not fall back to `TERRA_SIGNING_KEY` or the developer publisher key. Verify the
+result independently under the release's pinned public keys before publishing.
+
+For desktop fixtures, debug builds accept `TERRA_REGISTRY_ORIGIN` and
+`TERRA_REGISTRY_KEY` only with an explicit absolute `TERRA_PROFILE_DIR` test
+profile. Use a new, disposable profile. Catalog state is additionally isolated
+by fixture origin and key. HTTPS, certificate validation, public addresses,
+exact paths and all package checks still apply; localhost HTTP is unsupported.
+Release builds ignore these registry overrides. Android cannot browse or fetch.
+
+## Simple plugins without code
+
+A plugin can declare `"kind": "declarative"` with
+`"api": "terrarium:declarative@0.1.0"`. It ships a manifest and JSON
+UI templates, with no Rust project or `dist/plugin.wasm`. Each operation
+must declare typed `params` (including `{}` for no arguments) and a `do`
+array of 1–16 store writes: `insert`, `update`, `delete`, `restore`, or
+`increment`. An insert must be the only step and returns `{"id":"…"}`;
+other operations return null. Every step shares one transaction, including
+normal sync, trash, trace and dry-run behavior.
+
+Write values accept scalar literals or exact `{{args.name}}`, `{{$now_ms}}`
+and `{{$today}}` bindings. The clock is captured once in the host timezone.
+Arguments are checked for every caller. Missing optional arguments omit a
+field; explicit null clears a nullable field. Tables and columns are literal
+names from this plugin's schema. There are no expressions, nested bindings,
+queries within operations or intermediate results. A toggle receives a typed
+boolean and updates the desired value.
+
+Declarative v1 excludes permissions, interop, jobs, schedules and reminders.
+Delete operations must have a destructive effect; existing review, trust and
+confirmation rules apply. `terra build` only checks the package; `terra pack`
+can sign it normally. See the [complete Reading list example and contract](../design/declarative-plugins.md).
+
+Upgrade Terrarium on every synced device before installing this API. Older
+hosts reject these packages. Omitted `kind` still means Wasm with the existing
+`terrarium:plugin@0.1.0` API. To upgrade a simple plugin to Wasm, preserve its
+id and storage schema, increase its version, use the Wasm API, remove `do`
+bodies and ship a real component. Schema changes remain additive only.

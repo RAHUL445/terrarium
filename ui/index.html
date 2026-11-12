@@ -27,7 +27,7 @@
     <p class="nav-label">Pinned apps</p>
     <div id="app-nav" class="app-nav"></div>
     <div class="nav-spacer"></div>
-    <button type="button" class="nav-item" data-settings="plugins" aria-label="Plugins" title="Plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span></button>
+    <button type="button" class="nav-item" data-settings="plugins" aria-label="Plugins" title="Plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span><span class="pp-badge" data-registry-badge hidden></span></button>
     <button type="button" class="nav-item" data-view="settings" aria-label="Settings" title="Settings"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg><span>Settings</span></button>
     <button type="button" class="icon-button rail-collapse" id="sidebar-toggle" aria-controls="main-sidebar" aria-expanded="false" aria-label="Expand navigation" title="Expand navigation"><svg class="icon" aria-hidden="true" data-icon="panel-left"></svg><span class="rail-collapse-label">Collapse</span></button>
   </nav>
@@ -109,7 +109,7 @@
           <button type="button" class="nav-item" data-settings="ai"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg><span>AI</span></button>
           <button type="button" class="nav-item" data-settings="scheduled"><svg class="icon" aria-hidden="true" data-icon="clock"></svg><span>Scheduled</span></button>
           <button type="button" class="nav-item" data-settings="automations"><svg class="icon" aria-hidden="true" data-icon="bolt"></svg><span>Automations</span></button>
-          <button type="button" class="nav-item" data-settings="plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span></button>
+          <button type="button" class="nav-item" data-settings="plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span><span class="pp-badge" data-registry-badge hidden></span></button>
           <button type="button" class="nav-item" data-settings="developer"><svg class="icon" aria-hidden="true" data-icon="code"></svg><span>Developer</span></button>
         </nav>
         <div class="settings-body">
@@ -438,8 +438,22 @@
             <div class="page-head"><h2 class="section-title">Plugins</h2><p class="muted">Install, update, roll back or remove plugins. Packages sync to your devices. Review each new version on a device before it runs there.</p></div>
             
         
+        <div role="tablist" aria-label="Plugin lists" class="card-foot">
+          <button type="button" role="tab" aria-selected="true" aria-controls="plugins-installed" data-plugin-tab="installed">Installed</button>
+          <button type="button" role="tab" aria-selected="false" aria-controls="registry-browse" data-plugin-tab="browse">Browse</button>
+        </div>
+        <div id="registry-browse" role="tabpanel" hidden>
+          <label class="pp-label" for="registry-search">Search plugins</label>
+          <input id="registry-search" class="pp-input" type="search" autocomplete="off">
+          <p id="registry-message" role="status"></p>
+          <div class="card-foot"><button type="button" id="registry-check">Check now</button><button type="button" id="registry-cancel" hidden>Cancel</button></div>
+          <ul id="registry-list" class="pp-list"></ul>
+        </div>
+        <label class="pp-checkbox"><input id="registry-automatic" type="checkbox" checked> Check for plugin updates automatically</label>
+        <p class="muted">The server sees your IP address and check times. Plugins download only when you choose to install.</p>
         <p id="plugins-error" class="error" role="alert" hidden></p>
 
+        <div id="plugins-installed" role="tabpanel">
         <div class="card" id="install-card">
           <h2>Install or update</h2>
           <form id="install-form" class="pp-form">
@@ -465,6 +479,30 @@
           </form>
         </div>
 
+
+        <div class="card">
+          <h2>Installed</h2>
+          <ul class="pp-list" id="installed-list"></ul>
+        </div>
+
+        <div class="card" id="pending-plugins-card" hidden>
+          <h2>Needs review</h2>
+          <p class="muted">Review the publisher and permissions before running these versions on this device.</p>
+          <ul class="pp-list" id="pending-plugins-list"></ul>
+        </div>
+
+        <div class="card" id="removed-card" hidden>
+          <h2>Removed</h2>
+          <p class="muted">Their data is kept. Add one back to use it again.</p>
+          <ul class="pp-list" id="removed-list"></ul>
+        </div>
+
+        <div class="card">
+          <h2>Trusted publishers</h2>
+          <p class="muted">Packages signed by these keys install without asking about the publisher.</p>
+          <ul class="plain" id="signer-list"></ul>
+        </div>
+        </div>
         <div class="card" id="review-card" hidden>
           <div class="card-head">
             <h2 id="review-title"></h2>
@@ -492,28 +530,6 @@
           </div>
         </div>
 
-        <div class="card">
-          <h2>Installed</h2>
-          <ul class="pp-list" id="installed-list"></ul>
-        </div>
-
-        <div class="card" id="pending-plugins-card" hidden>
-          <h2>Needs review</h2>
-          <p class="muted">Review the publisher and permissions before running these versions on this device.</p>
-          <ul class="pp-list" id="pending-plugins-list"></ul>
-        </div>
-
-        <div class="card" id="removed-card" hidden>
-          <h2>Removed</h2>
-          <p class="muted">Their data is kept. Add one back to use it again.</p>
-          <ul class="pp-list" id="removed-list"></ul>
-        </div>
-
-        <div class="card">
-          <h2>Trusted publishers</h2>
-          <p class="muted">Packages signed by these keys install without asking about the publisher.</p>
-          <ul class="plain" id="signer-list"></ul>
-        </div>
       
           </section>
           <section class="settings-section" id="settings-developer" hidden>
@@ -702,6 +718,7 @@
 <script src="rails.js"></script>
 <script src="pages.js"></script>
 <script src="templates.js"></script>
+<script src="registry.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

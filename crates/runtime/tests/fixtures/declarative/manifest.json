@@ -1,0 +1,67 @@
+{
+  "id": "reading-list",
+  "name": "Reading list",
+  "description": "Keep a list of things to read.",
+  "version": "0.1.0",
+  "kind": "declarative",
+  "api": "terrarium:declarative@0.1.0",
+  "icon": "book",
+  "storage": {
+    "version": 1,
+    "tables": [{"name": "items", "columns": [
+      {"name": "title", "type": "text"},
+      {"name": "done", "type": "boolean", "default": false},
+      {"name": "created_ms", "type": "integer"}
+    ]}]
+  },
+  "operations": {
+    "create": {
+      "params": {"title": {"type": "string", "required": true}},
+      "effect": "write",
+      "result": {"id": {"type": "id", "required": true}},
+      "do": [{"insert": "items", "values": {
+        "title": "{{args.title}}", "done": false, "created_ms": "{{$now_ms}}"
+      }}]
+    },
+    "update": {
+      "params": {
+        "id": {"type": "id", "required": true},
+        "title": {"type": "string", "required": true}
+      },
+      "effect": "write",
+      "do": [{"update": "items", "row": "{{args.id}}", "values": {"title": "{{args.title}}"}}]
+    },
+    "toggle": {
+      "params": {
+        "id": {"type": "id", "required": true},
+        "done": {"type": "boolean", "required": true}
+      },
+      "effect": "write",
+      "do": [{"update": "items", "row": "{{args.id}}", "values": {"done": "{{args.done}}"}}]
+    },
+    "delete": {
+      "params": {"id": {"type": "id", "required": true}},
+      "effect": "destructive",
+      "confirm": "Move this item to trash?",
+      "do": [{"delete": "items", "row": "{{args.id}}"}]
+    },
+    "restore": {
+      "params": {"id": {"type": "id", "required": true}},
+      "effect": "write",
+      "do": [{"restore": "items", "row": "{{args.id}}"}]
+    }
+  },
+  "queries": {
+    "open": {"sql": "SELECT id, title, done FROM items WHERE _deleted IS NULL AND done = 0 ORDER BY created_ms DESC", "params": []},
+    "done": {"sql": "SELECT id, title, done FROM items WHERE _deleted IS NULL AND done = 1 ORDER BY created_ms DESC", "params": []},
+    "trash": {"sql": "SELECT id, title FROM items WHERE _deleted IS NOT NULL ORDER BY _deleted DESC", "params": []},
+    "search": {
+      "sql": "SELECT id, title FROM items WHERE _deleted IS NULL AND title LIKE '%' || ?1 || '%' LIMIT 8",
+      "params": ["q"], "types": {"q": {"type": "string", "required": true}}
+    }
+  },
+  "search": "search",
+  "quick_actions": [{"label": "Add reading", "op": "create", "arg": "title"}],
+  "pages": [{"id": "main", "title": "Reading list", "template": "ui/page-main.json"}],
+  "open": {"page": "main"}
+}

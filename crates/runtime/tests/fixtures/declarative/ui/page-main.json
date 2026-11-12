@@ -1,0 +1,25 @@
+{
+  "state": {},
+  "body": {"type": "stack", "gap": 12, "children": [
+    {"type": "heading", "text": "Reading list"},
+    {"type": "form", "inline": true, "submit_label": "Add", "children": [
+      {"type": "text-field", "name": "title", "label": "Title", "required": true}
+    ], "submit": {"op": "create", "args": {"title": "{{form.title}}"}, "reset": true}},
+    {"type": "list", "query": "open", "empty": "Nothing to read yet.", "item": {
+      "type": "item", "title": "{{row.title}}",
+      "check": {"checked": "{{row.done}}", "action": {"op": "toggle", "args": {"id": "{{row.id}}", "done": "{{value}}"}}},
+      "trailing": [{"type": "button", "label": "Delete", "action": {
+        "op": "delete", "args": {"id": "{{row.id}}"}, "confirm": "Move this item to trash?"
+      }}]
+    }},
+    {"type": "list", "query": "done", "empty": "Nothing finished yet.", "item": {
+      "type": "item", "title": "{{row.title}}", "done": "{{row.done}}",
+      "check": {"checked": "{{row.done}}", "action": {"op": "toggle", "args": {"id": "{{row.id}}", "done": "{{value}}"}}}
+    }},
+    {"type": "list", "query": "trash", "empty": "Trash is empty.", "item": {
+      "type": "item", "title": "{{row.title}}", "trailing": [
+        {"type": "button", "label": "Restore", "action": {"op": "restore", "args": {"id": "{{row.id}}"}}}
+      ]
+    }}
+  ]}
+}

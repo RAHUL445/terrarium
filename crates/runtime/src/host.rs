@@ -28,8 +28,8 @@ const EPOCH_TICK_MS: u64 = 10;
 /// Storage and log calls allowed per operation.
 const MAX_HOST_CALLS: u32 = 5_000;
 const MAX_LOG_LINES: usize = 100;
-const MAX_ARGS: usize = 12 * 1024 * 1024;
-const MAX_REPLY: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_ARGS: usize = 12 * 1024 * 1024;
+pub(crate) const MAX_REPLY: usize = 4 * 1024 * 1024;
 const MAX_EVENTS_PER_CALL: usize = 50;
 const MAX_EVENT_PAYLOAD: usize = 16 * 1024;
 const MAX_WRITES: usize = 32 * 1024 * 1024;
@@ -214,7 +214,7 @@ impl Runtime {
     pub fn call(
         &self,
         pre: &PluginPre<HostState>,
-        mut core: CoreStore,
+        core: CoreStore,
         ctx: CallContext<'_>,
         peers: Peers,
         operation: &str,
@@ -224,90 +224,49 @@ impl Runtime {
             Ok(json) => json,
             Err(error) => return (core, peers, Err(error)),
         };
-        // The newest change before the call: what follows is this call's.
-        let mark = match peers.trace {
-            Some(_) => core
-                .changes(1)
-                .ok()
-                .and_then(|c| c.first().map(|r| r.lseq))
-                .unwrap_or(0),
-            None => 0,
-        };
-        if let Err(e) = core.begin() {
-            return (core, peers, Err(e.into()));
-        }
-        let http_checkpoint = peers.net.as_ref().map(terrarium_net::Net::checkpoint);
         let limits = ctx.limits;
-        let state = HostState {
-            store: core,
-            timezone: ctx.timezone.to_string(),
-            plugin_id: ctx.plugin_id.to_string(),
-            limits: StoreLimitsBuilder::new()
-                .memory_size(limits.memory_mb as usize * 1024 * 1024)
-                .memories(4)
-                .instances(32)
-                .tables(32)
-                .table_elements(20_000)
-                .trap_on_grow_failure(true)
-                .build(),
-            host_calls: 0,
-            log_lines: 0,
-            write_bytes: 0,
-            uses: ctx.uses.to_vec(),
-            speech: ctx.speech,
-            ai: ctx.ai,
-            http: ctx.http,
-            hosts: ctx.hosts,
-            http_jobs: Vec::new(),
-            operations: ctx.operations,
-            ai_jobs: Vec::new(),
-            schedule_changes: Vec::new(),
-            declared_events: ctx.events,
-            emitted: Vec::new(),
-            depth: ctx.depth,
-            grace_ticks: 0,
-            peers,
-        };
-        let mut store = Store::new(&self.inner.engine, state);
-        store.limiter(|s| &mut s.limits);
-        store.epoch_deadline_callback(|mut ctx| {
-            let state = ctx.data_mut();
-            if state.grace_ticks > 0 {
-                let extra = std::mem::take(&mut state.grace_ticks);
-                Ok(UpdateDeadline::Continue(extra))
-            } else {
-                Err(Trap::Interrupt.into())
-            }
-        });
-
-        let result = (|| -> Result<Value> {
-            store.set_fuel(limits.fuel)?;
-            store.set_epoch_deadline(limits.timeout_ms.div_ceil(EPOCH_TICK_MS) + 1);
-            let instance = pre.instantiate(&mut store).map_err(stopped)?;
-            let reply = instance
-                .call_handle(&mut store, operation, &args_json)
-                .map_err(stopped)?;
-            match reply {
-                Ok(json) if json.len() > MAX_REPLY => Err(RuntimeError::Plugin {
-                    code: "quota".into(),
-                    message: "Plugin result exceeds 4 MiB".into(),
-                }),
-                Ok(json) => serde_json::from_str(&json)
-                    .map_err(|_| RuntimeError::Trap("returned invalid JSON".into())),
-                Err(e) if e.code.len() > 64 || e.message.len() > 16 * 1024 => {
-                    Err(RuntimeError::Plugin {
-                        code: "quota".into(),
-                        message: "Plugin error exceeds its size limit".into(),
-                    })
+        transaction(core, ctx, peers, |state| {
+            let mut store = Store::new(&self.inner.engine, state);
+            store.limiter(|s| &mut s.limits);
+            store.epoch_deadline_callback(|mut ctx| {
+                let state = ctx.data_mut();
+                if state.grace_ticks > 0 {
+                    let extra = std::mem::take(&mut state.grace_ticks);
+                    Ok(UpdateDeadline::Continue(extra))
+                } else {
+                    Err(Trap::Interrupt.into())
                 }
-                Err(e) => Err(RuntimeError::Plugin {
-                    code: e.code,
-                    message: e.message,
-                }),
-            }
-        })();
+            });
 
-        finish_call(store.into_data(), result, mark, http_checkpoint)
+            let result = (|| -> Result<Value> {
+                store.set_fuel(limits.fuel)?;
+                store.set_epoch_deadline(limits.timeout_ms.div_ceil(EPOCH_TICK_MS) + 1);
+                let instance = pre.instantiate(&mut store).map_err(stopped)?;
+                let reply = instance
+                    .call_handle(&mut store, operation, &args_json)
+                    .map_err(stopped)?;
+                match reply {
+                    Ok(json) if json.len() > MAX_REPLY => Err(RuntimeError::Plugin {
+                        code: "quota".into(),
+                        message: "Plugin result exceeds 4 MiB".into(),
+                    }),
+                    Ok(json) => serde_json::from_str(&json)
+                        .map_err(|_| RuntimeError::Trap("returned invalid JSON".into())),
+                    Err(e) if e.code.len() > 64 || e.message.len() > 16 * 1024 => {
+                        Err(RuntimeError::Plugin {
+                            code: "quota".into(),
+                            message: "Plugin error exceeds its size limit".into(),
+                        })
+                    }
+                    Err(e) => Err(RuntimeError::Plugin {
+                        code: e.code,
+                        message: e.message,
+                    }),
+                }
+            })();
+
+            (store.into_data(), result)
+        })
     }
 }
 
@@ -368,6 +327,85 @@ fn finish_call(
     (core, peers, result)
 }
 
+pub(crate) fn transaction(
+    core: CoreStore,
+    ctx: CallContext<'_>,
+    peers: Peers,
+    execute: impl FnOnce(HostState) -> (HostState, Result<Value>),
+) -> (CoreStore, Peers, Result<Value>) {
+    let mut core = core;
+    // The newest change before the call: what follows is this call's.
+    let mark = match peers.trace {
+        Some(_) => core
+            .changes(1)
+            .ok()
+            .and_then(|c| c.first().map(|r| r.lseq))
+            .unwrap_or(0),
+        None => 0,
+    };
+    if let Err(e) = core.begin() {
+        return (core, peers, Err(e.into()));
+    }
+    let http_checkpoint = peers.net.as_ref().map(terrarium_net::Net::checkpoint);
+    let limits = ctx.limits;
+    let state = HostState {
+        store: core,
+        timezone: ctx.timezone.to_string(),
+        plugin_id: ctx.plugin_id.to_string(),
+        limits: StoreLimitsBuilder::new()
+            .memory_size(limits.memory_mb as usize * 1024 * 1024)
+            .memories(4)
+            .instances(32)
+            .tables(32)
+            .table_elements(20_000)
+            .trap_on_grow_failure(true)
+            .build(),
+        host_calls: 0,
+        log_lines: 0,
+        write_bytes: 0,
+        uses: ctx.uses.to_vec(),
+        speech: ctx.speech,
+        ai: ctx.ai,
+        http: ctx.http,
+        hosts: ctx.hosts,
+        http_jobs: Vec::new(),
+        operations: ctx.operations,
+        ai_jobs: Vec::new(),
+        schedule_changes: Vec::new(),
+        declared_events: ctx.events,
+        emitted: Vec::new(),
+        depth: ctx.depth,
+        grace_ticks: 0,
+        peers,
+    };
+    let (data, result) = execute(state);
+    let result = result.and_then(|v| {
+        bounded_json(&v, MAX_REPLY)?;
+        Ok(v)
+    });
+    finish_call(data, result, mark, http_checkpoint)
+}
+
+pub(crate) fn plugin_error(e: PluginError) -> RuntimeError {
+    RuntimeError::Plugin {
+        code: e.code,
+        message: e.message,
+    }
+}
+pub(crate) fn charge_write(
+    total: &mut usize,
+    bytes: usize,
+) -> std::result::Result<(), PluginError> {
+    *total = total.saturating_add(bytes);
+    if *total > MAX_WRITES {
+        return Err(PluginError {
+            code: "quota".into(),
+            message: "Storage writes exceed 32 MiB in one operation".into(),
+        });
+    }
+    Ok(())
+}
+
 fn stopped(e: wasmtime::Error) -> RuntimeError {
     let reason = match e.downcast_ref::<Trap>() {
         Some(Trap::OutOfFuel) => "it used more than its fuel limit".to_string(),
@@ -380,14 +418,7 @@ fn stopped(e: wasmtime::Error) -> RuntimeError {
 
 impl HostState {
     fn charge_write(&mut self, bytes: usize) -> std::result::Result<(), PluginError> {
-        self.write_bytes = self.write_bytes.saturating_add(bytes);
-        if self.write_bytes > MAX_WRITES {
-            return Err(PluginError {
-                code: "quota".into(),
-                message: "Storage writes exceed 32 MiB in one operation".into(),
-            });
-        }
-        Ok(())
+        charge_write(&mut self.write_bytes, bytes)
     }
 
     fn count_call(&mut self) -> std::result::Result<(), PluginError> {
@@ -402,7 +433,7 @@ impl HostState {
     }
 }
 
-fn to_plugin_error(e: CoreError) -> PluginError {
+pub(crate) fn to_plugin_error(e: CoreError) -> PluginError {
     let code = match &e {
         CoreError::NotFound { .. } => "not-found",
         CoreError::InTrash { .. } => "in-trash",
@@ -962,7 +993,7 @@ fn check_json_size(json: &str) -> std::result::Result<(), PluginError> {
     Ok(())
 }
 
-fn bounded_json(value: &Value, limit: usize) -> Result<String> {
+pub(crate) fn bounded_json(value: &Value, limit: usize) -> Result<String> {
     struct Output {
         bytes: Vec<u8>,
         limit: usize,
@@ -985,7 +1016,12 @@ fn bounded_json(value: &Value, limit: usize) -> Result<String> {
     };
     serde_json::to_writer(&mut out, value).map_err(|_| RuntimeError::Plugin {
         code: "quota".into(),
-        message: "Operation input exceeds 12 MiB".into(),
+        message: if limit == MAX_REPLY {
+            "Plugin result exceeds 4 MiB"
+        } else {
+            "Operation input exceeds 12 MiB"
+        }
+        .into(),
     })?;
     Ok(String::from_utf8(out.bytes).expect("JSON is UTF-8"))
 }
@@ -1111,5 +1147,25 @@ mod payload_tests {
             .unwrap_err();
         assert_eq!(error.code, "invalid");
         assert!(!error.message.contains("secret-value"));
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    #[test]
+    fn inclusive_write_budget_and_saturating_overflow() {
+        let mut bytes = 0;
+        charge_write(&mut bytes, MAX_WRITES).unwrap();
+        assert!(charge_write(&mut bytes, 1).is_err());
+        let mut bytes = usize::MAX;
+        assert!(charge_write(&mut bytes, 1).is_err());
+    }
+    #[test]
+    fn inclusive_serialized_input_and_reply_budgets() {
+        for max in [MAX_ARGS, MAX_REPLY] {
+            assert!(bounded_json(&Value::String("x".repeat(max - 2)), max).is_ok());
+            assert!(bounded_json(&Value::String("x".repeat(max - 1)), max).is_err());
+        }
     }
 }

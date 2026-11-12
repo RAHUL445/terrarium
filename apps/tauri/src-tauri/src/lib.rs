@@ -13,6 +13,7 @@ mod links;
 mod net;
 mod plugins;
 mod quick;
+mod registry;
 mod secrets;
 mod shell;
 mod sync;
@@ -445,6 +446,8 @@ pub fn run() {
             app.manage(plugins.clone());
             app.manage(install::Pending::default());
             app.manage(vault::Pending::default());
+            app.manage(registry::Registry::open(&app_data)?);
+            registry::start(app.handle().clone());
             let stage = Instant::now();
             app.manage(sync::Sync::open(&data_dir, SPACE, host_cfg.device.clone())?);
             startup_span("sync-open", stage);
@@ -490,6 +493,10 @@ pub fn run() {
             run_benchmark,
             open_external,
             plugins::plugins,
+            registry::registry_index,
+            registry::registry_stage,
+            registry::registry_settings,
+            registry::registry_cancel,
             install::stage_install,
             install::confirm_install,
             install::cancel_install,

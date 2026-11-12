@@ -286,6 +286,10 @@ pub fn invoke(
         })(),
         "schedule_set_enabled" => (|| {
             let id = arg_str(args, "id")?;
+            if let Some(schedule) = host.scheduler().get(id) {
+                host.validate_schedule_target(&schedule.plugin)
+                    .map_err(|e| e.to_string())?;
+            }
             let enabled = arg(args, "enabled")?
                 .as_bool()
                 .ok_or("`enabled` must be true or false")?;
@@ -294,6 +298,10 @@ pub fn invoke(
         })(),
         "schedule_set_repeat" => (|| {
             let id = arg_str(args, "id")?;
+            if let Some(schedule) = host.scheduler().get(id) {
+                host.validate_schedule_target(&schedule.plugin)
+                    .map_err(|e| e.to_string())?;
+            }
             let repeat: Repeat =
                 serde_json::from_value(arg(args, "repeat")?.clone()).map_err(|e| e.to_string())?;
             host.scheduler_mut().set_repeat(id, &repeat)?;
@@ -311,12 +319,24 @@ pub fn invoke(
         })(),
         "schedule_run_now" => (|| {
             let id = arg_str(args, "id")?;
+            if let Some(schedule) = host.scheduler().get(id) {
+                host.validate_schedule_target(&schedule.plugin)
+                    .map_err(|e| e.to_string())?;
+            }
             let run = host.scheduler_mut().run_now(id, now_ms())?;
             host.run_due(now_ms(), desktop);
             Ok(json!({ "run": run, "state": schedules_state(host) }))
         })(),
         "schedule_retry" => (|| {
             let run = arg_str(args, "run")?;
+            if let Some(schedule) = host
+                .scheduler()
+                .run(run)
+                .and_then(|r| host.scheduler().get(&r.schedule))
+            {
+                host.validate_schedule_target(&schedule.plugin)
+                    .map_err(|e| e.to_string())?;
+            }
             host.scheduler_mut().retry(run, now_ms())?;
             host.run_due(now_ms(), desktop);
             Ok(schedules_state(host))

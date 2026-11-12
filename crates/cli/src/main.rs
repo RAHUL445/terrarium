@@ -1,6 +1,6 @@
 //! `terra`: plugin developer tool.
 //!
-//!   terra new <dir> [--id <id>] [--name <name>] [--sdk <path>]   scaffold a plugin
+//!   terra new <dir> [--id <id>] [--name <name>] [--sdk <path> | --declarative]   scaffold a plugin
 //!   terra build <dir>                             build dist/plugin.wasm and check it loads
 //!   terra check <dir>                             check a built package loads
 //!   terra dev <dir>                               rebuild on every change (the app reloads it)
@@ -32,6 +32,8 @@ fn main() -> ExitCode {
         Some("keygen") => cmd_keygen(),
         Some("pack") => cmd_pack(&args[1..]),
         Some("verify") => cmd_verify(&args[1..]),
+        Some("sign-index") => cmd_index(&args[1..], true),
+        Some("check-index") => cmd_index(&args[1..], false),
         Some("theme") => cmd_theme(&args[1..]),
         Some("preview") => cmd_preview(&args[1..]),
         _ => Err(USAGE.to_string()),
@@ -46,13 +48,15 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  terra new <dir> [--id <id>] [--name <name>] [--sdk <path>]
+  terra new <dir> [--id <id>] [--name <name>] [--sdk <path> | --declarative]
   terra build <dir>
   terra check <dir>
   terra dev <dir>
   terra keygen
   terra pack <dir> [-o <file>] [--unsigned]
-  terra verify <file>
+  terra verify <file> [--json]
+  terra sign-index <index.json> --key <path> --origin <https-origin>
+  terra check-index <index.json> --origin <https-origin>
   terra theme <file>
   terra preview <dir>... [--port <n>] [--data <dir>]";
 
@@ -62,6 +66,10 @@ fn dir_arg(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn cmd_build(dir: &Path) -> Result<(), String> {
+    let manifest = terrarium_runtime::Manifest::read(dir).map_err(|e| e.to_string())?;
+    if manifest.kind == terrarium_runtime::Kind::Declarative {
+        return check(dir);
+    }
     let started = Instant::now();
     let out = build_plugin(dir).map_err(|e| e.to_string())?;
     check(dir)?;
@@ -203,14 +211,23 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
         .to_lowercase();
     let mut name = None;
     let mut sdk = std::env::var_os("TERRA_SDK").map(PathBuf::from);
+    let mut declarative = false;
+    let mut explicit_sdk = false;
     let mut rest = args[1..].iter();
     while let Some(flag) = rest.next() {
         match flag.as_str() {
             "--id" => id = rest.next().ok_or("--id needs a value")?.clone(),
             "--name" => name = Some(rest.next().ok_or("--name needs a value")?.clone()),
-            "--sdk" => sdk = Some(PathBuf::from(rest.next().ok_or("--sdk needs a path")?)),
+            "--sdk" => {
+                explicit_sdk = true;
+                sdk = Some(PathBuf::from(rest.next().ok_or("--sdk needs a path")?));
+            }
+            "--declarative" => declarative = true,
             other => return Err(format!("unknown option {other}\n{USAGE}")),
         }
+    }
+    if declarative && explicit_sdk {
+        return Err("--sdk cannot be used with --declarative".into());
     }
     let valid = id.starts_with(|c: char| c.is_ascii_lowercase())
         && id
@@ -229,26 +246,43 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
         return Err(format!("{} already exists and is not empty", dir.display()));
     }
     let name = name.unwrap_or_else(|| title_case(&id));
-    let guest = sdk.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../guest"));
-    let guest = std::fs::canonicalize(&guest).map_err(|e| format!("{}: {e}", guest.display()))?;
-
-    let files = [
-        ("Cargo.toml", template::cargo_toml(&id, &guest)),
-        ("src/lib.rs", template::LIB_RS.to_string()),
-        ("manifest.json", template::manifest(&id, &name)),
-        ("ui/page-main.json", template::page(&name)),
-        (".gitignore", "target/\ndist/\n".to_string()),
-    ];
+    let files = if declarative {
+        vec![
+            ("manifest.json", template::declarative_manifest(&id, &name)),
+            ("ui/page-main.json", template::declarative_page(&name)),
+            (".gitignore", "dist/\n".to_string()),
+        ]
+    } else {
+        let guest = sdk.unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../guest"));
+        let guest =
+            std::fs::canonicalize(&guest).map_err(|e| format!("{}: {e}", guest.display()))?;
+        vec![
+            ("Cargo.toml", template::cargo_toml(&id, &guest)),
+            ("src/lib.rs", template::LIB_RS.to_string()),
+            ("manifest.json", template::manifest(&id, &name)),
+            ("ui/page-main.json", template::page(&name)),
+            (".gitignore", "target/\ndist/\n".to_string()),
+        ]
+    };
     for (path, contents) in files {
         let path = dir.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
         std::fs::write(&path, contents).map_err(|e| format!("{}: {e}", path.display()))?;
     }
-    println!(
-        "created {} ({id}). Next:\n  terra dev {}",
-        dir.display(),
-        dir.display()
-    );
+    if declarative {
+        println!(
+            "created {} ({id}). Next:\n  terra check {}\n  terra preview {}",
+            dir.display(),
+            dir.display(),
+            dir.display()
+        );
+    } else {
+        println!(
+            "created {} ({id}). Next:\n  terra dev {}",
+            dir.display(),
+            dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -266,6 +300,102 @@ fn title_case(id: &str) -> String {
 
 mod template {
     use std::path::Path;
+
+    pub fn declarative_manifest(id: &str, name: &str) -> String {
+        serde_json::to_string_pretty(&serde_json::json!(
+            {
+              "id": id,
+              "name": name,
+              "description": "Keep a list of items.",
+              "version": "0.1.0",
+              "kind": "declarative",
+              "api": "terrarium:declarative@0.1.0",
+              "icon": "book",
+              "storage": {
+                "version": 1,
+                "tables": [{"name": "items", "columns": [
+                  {"name": "title", "type": "text"},
+                  {"name": "done", "type": "boolean", "default": false},
+                  {"name": "created_ms", "type": "integer"}
+                ]}]
+              },
+              "operations": {
+                "create": {
+                  "params": {"title": {"type": "string", "required": true}},
+                  "effect": "write",
+                  "result": {"id": {"type": "id", "required": true}},
+                  "do": [{"insert": "items", "values": {
+                    "title": "{{args.title}}", "done": false, "created_ms": "{{$now_ms}}"
+                  }}]
+                },
+                "toggle": {
+                  "params": {
+                    "id": {"type": "id", "required": true},
+                    "done": {"type": "boolean", "required": true}
+                  },
+                  "effect": "write",
+                  "do": [{"update": "items", "row": "{{args.id}}", "values": {"done": "{{args.done}}"}}]
+                },
+                "delete": {
+                  "params": {"id": {"type": "id", "required": true}},
+                  "effect": "destructive",
+                  "confirm": "Move this item to trash?",
+                  "do": [{"delete": "items", "row": "{{args.id}}"}]
+                },
+                "restore": {
+                  "params": {"id": {"type": "id", "required": true}},
+                  "effect": "write",
+                  "do": [{"restore": "items", "row": "{{args.id}}"}]
+                }
+              },
+              "queries": {
+                "open": {"sql": "SELECT id, title, done FROM items WHERE _deleted IS NULL AND done = 0 ORDER BY created_ms DESC", "params": []},
+                "done": {"sql": "SELECT id, title, done FROM items WHERE _deleted IS NULL AND done = 1 ORDER BY created_ms DESC", "params": []},
+                "trash": {"sql": "SELECT id, title FROM items WHERE _deleted IS NOT NULL ORDER BY _deleted DESC", "params": []},
+                "search": {
+                  "sql": "SELECT id, title FROM items WHERE _deleted IS NULL AND title LIKE '%' || ?1 || '%' LIMIT 8",
+                  "params": ["q"], "types": {"q": {"type": "string", "required": true}}
+                }
+              },
+              "search": "search",
+              "quick_actions": [{"label": "Add item", "op": "create", "arg": "title"}],
+              "pages": [{"id": "main", "title": name, "template": "ui/page-main.json"}],
+              "open": {"page": "main"}
+            }
+        ))
+        .unwrap() + "\n"
+    }
+
+    pub fn declarative_page(name: &str) -> String {
+        serde_json::to_string_pretty(&serde_json::json!(
+            {
+              "state": {},
+              "body": {"type": "stack", "gap": 12, "children": [
+                {"type": "heading", "text": name},
+                {"type": "form", "inline": true, "submit_label": "Add", "children": [
+                  {"type": "text-field", "name": "title", "label": "Title", "required": true}
+                ], "submit": {"op": "create", "args": {"title": "{{form.title}}"}, "reset": true}},
+                {"type": "list", "query": "open", "empty": "No items yet.", "item": {
+                  "type": "item", "title": "{{row.title}}",
+                  "check": {"checked": "{{row.done}}", "action": {"op": "toggle", "args": {"id": "{{row.id}}", "done": "{{value}}"}}},
+                  "trailing": [{"type": "button", "label": "Delete", "action": {
+                    "op": "delete", "args": {"id": "{{row.id}}"}, "confirm": "Move this item to trash?"
+                  }}]
+                }},
+                {"type": "list", "query": "done", "empty": "Nothing finished yet.", "item": {
+                  "type": "item", "title": "{{row.title}}", "done": "{{row.done}}",
+                  "check": {"checked": "{{row.done}}", "action": {"op": "toggle", "args": {"id": "{{row.id}}", "done": "{{value}}"}}}
+                }},
+                {"type": "list", "query": "trash", "empty": "Trash is empty.", "item": {
+                  "type": "item", "title": "{{row.title}}", "trailing": [
+                    {"type": "button", "label": "Restore", "action": {"op": "restore", "args": {"id": "{{row.id}}"}}}
+                  ]
+                }}
+              ]}
+            }
+        ))
+        .unwrap() + "\n"
+    }
 
     pub fn cargo_toml(id: &str, guest: &Path) -> String {
         format!(
@@ -452,6 +582,9 @@ fn cmd_pack(args: &[String]) -> Result<(), String> {
         ))
     });
     let bytes = package.to_zip().map_err(|e| e.to_string())?;
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
     std::fs::write(&out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
     println!("packed {} ({} KB)", out.display(), bytes.len() / 1024);
     println!("digest: {}", package.digest());
@@ -495,6 +628,21 @@ fn cmd_verify(args: &[String]) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let package = Package::from_zip(&bytes).map_err(|e| e.to_string())?;
     let manifest = package.manifest();
+    if args.iter().skip(1).any(|s| s != "--json") {
+        return Err(USAGE.into());
+    }
+    if args.iter().any(|s| s == "--json") {
+        let mut caps: Vec<_> = terrarium_runtime::capabilities(manifest)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        caps.sort();
+        println!(
+            "{}",
+            serde_json::json!({"id":manifest.id,"version":manifest.version,"api":manifest.api,"name":manifest.name,"description":manifest.description,"icon":manifest.icon,"signer":package.signer(),"digest":package.digest(),"capabilities":caps})
+        );
+        return Ok(());
+    }
     println!("{} {} ({})", manifest.id, manifest.version, manifest.name);
     println!("digest: {}", package.digest());
     match package.signer() {
@@ -505,4 +653,171 @@ fn cmd_verify(args: &[String]) -> Result<(), String> {
         println!("  can: {}", cap.label);
     }
     Ok(())
+}
+
+/// Registry signing never falls back to the publisher key or environment.
+fn cmd_index(args: &[String], signing: bool) -> Result<(), String> {
+    use std::io::Read;
+    use terrarium_runtime::registry_index::{self as index, Config};
+    let path = Path::new(args.first().ok_or(USAGE)?);
+    let mut key = None;
+    let mut origin = None;
+    let mut options = args.iter().skip(1);
+    while let Some(option) = options.next() {
+        let value = options.next().ok_or(USAGE)?;
+        match option.as_str() {
+            "--key" if key.is_none() && signing => key = Some(value),
+            "--origin" if origin.is_none() => origin = Some(value),
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let config = Config {
+        origin: origin
+            .ok_or("Pass --origin with the approved HTTPS origin")?
+            .clone(),
+        keys: vec![],
+        revoked: vec![],
+        minimum_sequence: 1,
+    };
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|_| "Could not read index")?
+        .take(index::MAX_INDEX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Could not read index")?;
+    index::validate(&bytes, &config)?;
+    if signing {
+        let secret = read_signing_key(Path::new(
+            key.ok_or("Pass --key with the separate registry signing key")?,
+        ))
+        .map_err(|_| "Could not read registry signing key")?;
+        let signature = index::sign_index(&bytes, &secret, &config)?;
+        std::fs::write(path.with_extension("sig.json"), signature)
+            .map_err(|_| "Could not write index signature")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Map, Value};
+
+    #[test]
+    fn declarative_scaffold_loads() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("reading-list");
+        let name = "Reading \"list\"\n📚";
+        cmd_new(&[
+            dir.to_string_lossy().into_owned(),
+            "--declarative".into(),
+            "--id".into(),
+            "my-list".into(),
+            "--name".into(),
+            name.into(),
+        ])
+        .unwrap();
+        check(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+            "dist/\n"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        assert!(!dir.join("Cargo.toml").exists());
+        assert!(!dir.join("src").exists());
+        let mut host = PluginHost::new(HostConfig {
+            data_dir: root.path().join("data"),
+            spaces_dir: None,
+            space: "test".into(),
+            device: "test".into(),
+            user: "test".into(),
+            timezone: "UTC".into(),
+            execution: Default::default(),
+            speech: None,
+        })
+        .unwrap();
+        let manifest = host.load(&dir).unwrap();
+        assert_eq!(manifest.id, "my-list");
+        assert_eq!(manifest.name, name);
+        let page = host
+            .template("my-list", terrarium_runtime::ViewKind::Page, "main")
+            .unwrap();
+        assert_eq!(page["body"]["children"][0]["text"], name);
+        let id = host
+            .call("my-list", "create", &json!({"title":"Read the guide"}))
+            .unwrap()["id"]
+            .clone();
+        assert_eq!(
+            host.query("my-list", "open", &Map::new()).unwrap()[0]["title"],
+            "Read the guide"
+        );
+        host.call("my-list", "toggle", &json!({"id":id,"done":true}))
+            .unwrap();
+        assert!(host
+            .query("my-list", "open", &Map::new())
+            .unwrap()
+            .is_empty());
+        assert_eq!(host.query("my-list", "done", &Map::new()).unwrap().len(), 1);
+        host.call("my-list", "toggle", &json!({"id":id,"done":false}))
+            .unwrap();
+        assert_eq!(host.query("my-list", "open", &Map::new()).unwrap().len(), 1);
+        let search = Map::from_iter([("q".into(), json!("guide"))]);
+        assert_eq!(host.query("my-list", "search", &search).unwrap().len(), 1);
+        assert_eq!(
+            host.call("my-list", "delete", &json!({"id":id})).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            host.query("my-list", "trash", &Map::new()).unwrap().len(),
+            1
+        );
+        host.call("my-list", "restore", &json!({"id":id})).unwrap();
+        assert_eq!(host.query("my-list", "open", &Map::new()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn declarative_rejects_sdk_flag() {
+        let root = tempfile::tempdir().unwrap();
+        for flags in [
+            vec!["--declarative", "--sdk", "/missing-sdk"],
+            vec!["--sdk", "/missing-sdk", "--declarative"],
+        ] {
+            let dir = root.path().join("new-plugin");
+            let mut args = vec![dir.to_string_lossy().into_owned()];
+            args.extend(flags.into_iter().map(String::from));
+            assert_eq!(
+                cmd_new(&args).unwrap_err(),
+                "--sdk cannot be used with --declarative"
+            );
+            assert!(!dir.exists());
+        }
+    }
+
+    #[test]
+    fn wasm_scaffold_is_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("my-plugin");
+        let guest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../guest")
+            .canonicalize()
+            .unwrap();
+        cmd_new(&[
+            dir.to_string_lossy().into_owned(),
+            "--sdk".into(),
+            guest.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        for (path, expected) in [
+            ("Cargo.toml", template::cargo_toml("my-plugin", &guest)),
+            ("src/lib.rs", template::LIB_RS.to_string()),
+            (
+                "manifest.json",
+                template::manifest("my-plugin", "My Plugin"),
+            ),
+            ("ui/page-main.json", template::page("My Plugin")),
+            (".gitignore", "target/\ndist/\n".into()),
+        ] {
+            assert_eq!(std::fs::read_to_string(dir.join(path)).unwrap(), expected);
+        }
+    }
 }

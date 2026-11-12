@@ -35,6 +35,7 @@ struct Staged {
     added: Vec<Capability>,
     staged_at: std::time::Instant,
     synced: bool,
+    registry: Option<crate::registry::Context>,
 }
 
 #[derive(Deserialize)]
@@ -342,52 +343,64 @@ pub async fn stage_install(app: AppHandle, source: InstallSource) -> Result<Revi
         let plugins = app.state::<Plugins>();
         let synced = matches!(source, InstallSource::Synced { .. });
         let (package, source) = read(&source, &plugins)?;
-        validate_signature_policy(package.signer(), cfg!(debug_assertions))?;
-        let manifest = package.manifest().clone();
-        let loaded = plugins.loaded(&manifest.id);
-        let (current, trusted, signer_name) = plugins
-            .with_host(|host| {
-                let current = host.manifests().find(|m| m.id == manifest.id).cloned();
-                let signers = host.packages().signers().unwrap_or_default();
-                let name = package.signer().and_then(|key| {
-                    signers
-                        .iter()
-                        .find(|(k, _)| k == key)
-                        .map(|(_, n)| n.clone())
-                });
-                (current, name.is_some(), name)
-            })
-            .ok_or("plugin host unavailable")?;
-        let review = Review {
-            token: token()?,
-            id: manifest.id.clone(),
-            name: manifest.name.clone(),
-            version: manifest.version.clone(),
-            description: manifest.description.clone(),
-            current_version: current.as_ref().map(|m| m.version.clone()),
-            trust: match (package.signer(), trusted) {
-                (None, _) => Trust::Unsigned,
-                (Some(_), true) => Trust::Trusted,
-                (Some(_), false) => Trust::Unknown,
-            },
-            signer: package.signer().map(key_fingerprint),
-            signer_name,
-            capabilities: capabilities(&manifest),
-            added: added_capabilities(current.as_ref(), &manifest),
-            shadowed_by_dev: loaded.is_some_and(|l| l.origin == Origin::Dev),
-        };
-        *app.state::<Pending>().0.lock().map_err(err)? = Some(Staged {
-            token: review.token.clone(),
-            package,
-            source,
-            added: review.added.clone(),
-            staged_at: std::time::Instant::now(),
-            synced,
-        });
-        Ok(review)
+        stage_package(&app, package, source, synced, None)
     })
     .await
     .map_err(err)?
+}
+
+pub(crate) fn stage_package(
+    app: &AppHandle,
+    package: Package,
+    source: PackageSource,
+    synced: bool,
+    registry: Option<crate::registry::Context>,
+) -> Result<Review, String> {
+    let plugins = app.state::<Plugins>();
+    validate_signature_policy(package.signer(), cfg!(debug_assertions))?;
+    let manifest = package.manifest().clone();
+    let loaded = plugins.loaded(&manifest.id);
+    let (current, trusted, signer_name) = plugins
+        .with_host(|host| {
+            let current = host.manifests().find(|m| m.id == manifest.id).cloned();
+            let signers = host.packages().signers().unwrap_or_default();
+            let name = package.signer().and_then(|key| {
+                signers
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .map(|(_, n)| n.clone())
+            });
+            (current, name.is_some(), name)
+        })
+        .ok_or("plugin host unavailable")?;
+    let review = Review {
+        token: token()?,
+        id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        version: manifest.version.clone(),
+        description: manifest.description.clone(),
+        current_version: current.as_ref().map(|m| m.version.clone()),
+        trust: match (package.signer(), trusted) {
+            (None, _) => Trust::Unsigned,
+            (Some(_), true) => Trust::Trusted,
+            (Some(_), false) => Trust::Unknown,
+        },
+        signer: package.signer().map(key_fingerprint),
+        signer_name,
+        capabilities: capabilities(&manifest),
+        added: added_capabilities(current.as_ref(), &manifest),
+        shadowed_by_dev: loaded.is_some_and(|l| l.origin == Origin::Dev),
+    };
+    *app.state::<Pending>().0.lock().map_err(err)? = Some(Staged {
+        token: review.token.clone(),
+        package,
+        source,
+        added: review.added.clone(),
+        staged_at: std::time::Instant::now(),
+        synced,
+        registry,
+    });
+    Ok(review)
 }
 
 /// Activates the staged package. `trust` must be true for a package from
@@ -423,6 +436,14 @@ pub async fn confirm_install(
         )?;
         terrarium_runtime::validate_http_consent(staged.package.manifest(), approve_any_website)
             .map_err(err)?;
+        let registry = app.state::<crate::registry::Registry>();
+        let _registry_guard = if let Some(context) = &staged.registry {
+            let guard = registry.confirmation_guard()?;
+            registry.validate_context(context)?;
+            Some(guard)
+        } else {
+            None
+        };
         let plugins = app.state::<Plugins>();
         let id = staged.package.manifest().id.clone();
         let current = plugins.current_for_rollback(&id);

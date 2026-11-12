@@ -1060,6 +1060,9 @@ function readFileBase64(file) {
   });
 }
 
+const registryView = window.TerrariumRegistry.create({ $, el,
+  icon: (name) => icon(ICONS[name] ? name : "apps-plus"), call, showReview, renderInstalled, phone: isPhone });
+
 const ORIGIN_LABEL = { bundled: "Built in", installed: "Installed", dev: "Development" };
 
 /** Negative when version a is older than b ("0.1.10" > "0.1.9"). */
@@ -1151,6 +1154,8 @@ function renderInstalled() {
   } else {
     list.replaceChildren(...pluginList.plugins.map((p) => {
       const actions = el("div", { class: "card-foot" });
+      const available = registryView.updateFor(p.id);
+      if (available) actions.append(el("button", { type: "button", class: "pp-button", onclick: () => registryView.stage(p.id, available.version) }, `Update available (${available.version})`));
       if (p.previous_version) {
         const verb = compareVersions(p.previous_version, p.version) < 0 ? "Roll back to" : "Return to";
         actions.append(el("button", {
@@ -1186,6 +1191,7 @@ function renderInstalled() {
           el("strong", {}, `${p.name} `, el("span", { class: "muted" }, p.version)),
           el("span", { class: "pp-badge" }, ORIGIN_LABEL[p.origin] || "Loaded")),
         p.description ? el("p", { class: "muted" }, p.description) : "",
+        registryView.warningFor(p.id) ? el("p", { class: "muted" }, registryView.warningFor(p.id)) : "",
         p.capabilities.length
           ? el("p", { class: "muted" }, "Can: ", p.capabilities.map((c) => c.label).join("; "))
           : "",
@@ -1229,6 +1235,7 @@ async function pluginAction(command, args, done) {
     await call(command, args);
     toast(done);
     await loadPlugins();
+    registryView.load(false);
   } catch (e) {
     pluginsError(String(e));
   }
@@ -3154,6 +3161,7 @@ function showSection(section) {
   }
   if (section === "plugins") {
     renderInstalled();
+    registryView.load(false);
     loadSigners();
   }
 }
@@ -3220,10 +3228,12 @@ async function start() {
       await loadPlugins();
       if (waitingLinks.length) drainLinks();
       await loadImporters();
+      registryView.load(false);
       if (!navigated && currentView !== "home") showView("home");
     });
   }
   if (window.__TAURI__?.event) {
+    await window.__TAURI__.event.listen("registry-changed", () => registryView.load(false));
     await window.__TAURI__.event.listen("sync-status", () => loadSyncStatus());
     await window.__TAURI__.event.listen("spaces-changed", () => loadSpaces());
     await window.__TAURI__.event.listen("data-changed", () => {
@@ -3242,6 +3252,7 @@ async function start() {
   await showView("home");
   await loadSpaces();
   await loadPlugins();
+  registryView.load(false);
   await loadSyncStatus();
   await loadThemes();
   if (!navigated) await restoreWorkspace(location);

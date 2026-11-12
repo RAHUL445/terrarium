@@ -105,7 +105,16 @@ impl Package {
         let manifest = Manifest::parse(&manifest_bytes)?;
         let mut files = BTreeMap::new();
         files.insert(MANIFEST.to_string(), manifest_bytes);
-        files.insert(WASM.to_string(), read(WASM)?);
+        match manifest.kind {
+            crate::manifest::Kind::Wasm => {
+                files.insert(WASM.to_string(), read(WASM)?);
+            }
+            crate::manifest::Kind::Declarative => {
+                if std::fs::symlink_metadata(root.join(WASM)).is_ok() {
+                    return Err(bad("declarative plugins cannot contain dist/plugin.wasm"));
+                }
+            }
+        }
         for view in manifest.pages.iter().chain(&manifest.widgets) {
             let name = clean_path(&view.template)?;
             if name == SIGNATURE {
@@ -196,8 +205,11 @@ impl Package {
                 .get(MANIFEST)
                 .ok_or_else(|| bad("missing manifest.json"))?,
         )?;
-        if !files.contains_key(WASM) {
+        if manifest.kind == crate::manifest::Kind::Wasm && !files.contains_key(WASM) {
             return Err(bad(format!("missing {WASM}; build the plugin first")));
+        }
+        if manifest.kind == crate::manifest::Kind::Declarative && files.contains_key(WASM) {
+            return Err(bad("declarative plugins cannot contain dist/plugin.wasm"));
         }
         for view in manifest.pages.iter().chain(&manifest.widgets) {
             if !files.contains_key(&view.template) {

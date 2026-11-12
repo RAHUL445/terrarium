@@ -10,6 +10,7 @@ mod blobs_gc;
 mod builder;
 pub mod commands;
 mod csv;
+mod declarative;
 mod error;
 mod events;
 mod export;
@@ -24,6 +25,8 @@ mod pages;
 mod refs;
 mod registry;
 pub mod rules;
+pub mod registry_client;
+pub mod registry_index;
 pub mod services;
 mod spaces;
 mod speech;
@@ -38,9 +41,10 @@ pub use index::{IndexProgress, INDEX_CHUNK};
 pub use links::{LinkInfo, Links, LINKS_STORE_ID, LINK_KINDS};
 pub use manifest::{
     Effect, EventDef, ExportDef, ExportFormat, ImportDef, ImportFormat, IndexDef, InterfaceDef,
-    JobDef, Limits, Manifest, MoveDef, OpenDef, OperationDef, ParamSpec, ParamType, QueryDef,
+    JobDef, Kind, Limits, Manifest, MoveDef, OpenDef, OperationDef, ParamSpec, ParamType, QueryDef,
     QueryView, QuickAction, RefDef, RemindersDef, RunOn, Schedule, ShareTarget, ViewColumn,
-    ViewDef, API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES, PERMISSIONS, SHARE_TYPES,
+    ViewDef, API_VERSION, CONTEXT_PARAMS, DECLARATIVE_API_VERSION, ICONS, MAX_INDEX_ENTRIES,
+    PERMISSIONS, SHARE_TYPES,
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,

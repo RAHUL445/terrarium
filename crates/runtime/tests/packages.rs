@@ -302,3 +302,135 @@ fn adding_or_widening_an_event_requires_fresh_device_consent() {
         .to_string()
         .contains("review"));
 }
+
+#[test]
+fn declarative_package_packs_signs_and_verifies() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/declarative");
+    let (secret, public) = generate_signing_key().unwrap();
+    let mut package = Package::from_dir(&fixture).unwrap();
+    let digest = package.digest();
+    package.sign(&secret);
+    let read = Package::from_zip(&package.to_zip().unwrap()).unwrap();
+    assert_eq!(read.digest(), digest);
+    assert_eq!(read.signer(), Some(public.as_str()));
+    let root = TempDir::new().unwrap();
+    let unpacked = root.path().join("unpacked");
+    read.write_to(&unpacked).unwrap();
+    let mut h = host(&root, "device");
+    h.load(&unpacked).unwrap();
+    h.call("reading-list", "create", &json!({"title":"Signed"}))
+        .unwrap();
+    std::fs::write(unpacked.join("ui/page-main.json"), b"{}").unwrap();
+    assert!(Package::from_dir(&unpacked)
+        .unwrap_err()
+        .to_string()
+        .contains("signature does not match"));
+}
+
+#[test]
+fn declarative_package_with_wasm_is_rejected() {
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/declarative");
+    let root = TempDir::new().unwrap();
+    let unpacked = root.path().join("unpacked");
+    Package::from_dir(&fixture)
+        .unwrap()
+        .write_to(&unpacked)
+        .unwrap();
+    std::fs::create_dir_all(unpacked.join("dist")).unwrap();
+    std::fs::write(unpacked.join("dist/plugin.wasm"), b"stale").unwrap();
+    assert!(Package::from_dir(&unpacked)
+        .unwrap_err()
+        .to_string()
+        .contains("cannot contain"));
+    let mut h = host(&root, "device");
+    assert!(h.load(&unpacked).is_err());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut bytes);
+        for file in ["manifest.json", "ui/page-main.json", "dist/plugin.wasm"] {
+            zip.start_file(file, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(&std::fs::read(unpacked.join(file)).unwrap())
+                .unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    assert!(Package::from_zip(&bytes.into_inner())
+        .unwrap_err()
+        .to_string()
+        .contains("cannot contain"));
+}
+
+#[test]
+fn declarative_install_and_same_id_wasm_upgrade_preserve_store_history() {
+    let root = TempDir::new().unwrap();
+    let mut h = host(&root, "device");
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/declarative");
+    let package = Package::from_dir(&fixture).unwrap();
+    let installed = h
+        .packages_mut()
+        .install(&package, &PackageSource::Folder("fixture".into()), None)
+        .unwrap();
+    let dir = h.packages().materialize(&installed).unwrap().unwrap();
+    h.load(&dir).unwrap();
+    let id = h
+        .call("reading-list", "create", &json!({"title":"Preserved"}))
+        .unwrap()["id"]
+        .clone();
+    let before = h
+        .store("reading-list")
+        .unwrap()
+        .export_since(0)
+        .unwrap()
+        .0
+        .changes
+        .len();
+    let limits = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/limits");
+    build_plugin(&limits).unwrap();
+    let upgrade = root.path().join("wasm");
+    std::fs::create_dir_all(upgrade.join("dist")).unwrap();
+    let mut manifest = serde_json::to_value(package.manifest()).unwrap();
+    manifest["kind"] = json!("wasm");
+    manifest["api"] = json!(terrarium_runtime::API_VERSION);
+    manifest["version"] = json!("0.2.0");
+    for op in manifest["operations"].as_object_mut().unwrap().values_mut() {
+        op.as_object_mut().unwrap().remove("do");
+    }
+    manifest["operations"]["ok"] = json!({});
+    std::fs::write(
+        upgrade.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(upgrade.join("ui")).unwrap();
+    std::fs::copy(
+        fixture.join("ui/page-main.json"),
+        upgrade.join("ui/page-main.json"),
+    )
+    .unwrap();
+    std::fs::copy(
+        limits.join("dist/plugin.wasm"),
+        upgrade.join("dist/plugin.wasm"),
+    )
+    .unwrap();
+    h.load(&upgrade).unwrap();
+    h.call("reading-list", "ok", &json!({})).unwrap();
+    let rows = h
+        .query("reading-list", "open", &Default::default())
+        .unwrap();
+    assert_eq!(rows[0]["id"], id);
+    assert_eq!(rows[0]["title"], "Preserved");
+    assert_eq!(
+        h.store("reading-list")
+            .unwrap()
+            .export_since(0)
+            .unwrap()
+            .0
+            .changes
+            .len(),
+        before
+    );
+}

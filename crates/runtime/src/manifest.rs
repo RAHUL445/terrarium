@@ -11,11 +11,48 @@ use crate::error::{Result, RuntimeError};
 /// The WIT world plugins are built against.
 pub const API_VERSION: &str = "terrarium:plugin@0.1.0";
 
+pub const DECLARATIVE_API_VERSION: &str = "terrarium:declarative@0.1.0";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Wasm,
+    Declarative,
+}
+impl Kind {
+    fn is_wasm(&self) -> bool {
+        *self == Self::Wasm
+    }
+}
+
+impl<'de> Deserialize<'de> for Kind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let kind = String::deserialize(d)?;
+        match kind.as_str() {
+            "wasm" => Ok(Self::Wasm),
+            "declarative" => Ok(Self::Declarative),
+            _ => Err(serde::de::Error::custom(
+                "This plugin needs a newer Terrarium host. Update Terrarium on each device. Unsupported plugin kind",
+            )),
+        }
+    }
+}
+
+// Missing is permitted; explicit null is not.
+fn steps<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Vec<crate::declarative::Step>>, D::Error> {
+    Vec::deserialize(d).map(Some)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub oauth: BTreeMap<String, terrarium_net::oauth::OAuthDef>,
+    #[serde(default, skip_serializing_if = "Kind::is_wasm")]
+    pub kind: Kind,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -251,6 +288,13 @@ pub struct RemindersDef {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperationDef {
+    #[serde(
+        default,
+        rename = "do",
+        deserialize_with = "steps",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub steps: Option<Vec<crate::declarative::Step>>,
     #[serde(default)]
     pub description: String,
     /// What running it does to the user's data. Callers outside the app
@@ -289,6 +333,7 @@ pub struct OperationDef {
 impl Default for OperationDef {
     fn default() -> Self {
         OperationDef {
+            steps: None,
             description: String::new(),
             effect: None,
             confirm: None,
@@ -572,6 +617,13 @@ impl Manifest {
                     "; this plugin needs Terrarium 0.1.0 or later with file column support",
                 );
             }
+            if message.contains("Unsupported plugin kind") {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+                    if let Some(api) = value["api"].as_str() {
+                        message.push_str(&format!("; requested api `{api}`"));
+                    }
+                }
+            }
             RuntimeError::Manifest(message)
         })?;
         manifest.validate()?;
@@ -606,9 +658,13 @@ impl Manifest {
         if crate::commands::HOST_NAMESPACES.contains(&self.id.as_str()) {
             return bad(format!("id `{}` is reserved for the host", self.id));
         }
-        if self.api != API_VERSION {
+        let expected = match self.kind {
+            Kind::Wasm => API_VERSION,
+            Kind::Declarative => DECLARATIVE_API_VERSION,
+        };
+        if self.api != expected {
             return bad(format!(
-                "api `{}` is not supported; expected `{API_VERSION}`",
+                "This plugin needs a newer Terrarium host. Update Terrarium on each device. Requested api `{}`; expected `{expected}`",
                 self.api
             ));
         }
@@ -1182,6 +1238,7 @@ impl Manifest {
                 }
             }
         }
+        crate::declarative::validate(self)?;
         Ok(())
     }
 }

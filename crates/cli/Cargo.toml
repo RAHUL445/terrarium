@@ -13,3 +13,6 @@ getrandom = "0.2"
 terrarium-runtime = { path = "../runtime" }
 serde_json.workspace = true
 tiny_http = "0.12"
+
+[dev-dependencies]
+tempfile.workspace = true
