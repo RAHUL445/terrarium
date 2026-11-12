@@ -56,8 +56,10 @@ Plugin implementations live in the separate
 Pages and widgets are **templates shipped as data**. The host renders them,
 themed and responsive, by running the plugin's declared read-only queries.
 Rendering never calls plugin code; only user actions do. No plugin JavaScript
-runs in the shell. See [plugin authoring](plugin-authoring.md) for components
-and bindings.
+runs in the shell. Host-built views also stay declarative: the host turns
+manifest `view` declarations into ordinary `list`, `table`, `board` or
+`calendar` templates before rendering. See
+[plugin authoring](plugin-authoring.md) for components and bindings.
 
 ## Storage
 

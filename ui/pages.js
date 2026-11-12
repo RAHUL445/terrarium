@@ -87,6 +87,7 @@
 
     // Widgets every plugin declares, with templates, for placing and mounting.
     async loadCatalog(plugins) {
+      this.plugins = plugins;
       const entries = await Promise.all(plugins.flatMap((plugin) => plugin.widgets.map(async (widget) => {
         try {
           const template = await this.o.call("view_template", { plugin: plugin.id, kind: "widget", id: widget.id });
@@ -99,7 +100,12 @@
       // The host's own widgets: content comes from their settings.
       try {
         for (const widget of await this.service("page_widgets")) {
-          this.catalog.set(`${BUILT_IN.id}/${widget.id}`, { plugin: BUILT_IN, widget: { id: widget.id, title: widget.title }, template: { page: widget.page }, builtIn: true });
+          this.catalog.set(`${BUILT_IN.id}/${widget.id}`, {
+            plugin: BUILT_IN,
+            widget: { id: widget.id, title: widget.title },
+            template: { page: widget.page, ...(widget.home ? { home: widget.home } : {}) },
+            builtIn: true,
+          });
         }
       } catch (_) { /* an older backend: plugin widgets only */ }
     }
@@ -230,12 +236,24 @@
     // A placement's card: header, body (the mounted widget) and edit handles.
     card(placement) {
       const entry = this.catalog.get(this.key(placement));
-      const name = entry?.widget.title || placement.widget;
+      const cfg = placement.config || {};
+      const found = entry?.builtIn && placement.widget === "view"
+        ? window.TerrariumViews.find(this.plugins, cfg.plugin, cfg.query)
+        : null;
+      const name = found?.view?.title || entry?.widget.title || placement.widget;
       const body = this.el("div", { class: "widget-body" });
       const head = this.el("div", { class: "widget-head" });
       let filterBar = "";
       if (entry?.builtIn) {
+        if (found?.plugin) head.append(this.o.appTile(found.plugin, "xs"));
         head.append(this.el("h2", {}, name));
+        if (placement.widget === "view" && this.follows(entry) && !this.ownFocus(placement) && this.page?.focus) {
+          head.append(this.el("span", {
+            class: "page-focus-mark",
+            title: `Showing items matching the page focus “${this.page.focus}”`,
+            "aria-label": `Filtered by page focus ${this.page.focus}`,
+          }, this.o.icon("target")));
+        }
       } else if (entry) {
         const open = entry.plugin.pages.length
           ? this.el("button", { type: "button", class: "link-button", onclick: () => this.o.openApp(entry.plugin) }, `Open ${entry.plugin.name}`)
@@ -330,7 +348,42 @@
         tick();
         view.timer = setInterval(tick, config.seconds ? 1000 : 10000);
         body.append(time, date);
+      } else if (placement.widget === "view") {
+        return this.viewWidget(body, placement, config);
       }
+      return view;
+    }
+
+    // A plugin's viewable query drawn by the shell: the plugin's own bridge,
+    // rows filtered by this placement's focus and sorted by its settings.
+    viewWidget(body, placement, config) {
+      const inert = { refresh() {}, flush: async () => true, dispose() {} };
+      if (!config.plugin || !config.query) {
+        body.append(this.el("p", { class: "muted" }, "Choose what to show: edit the page and open this widget's settings."));
+        return inert;
+      }
+      const plugin = (this.plugins || []).find((item) => item.id === config.plugin);
+      if (!plugin) {
+        body.append(this.el("p", { class: "muted" }, `Unavailable: ${config.plugin} is not installed in this space. The widget comes back when it is.`));
+        return inert;
+      }
+      const found = window.TerrariumViews.find(this.plugins, config.plugin, config.query);
+      if (!found) {
+        body.append(this.el("p", { class: "muted" }, "Unavailable: this app no longer offers that data."));
+        return inert;
+      }
+      const focus = this.focusOf(placement);
+      const view = this.o.mount(
+        body,
+        window.TerrariumViews.template(found, config, this.grid.sizeClass(placement)),
+        window.TerrariumViews.wrapBridge(this.o.bridge(found.plugin.id), found, config, focus),
+        {
+          snapshot: this.o.session.get(this.sessionKey(placement.id)),
+          page: { focus, title: this.page?.title || "" },
+          size: this.grid.sizeClass(placement),
+        },
+      );
+      view.sessionKey = this.sessionKey(placement.id);
       return view;
     }
 
@@ -359,46 +412,63 @@
       next.querySelector(".page-settings")?.focus({ preventScroll: true });
     }
 
-    // Widget settings, in two groups: Filters (choices from the widget's own
-    // data, a keyword and the page focus) and Display (the rest). A live line
-    // at the top says what the widget will show.
+    // Widget settings, in groups with a live line that says what the widget
+    // will show.
     openSettings(id) {
       if (!this.editing) return;
       const placement = this.draft.find((p) => p.id === id);
       const entry = placement && this.catalog.get(this.key(placement));
       if (!entry) return;
-      const fields = Object.entries(entry.template?.page?.config || {});
       const summary = this.el("p", { class: "page-settings-summary", "aria-live": "polite" });
-      const controls = new Map();
-      const filters = [];
-      const display = [];
-      let focus = null;
-      const read = () => Object.fromEntries([...controls].map(([name, control]) => [name, control.read()]).filter(([, value]) => value !== undefined));
-      const update = () => { summary.textContent = this.describe(entry, read(), focus ? focus.read() : null); };
-      for (const [name, field] of fields) {
-        const control = this.control(name, field, placement.config?.[name] ?? field.default, entry, () => update());
-        controls.set(name, control);
-        (field.type === "choice" && field.filter !== false ? filters : display).push(control.row);
-      }
-      focus = this.follows(entry) ? this.focusControls(placement, () => update()) : null;
-      if (focus) filters.push(...focus.rows);
       const section = (title, rows, extra) => this.el("section", { class: "page-settings-group" },
         this.el("div", { class: "page-settings-group-head" }, this.el("h3", {}, title), extra || ""), ...rows);
-      const reset = filters.length ? this.el("button", {
-        type: "button", class: "link-button", onclick: () => {
-          for (const [, control] of controls) control.clear?.();
-          focus?.clear();
-          update();
-        },
-      }, "Clear filters") : null;
+      let read = () => ({});
+      let focus = null;
+      let update = () => {};
+      let validate = () => true;
+      let groups = [];
+      let initialFocus = "input:not([type=radio]):not([type=checkbox]), select, button.page-choice-chip, input:checked";
+      if (entry.builtIn && placement.widget === "view") {
+        const widget = this.viewSettings(placement, entry, summary, section);
+        read = widget.read;
+        focus = widget.focus;
+        update = widget.update;
+        validate = widget.validate;
+        groups = widget.groups;
+        initialFocus = widget.initialFocus;
+      } else {
+        const fields = Object.entries(entry.template?.page?.config || {});
+        const controls = new Map();
+        const filters = [];
+        const display = [];
+        read = () => Object.fromEntries([...controls].map(([name, control]) => [name, control.read()]).filter(([, value]) => value !== undefined));
+        update = () => { summary.textContent = this.describe(entry, read(), focus ? focus.read() : null); };
+        for (const [name, field] of fields) {
+          const control = this.control(name, field, placement.config?.[name] ?? field.default, entry, () => update());
+          controls.set(name, control);
+          (field.type === "choice" && field.filter !== false ? filters : display).push(control.row);
+        }
+        focus = this.follows(entry) ? this.focusControls(placement, () => update()) : null;
+        if (focus) filters.push(...focus.rows);
+        const reset = filters.length ? this.el("button", {
+          type: "button", class: "link-button", onclick: () => {
+            for (const [, control] of controls) control.clear?.();
+            focus?.clear();
+            update();
+          },
+        }, "Clear filters") : null;
+        groups = [
+          ...(filters.length ? [summary, section("Filters", filters, reset)] : []),
+          ...(display.length ? [section(filters.length ? "Display" : "Options", display)] : []),
+        ];
+      }
       this.$("page-config-title").textContent = `${entry.widget.title} settings`;
-      this.$("page-config-fields").replaceChildren(
-        ...(filters.length ? [summary, section("Filters", filters, reset)] : []),
-        ...(display.length ? [section(filters.length ? "Display" : "Options", display)] : []));
+      this.$("page-config-fields").replaceChildren(...groups);
       update();
       const dialog = this.$("page-config-dialog");
       this.$("page-config-form").onsubmit = (event) => {
         event.preventDefault();
+        if (!validate()) return;
         if (focus) {
           const value = focus.read();
           if (value === undefined) delete placement.focus;
@@ -409,7 +479,232 @@
         this.remount(id);
       };
       dialog.showModal();
-      this.$("page-config-fields").querySelector("input:not([type=radio]):not([type=checkbox]), select, button.page-choice-chip, input:checked")?.focus();
+      this.$("page-config-fields").querySelector(initialFocus)?.focus();
+    }
+
+    viewSettings(placement, entry, summary, section) {
+      const rows = [];
+      const fields = placement.config || {};
+      const apps = window.TerrariumViews.viewsOf(this.plugins || [])
+        .map((view) => view.plugin)
+        .filter((plugin, index, list) => list.findIndex((item) => item.id === plugin.id) === index)
+        .sort((a, b) => a.name.localeCompare(b.name));
+      const viewsFor = (pluginId) => window.TerrariumViews.viewsOf(this.plugins || [])
+        .filter((view) => view.plugin.id === pluginId)
+        .sort((left, right) => left.view.title.localeCompare(right.view.title));
+      const row = (name, label, control, help = "") => this.el("div", { class: "page-config-field" },
+        this.el("span", { class: "page-config-label", id: `pp-cfg-${name}` }, label), control, help || "");
+
+      const app = this.el("select", { "aria-labelledby": "pp-cfg-view-app" },
+        this.el("option", { value: "" }, "Choose an app"),
+        ...apps.map((plugin) => this.el("option", { value: plugin.id, selected: fields.plugin === plugin.id }, plugin.name)));
+      const data = this.el("select", { "aria-labelledby": "pp-cfg-view-data", disabled: true }, this.el("option", { value: "" }, "Choose data"));
+      const dataAlert = this.el("p", { class: "page-config-help", role: "alert", hidden: true }, "Pick the data to show.");
+
+      const layoutId = `pp-cfg-view-layout-${placement.id}`;
+      const layoutOptions = [
+        { value: "list", label: "List" },
+        { value: "table", label: "Table" },
+        { value: "board", label: "Board", help: "Board needs a column with fixed values." },
+        { value: "calendar", label: "Calendar", help: "Calendar needs a date column." },
+      ];
+      const layoutByValue = new Map();
+      const layoutHints = new Map();
+      const layoutRows = layoutOptions.map((option) => {
+        const input = this.el("input", {
+          type: "radio",
+          name: layoutId,
+          value: option.value,
+          checked: (fields.layout || "list") === option.value,
+        });
+        layoutByValue.set(option.value, input);
+        if (option.help) {
+          const id = `pp-cfg-view-${option.value}-hint-${placement.id}`;
+          const hint = this.el("span", { class: "page-config-help", id, hidden: true }, option.help);
+          layoutHints.set(option.value, { hint, id });
+        }
+        return this.el("label", {}, input, this.el("span", {}, option.label));
+      });
+      const layoutGroup = this.el("div", { class: "page-segmented", role: "radiogroup", "aria-labelledby": "pp-cfg-view-layout" }, ...layoutRows);
+
+      const sort = this.el("select", { "aria-labelledby": "pp-cfg-view-sort" }, this.el("option", { value: "" }, "Default order"));
+      const dirId = `pp-cfg-view-dir-${placement.id}`;
+      const dirByValue = new Map();
+      const dirGroup = this.el("div", { class: "page-segmented", role: "radiogroup", "aria-labelledby": "pp-cfg-view-dir" },
+        ...[
+          { value: "asc", label: "Ascending" },
+          { value: "desc", label: "Descending" },
+        ].map((option) => {
+          const input = this.el("input", {
+            type: "radio",
+            name: dirId,
+            value: option.value,
+            checked: (fields.dir || "asc") === option.value,
+          });
+          dirByValue.set(option.value, input);
+          return this.el("label", {}, input, this.el("span", {}, option.label));
+        }));
+      const group = this.el("select", { "aria-labelledby": "pp-cfg-view-group" });
+      const date = this.el("select", { "aria-labelledby": "pp-cfg-view-date" });
+      const groupLabel = this.el("span", { class: "page-config-label", id: "pp-cfg-view-group" }, "Group by");
+      const groupRow = this.el("div", { class: "page-config-field" }, groupLabel, group);
+      const dateRow = row("view-date", "Date", date);
+
+      const focus = this.focusControls(placement, () => update());
+
+      const readRaw = () => ({
+        plugin: app.value,
+        query: data.value,
+        layout: [...layoutByValue.values()].find((input) => input.checked)?.value || "list",
+        sort: sort.value,
+        dir: [...dirByValue.values()].find((input) => input.checked)?.value || "asc",
+        group: group.value,
+        date: date.value,
+      });
+      const clean = (config) => Object.fromEntries(Object.entries(config).filter(([, value]) => value !== ""));
+      const selected = () => window.TerrariumViews.find(this.plugins, app.value, data.value);
+      const layoutLabel = (name) => ({ list: "List", table: "Table", board: "Board", calendar: "Calendar" }[name] || "List");
+
+      const fillData = (reset) => {
+        const options = app.value ? viewsFor(app.value) : [];
+        const keep = reset ? "" : data.value;
+        data.replaceChildren(
+          this.el("option", { value: "" }, "Choose data"),
+          ...options.map((item) => this.el("option", { value: item.query, selected: item.query === keep || (!keep && fields.query === item.query) }, item.view.title)),
+        );
+        data.disabled = !app.value;
+        if (reset) data.value = "";
+      };
+
+      const apply = () => {
+        const found = selected();
+        const config = readRaw();
+        const safe = found ? window.TerrariumViews.settings(found.view, config) : {
+          layout: config.layout || "list",
+          sort: config.sort || "",
+          dir: config.dir || "asc",
+          group: config.group || "",
+          date: config.date || "",
+        };
+        const allowed = found ? window.TerrariumViews.layouts(found.view) : [];
+        for (const [value, input] of layoutByValue) {
+          const available = allowed.includes(value);
+          input.disabled = !available;
+          const hint = layoutHints.get(value);
+          if (hint) {
+            hint.hint.hidden = available;
+            if (!available) input.setAttribute("aria-describedby", hint.id);
+            else input.removeAttribute("aria-describedby");
+          }
+        }
+        const chosenLayout = layoutByValue.get(safe.layout) || layoutByValue.get("list");
+        if (chosenLayout) chosenLayout.checked = true;
+
+        const columns = found?.view?.columns || [];
+        sort.disabled = !found;
+        const sortOptions = [this.el("option", { value: "" }, "Default order"),
+          ...columns.map((column) => this.el("option", { value: column.key }, column.label || column.key))];
+        sort.replaceChildren(...sortOptions);
+        sort.value = safe.sort || "";
+        for (const [value, input] of dirByValue) {
+          input.disabled = !found;
+          input.checked = value === safe.dir;
+        }
+
+        const enumColumns = columns.filter((column) => column.type === "enum");
+        const groupColumns = columns.filter((column) => column.type === "enum" || column.type === "string");
+        const dateColumns = columns.filter((column) => column.type === "date");
+        const board = safe.layout === "board";
+        const list = safe.layout === "list";
+        groupRow.hidden = !found || !(list || board);
+        if (!groupRow.hidden) {
+          groupLabel.textContent = board ? "Columns from" : "Group by";
+          const options = board
+            ? enumColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key))
+            : [this.el("option", { value: "" }, "No grouping"),
+              ...groupColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key))];
+          group.replaceChildren(...options);
+          group.value = safe.group || (board ? enumColumns[0]?.key || "" : "");
+        } else {
+          group.value = "";
+        }
+
+        dateRow.hidden = !found || safe.layout !== "calendar";
+        if (!dateRow.hidden) {
+          date.replaceChildren(...dateColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key)));
+          date.value = safe.date || dateColumns[0]?.key || "";
+        } else {
+          date.value = "";
+        }
+      };
+
+      const update = () => {
+        apply();
+        dataAlert.hidden = true;
+        const found = selected();
+        const parts = this.filterParts(entry, read(), focus.read());
+        if (found) summary.textContent = `${found.view.title} as ${layoutLabel(read().layout)}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
+        else summary.textContent = parts.length ? `Choose data to show · ${parts.join(" · ")}` : "Choose data to show";
+      };
+
+      const resetDisplay = () => {
+        (layoutByValue.get("list") || {}).checked = true;
+        sort.value = "";
+        group.value = "";
+        date.value = "";
+        (dirByValue.get("asc") || {}).checked = true;
+      };
+
+      fillData(false);
+      app.addEventListener("change", () => {
+        fillData(true);
+        resetDisplay();
+        update();
+      });
+      data.addEventListener("change", update);
+      sort.addEventListener("change", update);
+      group.addEventListener("change", update);
+      date.addEventListener("change", update);
+      for (const input of layoutByValue.values()) input.addEventListener("change", update);
+      for (const input of dirByValue.values()) input.addEventListener("change", update);
+
+      rows.push(summary, section("Data", [
+        row("view-app", "App", app),
+        row("view-data", "Data", data),
+        dataAlert,
+      ]));
+      rows.push(section("Display", [
+        row("view-layout", "Show as", this.el("div", {}, layoutGroup, ...[...layoutHints.values()].map((item) => item.hint))),
+        row("view-sort", "Sort by", sort),
+        row("view-dir", "Order", dirGroup),
+        groupRow,
+        dateRow,
+      ]));
+      rows.push(section("Filters", focus.rows));
+
+      const read = () => {
+        const found = selected();
+        const raw = readRaw();
+        const safe = found ? window.TerrariumViews.settings(found.view, raw) : raw;
+        return clean({
+          plugin: raw.plugin,
+          query: raw.query,
+          layout: safe.layout || "list",
+          sort: safe.sort || "",
+          dir: safe.dir || "asc",
+          group: safe.group || "",
+          date: safe.date || "",
+        });
+      };
+
+      const validate = () => {
+        if (data.value) return true;
+        dataAlert.hidden = false;
+        data.focus();
+        return false;
+      };
+
+      return { read, focus, update, validate, groups: rows, initialFocus: "select" };
     }
 
     // Options a widget lists for a choice: rows of its own named query.

@@ -30,9 +30,10 @@ pub use host::Execution;
 pub use index::{IndexProgress, INDEX_CHUNK};
 pub use links::{LinkInfo, Links, LINKS_STORE_ID, LINK_KINDS};
 pub use manifest::{
-    Effect, IndexDef, InterfaceDef, JobDef, Limits, Manifest, OpenDef, OperationDef, ParamSpec,
-    ParamType, QueryDef, QuickAction, RefDef, RemindersDef, RunOn, Schedule, ViewDef, API_VERSION,
-    CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES, PERMISSIONS,
+    Effect, IndexDef, InterfaceDef, JobDef, Limits, Manifest, MoveDef, OpenDef, OperationDef,
+    ParamSpec, ParamType, QueryDef, QueryView, QuickAction, RefDef, RemindersDef, RunOn,
+    Schedule, ViewColumn, ViewDef, API_VERSION, CONTEXT_PARAMS, ICONS, MAX_INDEX_ENTRIES,
+    PERMISSIONS,
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,

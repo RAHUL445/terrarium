@@ -49,6 +49,7 @@ struct PluginInfo {
     /// Query names the shell runs for the nav badge and for search.
     badge: Option<String>,
     search: Option<String>,
+    views: BTreeMap<String, terrarium_runtime::QueryView>,
     quick_actions: Vec<terrarium_runtime::QuickAction>,
 }
 
@@ -89,6 +90,11 @@ impl From<&Manifest> for PluginInfo {
             color: m.color.clone(),
             badge: m.badge.clone(),
             search: m.search.clone(),
+            views: m
+                .queries
+                .iter()
+                .filter_map(|(name, query)| query.view.clone().map(|view| (name.clone(), view)))
+                .collect(),
             quick_actions: m.quick_actions.clone(),
         }
     }

@@ -280,6 +280,13 @@ fn plugin_info(m: &Manifest) -> Value {
             .map(|v| json!({ "id": v.id, "title": v.title }))
             .collect::<Vec<_>>()
     };
+    let views_of = |manifest: &Manifest| {
+        manifest
+            .queries
+            .iter()
+            .filter_map(|(name, query)| query.view.clone().map(|view| (name.clone(), view)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
     let mut info = Map::new();
     for (k, v) in [
         ("id", json!(m.id)),
@@ -296,6 +303,7 @@ fn plugin_info(m: &Manifest) -> Value {
         ("color", json!(m.color)),
         ("badge", json!(m.badge)),
         ("search", json!(m.search)),
+        ("views", json!(views_of(m))),
         ("quick_actions", json!(m.quick_actions)),
     ] {
         info.insert(k.into(), v);

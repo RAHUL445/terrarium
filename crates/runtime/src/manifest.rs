@@ -1,6 +1,6 @@
 //! `manifest.json`: what a plugin declares to the host.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
@@ -318,6 +318,58 @@ pub struct QueryDef {
     /// `false` keeps the query away from callers outside the app.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub cli: bool,
+    /// Lets people show this query in a View widget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<QueryView>,
+}
+
+/// How the host may show a query's rows in a user-built view.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryView {
+    /// Shown when people pick data for a view, e.g. "Tasks".
+    pub title: String,
+    /// The column used as each row's title. Defaults to `title`.
+    #[serde(default = "default_title_column")]
+    pub title_column: String,
+    /// Fixed values for the query's own parameters (not context ones).
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// Columns the query returns that a view may show, in display order.
+    /// The host cannot check SQL output names statically; queries should
+    /// return each declared `key` and `id`.
+    pub columns: Vec<ViewColumn>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewColumn {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub ty: ParamType,
+    /// Allowed values of an `enum` column, in lane order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// Labels for `values`, same length.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// Operation that moves a row to another value of this enum column
+    /// (board drag and drop). `args` may bind `{{row.*}}` and `{{value}}`.
+    #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
+    pub move_op: Option<MoveDef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveDef {
+    pub op: String,
+    #[serde(default)]
+    pub args: serde_json::Map<String, serde_json::Value>,
+}
+
+fn default_title_column() -> String {
+    "title".into()
 }
 
 /// Where an item found by search, or named by id, opens in the UI.
@@ -627,6 +679,112 @@ impl Manifest {
                 spec.validate(&format!("query `{name}`, `{param}`"))
                     .map_err(RuntimeError::Manifest)?;
             }
+            if let Some(view) = &query.view {
+                let title_len = view.title.trim().chars().count();
+                if !(1..=40).contains(&title_len) {
+                    return bad(format!(
+                        "query `{name}`: view title must be 1-40 characters"
+                    ));
+                }
+                if !(1..=20).contains(&view.columns.len()) {
+                    return bad(format!("query `{name}`: a view needs 1-20 columns"));
+                }
+                let mut seen = BTreeSet::new();
+                for column in &view.columns {
+                    let key_len = column.key.chars().count();
+                    let key_ok = (1..=64).contains(&key_len)
+                        && column
+                            .key
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if !key_ok {
+                        return bad(format!(
+                            "query `{name}`: view column `{}` is not a valid name",
+                            column.key
+                        ));
+                    }
+                    if !seen.insert(column.key.clone()) {
+                        return bad(format!(
+                            "query `{name}`: view column `{}` repeats",
+                            column.key
+                        ));
+                    }
+                    let label_len = column.label.trim().chars().count();
+                    if !(1..=40).contains(&label_len) {
+                        return bad(format!(
+                            "query `{name}`: view column `{}` needs a label of 1-40 characters",
+                            column.key
+                        ));
+                    }
+                    if column.ty == ParamType::Enum {
+                        let values_ok = (1..=12).contains(&column.values.len())
+                            && column.values.iter().all(|v| !v.is_empty());
+                        if !values_ok {
+                            return bad(format!(
+                                "query `{name}`: view column `{}`: an enum needs 1-12 values",
+                                column.key
+                            ));
+                        }
+                    } else if !column.values.is_empty() {
+                        return bad(format!(
+                            "query `{name}`: view column `{}`: only an enum takes values",
+                            column.key
+                        ));
+                    }
+                    if !column.labels.is_empty() && column.labels.len() != column.values.len() {
+                        return bad(format!(
+                            "query `{name}`: view column `{}`: labels must match values",
+                            column.key
+                        ));
+                    }
+                    if let Some(move_op) = &column.move_op {
+                        if column.ty != ParamType::Enum {
+                            return bad(format!(
+                                "query `{name}`: view column `{}`: only an enum column can have move",
+                                column.key
+                            ));
+                        }
+                        let Some(op) = self.operations.get(&move_op.op) else {
+                            return bad(format!(
+                                "query `{name}`: view column `{}`: move `{}` is not a declared operation",
+                                column.key, move_op.op
+                            ));
+                        };
+                        if op.effect_of(&move_op.op) == Effect::Destructive {
+                            return bad(format!(
+                                "query `{name}`: view column `{}`: move `{}` must not be destructive",
+                                column.key, move_op.op
+                            ));
+                        }
+                    }
+                }
+                let title_column_ok = view.columns.iter().any(|column| {
+                    column.key == view.title_column
+                        && (column.ty == ParamType::String || column.ty == ParamType::Text)
+                });
+                if !title_column_ok {
+                    return bad(format!(
+                        "query `{name}`: view title_column `{}` must be a string column",
+                        view.title_column
+                    ));
+                }
+                for (param, value) in &view.params {
+                    if !query.params.contains(param) || CONTEXT_PARAMS.contains(&param.as_str()) {
+                        return bad(format!(
+                            "query `{name}`: view param `{param}` is not a parameter of the query"
+                        ));
+                    }
+                    let plain = value.is_null()
+                        || value.is_boolean()
+                        || value.is_number()
+                        || value.is_string();
+                    if !plain {
+                        return bad(format!(
+                            "query `{name}`: view param `{param}` must be a plain value"
+                        ));
+                    }
+                }
+            }
         }
         if let Some(open) = &self.open {
             if !self.pages.iter().any(|p| p.id == open.page) {
@@ -821,5 +979,259 @@ mod tests {
         let mut v = base();
         v["refs"] = json!(vec![ref_entry(); 9]);
         assert!(error(&v).contains("refs: at most 8 entries"));
+    }
+
+    fn fixture() -> Value {
+        serde_json::from_slice(include_bytes!("../tests/fixtures/limits/manifest.json")).unwrap()
+    }
+
+    fn with_view(mut view: Value) -> Value {
+        let mut manifest = fixture();
+        manifest["queries"]["all"]["view"] = view.take();
+        manifest
+    }
+
+    fn valid_view() -> Value {
+        json!({
+            "title": "Notes",
+            "title_column": "note",
+            "columns": [
+                { "key": "note", "label": "Note", "type": "string" },
+                {
+                    "key": "state",
+                    "label": "State",
+                    "type": "enum",
+                    "values": ["a", "b"],
+                    "labels": ["A", "B"],
+                    "move": { "op": "ok", "args": { "id": "{{row.id}}", "to": "{{value}}" } }
+                }
+            ]
+        })
+    }
+
+    fn check(edit: impl FnOnce(&mut Value)) -> Option<String> {
+        let mut manifest = fixture();
+        edit(&mut manifest);
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        match Manifest::parse(&bytes) {
+            Ok(_) => None,
+            Err(RuntimeError::Manifest(message)) => Some(message),
+            Err(e) => Some(e.to_string()),
+        }
+    }
+
+    fn expect_error(edit: impl FnOnce(&mut Value), needle: &str) {
+        let error = check(edit).expect("expected manifest error");
+        assert!(error.contains(needle), "expected `{needle}` in `{error}`");
+    }
+
+    #[test]
+    fn an_old_manifest_without_views_still_loads() {
+        assert!(Manifest::parse(include_bytes!("../tests/fixtures/limits/manifest.json")).is_ok());
+    }
+
+    #[test]
+    fn a_valid_view_loads_and_round_trips() {
+        let manifest =
+            Manifest::parse(&serde_json::to_vec(&with_view(valid_view())).unwrap()).unwrap();
+        assert!(manifest.queries["all"].view.is_some());
+        let view = serde_json::to_value(&manifest.queries["all"].view).unwrap();
+        assert_eq!(view["title_column"], "note");
+        assert!(view["columns"][1].get("move").is_some());
+        assert!(view["columns"][1].get("move_op").is_none());
+    }
+
+    #[test]
+    fn view_title_column_defaults_to_title() {
+        let view: QueryView = serde_json::from_value(json!({
+            "title": "Notes",
+            "columns": [{ "key": "title", "label": "Title", "type": "string" }]
+        }))
+        .unwrap();
+        assert_eq!(view.title_column, "title");
+    }
+
+    #[test]
+    fn bad_views_are_rejected() {
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "",
+                    "title_column": "note",
+                    "columns": [{ "key": "note", "label": "Note", "type": "string" }]
+                });
+            },
+            "view title must be 1-40 characters",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": []
+                });
+            },
+            "a view needs 1-20 columns",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [{ "key": "bad-key", "label": "Note", "type": "string" }]
+                });
+            },
+            "view column `bad-key` is not a valid name",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [
+                        { "key": "note", "label": "Note", "type": "string" },
+                        { "key": "note", "label": "Second", "type": "string" }
+                    ]
+                });
+            },
+            "view column `note` repeats",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [{ "key": "note", "label": "", "type": "string" }]
+                });
+            },
+            "view column `note` needs a label of 1-40 characters",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{ "key": "state", "label": "State", "type": "enum", "values": [] }]
+                });
+            },
+            "view column `state`: an enum needs 1-12 values",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [{ "key": "note", "label": "Note", "type": "string", "values": ["x"] }]
+                });
+            },
+            "view column `note`: only an enum takes values",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{
+                        "key": "state",
+                        "label": "State",
+                        "type": "enum",
+                        "values": ["a", "b"],
+                        "labels": ["A"]
+                    }]
+                });
+            },
+            "view column `state`: labels must match values",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [{
+                        "key": "note",
+                        "label": "Note",
+                        "type": "string",
+                        "move": { "op": "ok" }
+                    }]
+                });
+            },
+            "view column `note`: only an enum column can have move",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{
+                        "key": "state",
+                        "label": "State",
+                        "type": "enum",
+                        "values": ["a"],
+                        "move": { "op": "nope" }
+                    }]
+                });
+            },
+            "view column `state`: move `nope` is not a declared operation",
+        );
+        expect_error(
+            |manifest| {
+                manifest["operations"]["delete_move"] = json!({});
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{
+                        "key": "state",
+                        "label": "State",
+                        "type": "enum",
+                        "values": ["a"],
+                        "move": { "op": "delete_move" }
+                    }]
+                });
+            },
+            "view column `state`: move `delete_move` must not be destructive",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{ "key": "state", "label": "State", "type": "enum", "values": ["a"] }]
+                });
+            },
+            "view title_column `state` must be a string column",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "params": { "today": "2026-01-01" },
+                    "columns": [{ "key": "note", "label": "Note", "type": "string" }]
+                });
+            },
+            "view param `today` is not a parameter of the query",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["params"] = json!(["x"]);
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "params": { "x": [1] },
+                    "columns": [{ "key": "note", "label": "Note", "type": "string" }]
+                });
+            },
+            "view param `x` must be a plain value",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
+                    "title_column": "note",
+                    "columns": [{ "key": "note", "label": "Note", "type": "string", "extra": true }]
+                });
+            },
+            "unknown field `extra`",
+        );
     }
 }

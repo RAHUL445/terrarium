@@ -9,7 +9,7 @@ function rendererHarness(environment = {}) {
   class Node {
     constructor(tag) {
       allocations++;
-      this.tag = tag; this.children = []; this.dataset = {}; this.style = {};
+      this.tag = tag; this.children = []; this.dataset = {}; this.style = { setProperty(name, value) { this[name] = value; } };
       this.attrs = {}; this.listeners = {}; this.value = '';
       this.isConnected = true; this.open = false;
       this.classList = { add() {}, remove() {}, toggle() {} };
@@ -51,10 +51,11 @@ function rendererHarness(environment = {}) {
     contains(node) { return this === node || this.children.some(child => typeof child !== 'string' && child.contains(node)); }
     querySelectorAll(selector) {
       const nodes = this.children.filter(node => typeof node !== 'string').flatMap(node => [node, ...node.querySelectorAll(selector)]);
+      if (selector.includes('.pp-recorder')) return nodes.filter(node => node.className?.includes('pp-recorder') && ['recording', 'saving'].includes(node.dataset.state));
+      if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return nodes.filter(node => String(node.className || '').split(/\s+/).includes(selector.slice(1)));
       if (selector === '[data-pp-name]') return nodes.filter(node => node.dataset.ppName);
       if (selector === 'form[data-pp-draft]') return nodes.filter(node => node.tag === 'form' && node.attrs['data-pp-draft']);
       if (selector === 'form') return nodes.filter(node => node.tag === 'form');
-      if (selector.includes('.pp-recorder')) return nodes.filter(node => node.className?.includes('pp-recorder') && ['recording', 'saving'].includes(node.dataset.state));
       return [];
     }
     querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }

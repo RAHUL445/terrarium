@@ -45,7 +45,7 @@ A template is `{ "state": {...}, "body": node }`. Example node:
 
 Templates are data: lists run declared queries through the host, so rendering never calls plugin code; only actions do. All text is set through `textContent` and `setAttribute`.
 
-Core components: `stack`, `card`, `section`, `heading`, `text`, `badge`, `stat`, `divider`, `empty`, `button`, `checkbox`, `tabs`, `search-field`, `form`, `text-field`, `text-area`, `date`, `list`. Any component accepts `if`, `grow` and `basis`.
+Core components: `stack`, `card`, `section`, `heading`, `text`, `badge`, `stat`, `divider`, `empty`, `button`, `checkbox`, `tabs`, `search-field`, `form`, `text-field`, `text-area`, `date`, `list`, `table`, `calendar`. Any component accepts `if`, `grow` and `basis`.
 
 Bindings are `{{state.*}}`, `{{row.*}}`, `{{form.*}}`, `{{value}}` and `{{$today}}`. A whole-string binding keeps its raw type, e.g. `true` for `done`.
 
@@ -70,6 +70,9 @@ More components and keys:
 | `bar.layout: "columns"` | Vertical columns instead of horizontal bars (e.g. tasks per day). `bar` also takes `value_label` (a column shown instead of the number), `title` (a column used as tooltip and spoken label) and `empty` |
 | `list.layout: "plain"` | No box or row dividers, e.g. one featured card or lines of text |
 | `list.layout: "board"` / `"matrix"` | Groups one query result into three columns / two columns. Supply `column` (row key), `columns: [{value, label, description?}]` and an accessible `label`. Every row must match a declared column value. Empty columns retain their headings and counts; both layouts stack on narrow screens. Filtering, limits, actions and refresh use the normal list contract. |
+| `list.move` (board/matrix) | `{op, args, success, undo}`. Dragging a card (mouse, touch or pen) or using arrow keys on the card handle runs the operation; `{{value}}` is the lane value the card moved to. If the operation fails, the card snaps back. |
+| `table` | `{query, params, label, columns: [{key, label, type}], sort, dir, empty, action}`. Header clicks sort by column. On phones, rows become label/value cards. With `action`, pressing the first cell runs it with `row` in scope. |
+| `calendar` | `{query, params, date, title, label, empty, action}`. Shows a Monday-first month grid by date column, with a day list below. Params may use `{{$month_start}}` and `{{$month_end}}` to request only rows for that month. |
 | Lists in list items | A `list` or `bar` inside a list item loads with it; its `params` can use `{{row.*}}` from the item (or the sheet) |
 | `sheet.refresh` | Redraws the sheet when its row changes (say after a Refresh button inside), unless a field in it has focus |
 | `json_each` | Queries may unpack JSON stored in a text column: `SELECT json_extract(j.value, '$.day') AS day FROM t, json_each(t.daily) j WHERE t.id = ?1` |
@@ -346,6 +349,88 @@ Outside callers can't pass arguments you didn't declare, and their types and req
 
 The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup`, `ui`, `ref` and `link` are reserved for host commands.
 
+## Viewable queries
+
+To make a query available in the built-in View widget, add a `view` declaration on that query:
+
+```json
+"view": {
+  "title": "Tasks",
+  "title_column": "title",
+  "params": {
+    "filter": "everything",
+    "q": "",
+    "tags": ""
+  },
+  "columns": [
+    {
+      "key": "title",
+      "label": "Task",
+      "type": "string"
+    },
+    {
+      "key": "due",
+      "label": "Due",
+      "type": "date"
+    },
+    {
+      "key": "board_lane",
+      "label": "Status",
+      "type": "enum",
+      "values": ["todo", "doing", "done"],
+      "labels": ["To do", "In progress", "Done"],
+      "move": {
+        "op": "move",
+        "args": {
+          "id": "{{row.id}}",
+          "lane": "{{value}}"
+        }
+      }
+    },
+    {
+      "key": "matrix_lane",
+      "label": "Quadrant",
+      "type": "enum",
+      "values": ["do", "schedule", "delegate", "eliminate"],
+      "labels": ["Do first", "Schedule", "Delegate", "Eliminate"],
+      "move": {
+        "op": "move",
+        "args": {
+          "id": "{{row.id}}",
+          "lane": "{{value}}"
+        }
+      }
+    },
+    {
+      "key": "priority",
+      "label": "Priority",
+      "type": "integer"
+    },
+    {
+      "key": "tags",
+      "label": "Tags",
+      "type": "string"
+    }
+  ]
+}
+```
+
+Field rules:
+
+- `title`: 1–40 characters.
+- `columns`: 1–20 entries in display order.
+- `columns[*].key`: 1–64 characters, only `A-Z`, `a-z`, `0-9`, `_`, unique per view.
+- `columns[*].type`: one of `string`, `text`, `integer`, `number`, `boolean`, `date`, `time`, `id`, `enum`, `json`.
+- Enum columns require `values` (1–12 entries); `labels` is optional but if present must match `values` length.
+- `move` is allowed only on enum columns, must point to a declared operation, and that operation must not be destructive.
+- `title_column` must name a declared string/text column.
+- `params` sets fixed values for the query's own declared params only; context params (`today`, `weekday`, `now_ms`, `utc_offset_ms`, `tz`) are host-filled and must not be listed here.
+
+Query result requirements:
+
+- The query must return `id`.
+- The query must return every key declared in `columns`.
+
 ## Home and search entry
 
 Widget templates may set `home: {order: 10, collapsed: true}`. Lower order appears first (default 100); collapsed history stays available through a native disclosure. Existing templates retain their normal behavior.
@@ -394,3 +479,5 @@ A widget template may declare how it fits on a page:
 - `{{$size}}` is `compact` (≤ 3 columns or ≤ 2 rows), `regular` or `expanded` (≥ 8 columns), for templates that show less or more.
 
 Settings are data for bindings only: they reach your own queries and operations, never another plugin's. Keep widget IDs and setting names stable between releases; removed plugins keep their placements (shown as Unavailable) until they return.
+
+The built-in View widget lets people choose an app, one viewable query from that app, and a layout (`list`, `table`, `board`, or `calendar`). They can also configure sort order, grouping ("Columns from" for board) and date columns, and filtering can follow the page focus. The widget only reads through the query declared in that app's manifest; it never reaches another plugin's data.

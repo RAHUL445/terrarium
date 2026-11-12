@@ -138,6 +138,19 @@ fn clean_id(kind: &str, id: &str) -> Result<()> {
     }
 }
 
+fn valid_manifest_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn valid_view_setting_id(id: &str) -> bool {
+    id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn random_id(prefix: char) -> Result<String> {
     let mut bytes = [0u8; 8];
     getrandom::getrandom(&mut bytes).map_err(|e| bad(format!("no randomness: {e}")))?;
@@ -204,6 +217,31 @@ pub fn host_widgets() -> Value {
                 "seconds": { "type": "boolean", "label": "Show seconds", "default": false },
                 "date": { "type": "boolean", "label": "Show the date", "default": true }
             }
+        }},
+        { "id": "view", "title": "View", "home": { "hidden": true }, "page": {
+            "size": { "default": [6, 4], "min": [3, 3], "max": [12, 10] },
+            "focus": true,
+            "config": {
+                "plugin": { "type": "text", "label": "App", "max_length": 63, "default": "" },
+                "query": { "type": "text", "label": "Data", "max_length": 64, "default": "" },
+                "layout": {
+                    "type": "enum",
+                    "label": "Show as",
+                    "values": ["list", "table", "board", "calendar"],
+                    "labels": ["List", "Table", "Board", "Calendar"],
+                    "default": "list"
+                },
+                "sort": { "type": "text", "label": "Sort by", "max_length": 64, "default": "" },
+                "dir": {
+                    "type": "enum",
+                    "label": "Order",
+                    "values": ["asc", "desc"],
+                    "labels": ["Ascending", "Descending"],
+                    "default": "asc"
+                },
+                "group": { "type": "text", "label": "Group by", "max_length": 64, "default": "" },
+                "date": { "type": "text", "label": "Date", "max_length": 64, "default": "" }
+            }
         }}
     ])
 }
@@ -224,6 +262,23 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
             .is_some_and(|u| u.starts_with("https://") || u.starts_with("http://"));
         if !web {
             out.remove("url");
+        }
+    } else if widget == "view" {
+        let plugin_ok = out
+            .get("plugin")
+            .and_then(Value::as_str)
+            .is_some_and(valid_manifest_id);
+        if !plugin_ok {
+            out.remove("plugin");
+        }
+        for key in ["query", "sort", "group", "date"] {
+            let ok = out
+                .get(key)
+                .and_then(Value::as_str)
+                .is_some_and(valid_view_setting_id);
+            if !ok {
+                out.remove(key);
+            }
         }
     }
     Ok(out)
@@ -595,6 +650,50 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(clean_host_config("iframe", &Map::new()).is_err());
+    }
+
+    #[test]
+    fn view_widget_keeps_only_safe_settings() {
+        let config = json!({
+            "plugin": "todo",
+            "query": "tasks",
+            "layout": "board",
+            "sort": "due",
+            "dir": "desc",
+            "group": "board_lane",
+            "date": "due",
+            "extra": 1
+        });
+        assert_eq!(
+            Value::Object(clean_host_config("view", config.as_object().unwrap()).unwrap()),
+            json!({
+                "plugin": "todo",
+                "query": "tasks",
+                "layout": "board",
+                "sort": "due",
+                "dir": "desc",
+                "group": "board_lane",
+                "date": "due"
+            })
+        );
+        let unsafe_settings = json!({
+            "plugin": "../x",
+            "query": "t; drop",
+            "sort": "a b",
+            "layout": "grid"
+        });
+        assert_eq!(
+            clean_host_config("view", unsafe_settings.as_object().unwrap()).unwrap(),
+            Map::new()
+        );
+    }
+
+    #[test]
+    fn host_widgets_list_the_view_widget_hidden_from_home() {
+        let all = host_widgets().as_array().cloned().unwrap_or_default();
+        let view = all.iter().find(|widget| widget["id"] == "view").unwrap();
+        assert_eq!(view["home"]["hidden"], json!(true));
+        assert_eq!(view["page"]["focus"], json!(true));
     }
 
     #[test]

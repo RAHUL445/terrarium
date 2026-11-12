@@ -115,7 +115,10 @@ fn built_in_widgets_are_listed_and_checked() {
         .iter()
         .map(|w| w["id"].clone())
         .collect();
-    assert_eq!(ids, [json!("text"), json!("link"), json!("clock")]);
+    assert_eq!(
+        ids,
+        [json!("text"), json!("link"), json!("clock"), json!("view")]
+    );
     let page = call(
         &mut host,
         "page_create",

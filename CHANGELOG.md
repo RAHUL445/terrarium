@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Built-in View widgets on pages, with settings for app, data, layout, sort,
+  grouping/date columns, and page-focus-aware filtering.
+- New `table` and `calendar` template components for declared query data.
+- Board and matrix card drag-and-drop (plus keyboard move) through declared
+  move operations.
+
 ## [0.1.0-alpha.1] - 2026-11-10
 
 ### Added

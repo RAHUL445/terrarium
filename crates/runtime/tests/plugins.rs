@@ -295,6 +295,53 @@ fn bookmarks_quick_save_projects_tags_and_pins() {
 }
 
 #[test]
+fn viewable_queries_return_their_declared_columns() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.call("todo", "create", &json!({"title": "View check"}))
+        .unwrap();
+    host.call("notes", "create", &json!({"body": "View check"}))
+        .unwrap();
+    host.call(
+        "bookmarks",
+        "create",
+        &json!({"url": "https://example.com"}),
+    )
+    .unwrap();
+
+    for plugin in ["todo", "notes", "bookmarks"] {
+        let manifest = host
+            .manifests()
+            .find(|m| m.id == plugin)
+            .unwrap_or_else(|| panic!("missing manifest for {plugin}"));
+        for (query, def) in &manifest.queries {
+            let Some(view) = &def.view else {
+                continue;
+            };
+            let rows = host
+                .query(plugin, query, &view.params)
+                .unwrap_or_else(|e| panic!("{plugin}.{query}: {e}"));
+            assert!(
+                !rows.is_empty(),
+                "{plugin}.{query} should return at least one row for its view"
+            );
+            let row = &rows[0];
+            assert!(
+                row.contains_key("id"),
+                "{plugin}.{query} view rows must include id"
+            );
+            for column in &view.columns {
+                assert!(
+                    row.contains_key(&column.key),
+                    "{plugin}.{query} view column `{}` missing from query row",
+                    column.key
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn habits_check_in_plan_reminders_and_summarize() {
     let data = TempDir::new().unwrap();
     let mut host = host(&data);

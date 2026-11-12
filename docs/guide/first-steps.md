@@ -13,6 +13,13 @@ the sidebar with **New page**.
 To change a page, choose **Edit page**:
 
 - **Add widget** picks a widget from any app, or a note, link or clock.
+- Add a View widget with **Add widget → Built in → View**, then open its
+  **Settings** to pick the app and data, and choose **Show as** List, Table,
+  Board or Calendar.
+- Boards let you drag cards between columns (or use the card handle with
+  arrow keys) to update status quickly.
+- View widgets can filter with a **Keyword** or follow the page's focus with
+  **Follow page focus**.
 - Drag a widget by its header to move it and by its corner to resize it. With
   the keyboard, arrows move a focused widget and Shift+arrows resize it.
 - **Duplicate** or **Delete page** from the same toolbar; **Done** saves.

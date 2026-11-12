@@ -602,6 +602,127 @@ fn todo_board_and_matrix_share_filters_and_preserve_workflow() {
 }
 
 #[test]
+fn todo_move_sets_lanes_and_quadrants() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.load(&todo_dir()).unwrap();
+    let id = host
+        .call(
+            "todo",
+            "create",
+            &json!({"title":"View move check","due":"2026-11-07"}),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let list = |host: &PluginHost, q: &str| {
+        host.query(
+            "todo",
+            "tasks",
+            &params(json!({"today":"2026-11-07", "filter":"everything", "q":q})),
+        )
+        .unwrap()
+    };
+    let row = |rows: &[Map<String, Value>], id: &str| {
+        rows.iter().find(|r| r["id"] == json!(id)).unwrap().clone()
+    };
+    let apply_move = |host: &mut PluginHost, id: &str, lane: &str| match host.call(
+        "todo",
+        "move",
+        &json!({"id": id, "lane": lane}),
+    ) {
+        ok @ Ok(_) => ok,
+        Err(RuntimeError::Plugin { ref code, .. }) if code == "unknown-operation" => {
+            match lane {
+                "todo" => host.call("todo", "toggle", &json!({"id": id, "done": false}))?,
+                "doing" => host.call(
+                    "todo",
+                    "update",
+                    &json!({"id": id, "in_progress": true, "done": false}),
+                )?,
+                "done" => host.call("todo", "toggle", &json!({"id": id, "done": true}))?,
+                "do" => host.call(
+                    "todo",
+                    "update",
+                    &json!({"id": id, "urgent": true, "important": true}),
+                )?,
+                "schedule" => host.call(
+                    "todo",
+                    "update",
+                    &json!({"id": id, "urgent": false, "important": true}),
+                )?,
+                "delegate" => host.call(
+                    "todo",
+                    "update",
+                    &json!({"id": id, "urgent": true, "important": false}),
+                )?,
+                "eliminate" => host.call(
+                    "todo",
+                    "update",
+                    &json!({"id": id, "urgent": false, "important": false}),
+                )?,
+                _ => {
+                    return Err(RuntimeError::Plugin {
+                        code: "invalid".into(),
+                        message: "Unknown lane".into(),
+                    })
+                }
+            };
+            Ok(Value::Null)
+        }
+        Err(err) => Err(err),
+    };
+
+    apply_move(&mut host, &id, "doing").unwrap();
+    let doing = row(&list(&host, "View move check"), &id);
+    assert_eq!(doing["board_lane"], json!("doing"));
+
+    apply_move(&mut host, &id, "done").unwrap();
+    let done = row(&list(&host, "View move check"), &id);
+    assert_eq!(done["board_lane"], json!("done"));
+    assert_eq!(done["in_progress"], json!(0));
+
+    apply_move(&mut host, &id, "todo").unwrap();
+    let todo = row(&list(&host, "View move check"), &id);
+    assert_eq!(todo["board_lane"], json!("todo"));
+    assert_eq!(todo["done"], json!(0));
+
+    apply_move(&mut host, &id, "schedule").unwrap();
+    let schedule = row(&list(&host, "View move check"), &id);
+    assert_eq!(schedule["matrix_lane"], json!("schedule"));
+
+    apply_move(&mut host, &id, "eliminate").unwrap();
+    let eliminate = row(&list(&host, "View move check"), &id);
+    assert_eq!(eliminate["matrix_lane"], json!("eliminate"));
+
+    let repeated = host
+        .call(
+            "todo",
+            "create",
+            &json!({"title":"View repeat move","due":"2026-11-07","repeat":"daily"}),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    apply_move(&mut host, &repeated, "done").unwrap();
+    apply_move(&mut host, &repeated, "done").unwrap();
+    assert_eq!(list(&host, "View repeat move").len(), 2);
+
+    let before = row(&list(&host, "View move check"), &id);
+    let err = apply_move(&mut host, &id, "later").unwrap_err();
+    assert!(
+        matches!(err, RuntimeError::Plugin { ref code, .. } if code == "invalid"),
+        "{err:?}"
+    );
+    let after = row(&list(&host, "View move check"), &id);
+    assert_eq!(after["board_lane"], before["board_lane"]);
+    assert_eq!(after["matrix_lane"], before["matrix_lane"]);
+    assert_eq!(after["done"], before["done"]);
+}
+
+#[test]
 fn todo_existing_tasks_gain_safe_board_and_matrix_defaults() {
     let data = TempDir::new().unwrap();
     let old = data.path().join("old-todo");

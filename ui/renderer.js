@@ -71,6 +71,74 @@
     return !(v == null || v === false || v === 0 || v === "" || (Array.isArray(v) && v.length === 0));
   }
 
+  // Orders two cell values of a column type. Empty values (null, "") sort
+  // last in both directions.
+  function compareValues(a, b, type) {
+    const kind = String(type || "string");
+    const numberLike = kind === "integer" || kind === "number";
+    const av = numberLike ? Number(a) : a;
+    const bv = numberLike ? Number(b) : b;
+    const aEmpty = a == null || a === "" || (numberLike && Number.isNaN(av));
+    const bEmpty = b == null || b === "" || (numberLike && Number.isNaN(bv));
+    if (aEmpty || bEmpty) return aEmpty === bEmpty ? 0 : (aEmpty ? 1 : -1);
+    if (numberLike) return av - bv;
+    if (kind === "boolean") return Number(truthy(av)) - Number(truthy(bv));
+    return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: "base" });
+  }
+
+  function sortRows(rows, key, type, dir) {
+    const order = dir === "desc" ? "desc" : "asc";
+    const isEmpty = (value) => {
+      if (value == null || value === "") return true;
+      if (type === "integer" || type === "number") return Number.isNaN(Number(value));
+      return false;
+    };
+    return rows.map((row, index) => ({ row, index })).sort((left, right) => {
+      const leftEmpty = isEmpty(left.row?.[key]);
+      const rightEmpty = isEmpty(right.row?.[key]);
+      if (leftEmpty || rightEmpty) return leftEmpty === rightEmpty ? left.index - right.index : (leftEmpty ? 1 : -1);
+      const cmp = compareValues(left.row?.[key], right.row?.[key], type);
+      if (cmp === 0) return left.index - right.index;
+      if (order === "asc") return cmp;
+      return -cmp;
+    }).map((entry) => entry.row);
+  }
+
+  function pad2(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function formatDay(date) {
+    return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+  }
+
+  function parseMonth(value) {
+    const match = String(value ?? "").match(/^(\d{4})-(\d{2})$/);
+    if (!match) return null;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) return null;
+    return { year, month, key: `${match[1]}-${match[2]}` };
+  }
+
+  function monthGrid(year, month) {
+    const startOfMonth = new Date(`${year}-${pad2(month)}-01T12:00:00`);
+    const gridStart = new Date(startOfMonth);
+    gridStart.setDate(startOfMonth.getDate() - ((startOfMonth.getDay() + 6) % 7));
+    const days = [];
+    for (let i = 0; i < 42; i++) {
+      const date = new Date(gridStart);
+      date.setDate(gridStart.getDate() + i);
+      days.push({ day: formatDay(date), inMonth: date.getFullYear() === year && date.getMonth() + 1 === month });
+    }
+    return days;
+  }
+
+  function dayKey(value) {
+    const text = String(value ?? "");
+    return /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : null;
+  }
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -1664,6 +1732,206 @@
     },
 
     /**
+     * Month grid by a date column:
+     * {type: "calendar", query, params?, date: "due", title: "title", label,
+     * month?: "YYYY-MM", empty?, action?, max_per_day?: 3}
+     * Params may use {{$month_start}} and {{$month_end}}.
+     */
+    calendar(spec, scope) {
+      const wrap = el("div", "pp-calendar-wrap");
+      const toolbar = el("div", "pp-cal-toolbar");
+      const previous = el("button", "pp-button pp-ghost", "Previous month");
+      previous.type = "button";
+      const heading = el("h3", "pp-cal-heading");
+      heading.setAttribute("aria-live", "polite");
+      const next = el("button", "pp-button pp-ghost", "Next month");
+      next.type = "button";
+      const todayButton = el("button", "pp-button pp-ghost", "Today");
+      todayButton.type = "button";
+      toolbar.append(previous, heading, next, todayButton);
+      const empty = el("p", "pp-empty");
+      const body = el("div", "pp-cal-body");
+      const list = el("section", "pp-cal-list");
+      list.setAttribute("aria-live", "polite");
+      wrap.append(toolbar, empty, body, list);
+
+      const today = this.bridge.today();
+      const todayMonth = parseMonth(today.slice(0, 7));
+      const chosen = parseMonth(resolve(spec.month, scope));
+      let month = chosen?.key || todayMonth?.key || "1970-01";
+      let selected = (today.startsWith(`${month}-`) ? today : `${month}-01`);
+      let sequence = 0;
+      let rows = [];
+
+      this.cleanups.push(() => { sequence++; });
+
+      const monthState = () => parseMonth(month) || { year: 1970, month: 1, key: "1970-01" };
+      const monthRange = () => {
+        const { year, month: number } = monthState();
+        const start = `${year}-${pad2(number)}-01`;
+        const endDate = new Date(`${start}T12:00:00`);
+        endDate.setMonth(endDate.getMonth() + 1);
+        endDate.setDate(0);
+        return { start, end: formatDay(endDate) };
+      };
+      const shiftMonth = (delta) => {
+        const { year, month: number } = monthState();
+        const date = new Date(`${year}-${pad2(number)}-01T12:00:00`);
+        date.setMonth(date.getMonth() + delta);
+        month = `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+        selected = `${month}-01`;
+      };
+      const longDay = (day) => new Date(`${day}T12:00:00`).toLocaleDateString(undefined, {
+        weekday: "long", day: "numeric", month: "long",
+      });
+      const countLabel = (count) => (count === 0 ? "no items" : count === 1 ? "1 item" : `${count} items`);
+      const entryLabel = (row) => String(row?.[spec.title] ?? "");
+      const runAction = (row) => spec.action && this.act(spec.action, { ...scope, row });
+
+      const render = () => {
+        const grid = monthGrid(monthState().year, monthState().month);
+        const visible = new Set(grid.map((entry) => entry.day));
+        if (!visible.has(selected)) selected = `${month}-01`;
+        const byDay = new Map(grid.map((entry) => [entry.day, []]));
+        for (const row of rows) {
+          const day = dayKey(row?.[spec.date]);
+          if (day && byDay.has(day)) byDay.get(day).push(row);
+        }
+        const monthEntries = grid.reduce((sum, entry) => sum + (entry.inMonth ? byDay.get(entry.day).length : 0), 0);
+        const emptyTextValue = resolve(spec.empty, scope);
+        empty.hidden = !(emptyTextValue && monthEntries === 0);
+        empty.textContent = emptyTextValue || "";
+        const shownDate = new Date(`${month}-01T12:00:00`);
+        heading.textContent = shownDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+        const table = el("table", "pp-calendar");
+        table.setAttribute("aria-label", resolve(spec.label || "Calendar", scope));
+        table.setAttribute("aria-busy", "false");
+        const thead = el("thead");
+        const labels = el("tr");
+        const monday = new Date("2026-11-02T12:00:00");
+        for (let i = 0; i < 7; i++) {
+          const date = new Date(monday);
+          date.setDate(monday.getDate() + i);
+          const th = el("th", "", date.toLocaleDateString(undefined, { weekday: "short" }));
+          th.setAttribute("scope", "col");
+          labels.append(th);
+        }
+        thead.append(labels);
+        const tbody = el("tbody");
+        const maxEntries = Math.max(1, Number(spec.max_per_day) || 3);
+        for (let row = 0; row < 6; row++) {
+          const tr = el("tr");
+          for (let col = 0; col < 7; col++) {
+            const cell = grid[row * 7 + col];
+            const items = byDay.get(cell.day) || [];
+            const day = Number(cell.day.slice(8, 10));
+            const td = el("td", `pp-cal-day${cell.inMonth ? "" : " pp-cal-out"}${cell.day === today ? " pp-cal-today" : ""}${cell.day === selected ? " pp-cal-selected" : ""}`);
+            if (cell.day === today) td.setAttribute("aria-current", "date");
+            const dayButton = el("button", "pp-cal-daybtn", day);
+            dayButton.type = "button";
+            dayButton.dataset.day = cell.day;
+            dayButton.setAttribute("aria-pressed", String(cell.day === selected));
+            dayButton.setAttribute("aria-label", `${longDay(cell.day)}, ${countLabel(items.length)}`);
+            dayButton.addEventListener("click", () => {
+              selected = cell.day;
+              render();
+            });
+            td.append(dayButton);
+            for (const item of items.slice(0, maxEntries)) {
+              const button = el("button", "pp-cal-entry", entryLabel(item));
+              button.type = "button";
+              button.addEventListener("click", () => runAction(item));
+              td.append(button);
+            }
+            if (items.length > maxEntries) {
+              const more = el("button", "pp-cal-more", `+${items.length - maxEntries} more`);
+              more.type = "button";
+              more.setAttribute("aria-label", `Show all ${items.length} items on ${longDay(cell.day)}`);
+              more.addEventListener("click", () => {
+                selected = cell.day;
+                render();
+              });
+              td.append(more);
+            }
+            const badge = el("span", "pp-cal-count", items.length);
+            badge.setAttribute("aria-hidden", "true");
+            td.append(badge);
+            tr.append(td);
+          }
+          tbody.append(tr);
+        }
+        table.append(thead, tbody);
+        body.replaceChildren(table);
+
+        const selectedItems = byDay.get(selected) || [];
+        const listHeading = el("h4", "pp-cal-list-heading", longDay(selected));
+        list.replaceChildren(listHeading);
+        if (selectedItems.length === 0) {
+          list.append(el("p", "pp-empty", "Nothing on this day."));
+          return;
+        }
+        const listRows = el("ul", "pp-list");
+        for (const row of selectedItems) {
+          const item = el("li", "pp-list-item");
+          const content = el("button", "pp-item-main");
+          content.type = "button";
+          if (spec.action) content.addEventListener("click", () => runAction(row));
+          content.append(el("span", "pp-item-title", entryLabel(row)));
+          item.append(content);
+          listRows.append(item);
+        }
+        list.append(listRows);
+      };
+
+      const load = async () => {
+        if (this.disposed) return;
+        const seq = ++sequence;
+        body.replaceChildren(el("p", "pp-empty", "Loading…"));
+        try {
+          const range = monthRange();
+          rows = await this.bridge.query(spec.query, resolve(spec.params || {}, this.scope({
+            ...(scope.row ? { row: scope.row } : {}),
+            $month_start: range.start,
+            $month_end: range.end,
+          })));
+        } catch (e) {
+          if (seq !== sequence) return;
+          const retry = el("button", "pp-button pp-ghost", "Retry loading");
+          retry.type = "button";
+          retry.addEventListener("click", () => { retry.disabled = true; load(); });
+          const error = el("div", "pp-list-error");
+          error.append(el("p", "pp-error", `Couldn’t load items: ${String(e)}`), retry);
+          body.replaceChildren(error);
+          list.replaceChildren();
+          empty.hidden = true;
+          return;
+        }
+        if (seq !== sequence || this.disposed) return;
+        render();
+      };
+
+      previous.addEventListener("click", () => {
+        shiftMonth(-1);
+        load();
+      });
+      next.addEventListener("click", () => {
+        shiftMonth(1);
+        load();
+      });
+      todayButton.addEventListener("click", () => {
+        const now = this.bridge.today();
+        const nowMonth = parseMonth(now.slice(0, 7));
+        if (!nowMonth) return;
+        month = nowMonth.key;
+        selected = now;
+        load();
+      });
+      this.lists.push(load);
+      return wrap;
+    },
+
+    /**
      * Bars from a query: {query, params, label, value, max?, value_label?,
      * title?, layout?, empty?}. `layout: "columns"` draws vertical columns
      * (e.g. tasks per day); `value_label` names a column shown instead of
@@ -1846,12 +2114,51 @@
     list(spec, scope) {
       const board = ["board", "matrix"].includes(spec.layout);
       const node = el("ul", `pp-list${board ? ` pp-board pp-board-${spec.layout}` : ""}${spec.layout === "chips" ? " pp-list-chips" : spec.layout === "plain" ? " pp-list-plain" : ""}`);
+      if (spec.layout === "board") node.style.setProperty("--pp-lanes", String((spec.columns || []).length));
       node.setAttribute("aria-busy", "true");
       if (board) node.setAttribute("aria-label", resolve(spec.label || "Board", scope));
       node.append(el("li", "pp-empty", "Loading…"));
       let region = { lists: [], watchers: [] };
       let rendered = null;
       let sequence = 0;
+      let moveRunning = false;
+      let status = null;
+      const hasClass = (target, className) => String(target?.className || "").split(/\s+/).includes(className);
+      const addClass = (target, className) => {
+        if (!target || hasClass(target, className)) return;
+        target.className = `${String(target.className || "").trim()} ${className}`.trim();
+      };
+      const removeClass = (target, className) => {
+        if (!target) return;
+        target.className = String(target.className || "").split(/\s+/).filter((name) => name && name !== className).join(" ");
+      };
+      const findLane = (target) => {
+        if (!target) return null;
+        if (typeof target.closest === "function") {
+          const lane = target.closest(".pp-board-lane");
+          if (lane) return lane;
+        }
+        for (let current = target; current; current = current.parentNode || current.parent) {
+          if (hasClass(current, "pp-board-lane")) return current;
+        }
+        return null;
+      };
+      const laneAt = (x, y) => findLane(document.elementFromPoint?.(x, y));
+      const statusNode = () => {
+        if (!status) {
+          status = el("li", "pp-sr pp-board-status");
+          status.setAttribute("role", "status");
+          status.setAttribute("aria-live", "polite");
+        }
+        return status;
+      };
+      const rowMarker = (row) => {
+        try {
+          return JSON.stringify(row ?? null);
+        } catch (_) {
+          return "";
+        }
+      };
       this.cleanups.push(() => { sequence++; this.release(region); });
       // The list owns its current rows. Replacing them must release their
       // watchers instead of adding detached controls to the view forever.
@@ -1897,16 +2204,19 @@
         // All lanes share one result set, so filters and row limits are
         // identical to the list. Empty lanes remain visible for orientation.
         const lanes = new Map();
+        const laneOrder = [];
         if (board) {
           for (const column of spec.columns || []) {
             const value = String(column.value);
             const matching = rows.filter(row => String(row[spec.column]) === value);
             const lane = el("li", "pp-board-lane");
+            lane.dataset.ppLane = value;
             const title = resolve(column.label, scope);
             const heading = el("h3", "pp-board-heading");
             const headingId = nextId("pp-lane");
             heading.id = headingId;
-            heading.append(el("span", "", title), el("span", "pp-board-count", matching.length));
+            const count = el("span", "pp-board-count", matching.length);
+            heading.append(el("span", "", title), count);
             lane.append(heading);
             if (column.description) lane.append(el("p", "pp-board-description", resolve(column.description, scope)));
             const items = el("ul", "pp-list pp-board-items");
@@ -1914,9 +2224,67 @@
             if (!matching.length) items.append(el("li", "pp-empty", "No tasks"));
             lane.append(items);
             node.append(lane);
-            lanes.set(value, items);
+            laneOrder.push(value);
+            lanes.set(value, { lane, items, count, cards: matching.length, label: String(title || value) });
           }
         }
+        if (board && spec.move) node.append(statusNode());
+        const isEmptyNode = (child) => hasClass(child, "pp-empty");
+        const keepCards = (children) => children.filter((child) => !isEmptyNode(child));
+        const syncLaneCount = (lane) => { lane.count.textContent = String(lane.cards); };
+        const ensurePlaceholder = (lane) => {
+          if (lane.cards > 0) return;
+          if ([...lane.items.children].some(isEmptyNode)) return;
+          lane.items.append(el("li", "pp-empty", "No tasks"));
+        };
+        const removePlaceholder = (lane) => {
+          const kept = keepCards([...lane.items.children]);
+          if (kept.length === lane.items.children.length) return false;
+          lane.items.replaceChildren(...kept);
+          return true;
+        };
+        // Moves a row's card to lane `to` and runs the declared operation.
+        const moveTo = async (row, from, to, item, handle) => {
+          if (!spec.move || to === from || moveRunning) return false;
+          const source = lanes.get(String(from));
+          const target = lanes.get(String(to));
+          if (!source || !target) return false;
+          moveRunning = true;
+          const marker = rowMarker(row);
+          const titleResolved = String(resolve(spec.move.label || "{{row.title}}", { ...scope, row }) || "").trim();
+          const title = titleResolved || "card";
+          source.items.replaceChildren(...[...source.items.children].filter((child) => child !== item));
+          source.cards = Math.max(0, source.cards - 1);
+          syncLaneCount(source);
+          ensurePlaceholder(source);
+          removePlaceholder(target);
+          target.items.replaceChildren(...keepCards([...target.items.children]).filter((child) => child !== item), item);
+          target.cards += 1;
+          syncLaneCount(target);
+          handle.disabled = true;
+          try {
+            const ok = await this.act(spec.move, { ...scope, row, value: to });
+            if (ok) {
+              statusNode().textContent = `Moved ${title} to ${target.label}`;
+              handle.focus?.();
+              return true;
+            }
+            statusNode().textContent = `Couldn't move ${title}`;
+            rendered = null;
+            await load();
+            const all = node.querySelectorAll ? node.querySelectorAll(".pp-board-handle") : [];
+            for (const entry of all) {
+              if (entry?.dataset?.ppMoveRow === marker) {
+                entry.focus?.();
+                break;
+              }
+            }
+            return false;
+          } finally {
+            moveRunning = false;
+            handle.disabled = false;
+          }
+        };
         let group;
         // Bound each synchronous task instead of monopolizing the main thread
         // for all 300–500 rows. Never leave an interrupted partial render cached.
@@ -1934,9 +2302,93 @@
                 if (group != null) fragment.append(el("li", `pp-group${tone ? ` pp-tone-${tone}` : ""}`, group));
               }
               const item = el("li", "pp-list-item");
+              const rowScope = { ...scope, row };
+              if (board && spec.move) {
+                addClass(item, "pp-board-movable");
+                const cardTitle = String(resolve(spec.move.label || "{{row.title}}", rowScope) || "").trim() || "card";
+                const handle = el("button", "pp-board-handle");
+                handle.type = "button";
+                handle.title = "Drag to move";
+                handle.setAttribute("aria-label", `Move ${cardTitle}. Drag, or use arrow keys.`);
+                handle.dataset.ppMoveRow = rowMarker(row);
+                handle.append(icon("grip"));
+                const moveBy = async (delta, event) => {
+                  const from = String(row[spec.column]);
+                  const at = laneOrder.indexOf(from);
+                  const target = laneOrder[at + delta];
+                  if (!target) return false;
+                  event?.preventDefault?.();
+                  return moveTo(row, from, target, item, handle);
+                };
+                handle.addEventListener("keydown", async (event) => {
+                  if (event.key === "Escape") {
+                    removeClass(item, "pp-dragging");
+                    for (const lane of lanes.values()) removeClass(lane.lane, "pp-drop-target");
+                    return;
+                  }
+                  if (spec.layout === "board") {
+                    if (event.key === "ArrowLeft") await moveBy(-1, event);
+                    if (event.key === "ArrowRight") await moveBy(1, event);
+                    return;
+                  }
+                  if (spec.layout === "matrix") {
+                    if (event.key === "ArrowLeft") await moveBy(-1, event);
+                    if (event.key === "ArrowRight") await moveBy(1, event);
+                    if (event.key === "ArrowUp") await moveBy(-2, event);
+                    if (event.key === "ArrowDown") await moveBy(2, event);
+                  }
+                });
+                let drag = null;
+                const clearDrag = () => {
+                  if (!drag) return;
+                  removeClass(item, "pp-dragging");
+                  for (const lane of lanes.values()) removeClass(lane.lane, "pp-drop-target");
+                  drag = null;
+                };
+                handle.addEventListener("pointerdown", (event) => {
+                  if (moveRunning) return;
+                  const touchLike = event.pointerType === "touch" || event.pointerType === "pen";
+                  const primaryMouse = event.pointerType === "mouse" ? event.button === 0 : true;
+                  if (!touchLike && !primaryMouse) return;
+                  drag = {
+                    id: event.pointerId,
+                    from: String(row[spec.column]),
+                    x: Number(event.clientX || 0),
+                    y: Number(event.clientY || 0),
+                    active: false,
+                    over: null,
+                  };
+                  handle.setPointerCapture?.(event.pointerId);
+                });
+                handle.addEventListener("pointermove", (event) => {
+                  if (!drag || event.pointerId !== drag.id) return;
+                  if (!drag.active) {
+                    const dx = Number(event.clientX || 0) - drag.x;
+                    const dy = Number(event.clientY || 0) - drag.y;
+                    if (Math.hypot(dx, dy) < 4) return;
+                    drag.active = true;
+                    addClass(item, "pp-dragging");
+                  }
+                  const lane = laneAt(event.clientX, event.clientY);
+                  if (lane === drag.over) return;
+                  if (drag.over) removeClass(drag.over, "pp-drop-target");
+                  drag.over = lane;
+                  if (drag.over) addClass(drag.over, "pp-drop-target");
+                });
+                handle.addEventListener("pointercancel", clearDrag);
+                handle.addEventListener("pointerup", async (event) => {
+                  if (!drag || event.pointerId !== drag.id) return;
+                  const drop = drag.over || laneAt(event.clientX, event.clientY);
+                  const from = drag.from;
+                  clearDrag();
+                  const to = drop?.dataset?.ppLane;
+                  if (to && to !== from) await moveTo(row, from, to, item, handle);
+                });
+                item.append(handle);
+              }
               const child = this.node(spec.item, { ...scope, row });
               if (child) item.append(child);
-              if (board) lanes.get(String(row[spec.column]))?.append(item);
+              if (board) lanes.get(String(row[spec.column]))?.items.append(item);
               else fragment.append(item);
               count++;
             } while (index < rows.length && count < 32 && Date.now() - started < 8);
@@ -1954,6 +2406,179 @@
       };
       this.lists.push(load);
       return node;
+    },
+
+    /**
+     * Sortable query table:
+     * {type: "table", query, params?, label, columns: [{key, label, type?}],
+     * sort?: key, dir?: "asc"|"desc", empty?, empty_focus?, limit?, action?}
+     */
+    table(spec, scope) {
+      const wrap = el("div", "pp-table-wrap");
+      const sortbar = el("label", "pp-table-sortbar");
+      sortbar.append(el("span", "", "Sort by"));
+      const sortSelect = el("select", "pp-input");
+      const orderLabel = el("label", "pp-table-order");
+      orderLabel.append(el("span", "", "Order"));
+      const orderSelect = el("select", "pp-input");
+      const asc = el("option", "", "Ascending");
+      asc.value = "asc";
+      const desc = el("option", "", "Descending");
+      desc.value = "desc";
+      orderSelect.append(asc, desc);
+      orderLabel.append(orderSelect);
+      sortbar.append(sortSelect, orderLabel);
+      wrap.append(sortbar);
+
+      const table = el("table", "pp-table");
+      table.setAttribute("aria-label", resolve(spec.label || "Table", scope));
+      const head = el("thead");
+      const headRow = el("tr");
+      const body = el("tbody");
+      body.setAttribute("aria-busy", "true");
+      table.append(head, body);
+      head.append(headRow);
+      wrap.append(table);
+
+      const columns = (spec.columns || []).map((column) => ({ ...column, type: column.type || "string" }));
+      let sort = columns.some((column) => column.key === spec.sort) ? spec.sort : (columns[0]?.key || "");
+      let dir = spec.dir === "desc" ? "desc" : "asc";
+      let rows = [];
+      let region = { lists: [], watchers: [], cleanups: [] };
+      let sequence = 0;
+      this.cleanups.push(() => { sequence++; this.release(region); });
+      this.watchers.push(() => { for (const watch of region.watchers) watch(); });
+
+      const formatCell = (value, type) => {
+        if (value == null) return "";
+        if (type === "boolean") return truthy(value) ? "Yes" : "";
+        if (type === "json") {
+          try {
+            return JSON.stringify(value);
+          } catch (_) {
+            return "";
+          }
+        }
+        return String(value);
+      };
+
+      const syncControls = () => {
+        sortSelect.value = sort;
+        orderSelect.value = dir;
+      };
+
+      const drawHead = () => {
+        headRow.replaceChildren();
+        sortSelect.replaceChildren();
+        for (const column of columns) {
+          const opt = el("option", "", String(column.label || column.key || ""));
+          opt.value = String(column.key || "");
+          sortSelect.append(opt);
+
+          const th = el("th");
+          th.setAttribute("scope", "col");
+          const current = column.key === sort;
+          th.setAttribute("aria-sort", current ? (dir === "desc" ? "descending" : "ascending") : "none");
+          const button = el("button", "pp-table-sort", String(column.label || column.key || ""));
+          button.type = "button";
+          button.title = `Sort by ${String(column.label || column.key || "")}`;
+          button.addEventListener("click", () => {
+            if (column.key === sort) dir = dir === "asc" ? "desc" : "asc";
+            else {
+              sort = String(column.key || "");
+              dir = "asc";
+            }
+            syncControls();
+            drawHead();
+            drawBody();
+          });
+          th.append(button);
+          headRow.append(th);
+        }
+        syncControls();
+      };
+
+      const drawBody = () => {
+        this.release(region);
+        region = { lists: [], watchers: [], cleanups: [] };
+        body.replaceChildren();
+        const sorted = sort ? sortRows(rows, sort, columns.find((c) => c.key === sort)?.type || "string", dir) : [...rows];
+        if (sorted.length === 0 && emptyText(spec, scope)) {
+          const tr = el("tr");
+          const td = el("td", "pp-empty", resolve(emptyText(spec, scope), scope));
+          td.setAttribute("colspan", String(Math.max(1, columns.length)));
+          tr.append(td);
+          body.append(tr);
+          return;
+        }
+        for (const row of sorted) {
+          const tr = el("tr");
+          for (const [index, column] of columns.entries()) {
+            const td = el("td");
+            td.setAttribute("data-label", String(column.label || column.key || ""));
+            const value = formatCell(row?.[column.key], column.type);
+            if (index === 0 && spec.action) {
+              const open = el("button", "pp-table-open", value);
+              open.type = "button";
+              open.addEventListener("click", () => this.act(spec.action, { ...scope, row }));
+              td.append(open);
+            } else td.textContent = value;
+            tr.append(td);
+          }
+          body.append(tr);
+        }
+      };
+
+      sortSelect.addEventListener("change", () => {
+        sort = String(sortSelect.value || "");
+        drawHead();
+        drawBody();
+      });
+      orderSelect.addEventListener("change", () => {
+        dir = orderSelect.value === "desc" ? "desc" : "asc";
+        drawHead();
+        drawBody();
+      });
+
+      drawHead();
+      const loadingRow = el("tr");
+      const loadingCell = el("td", "pp-empty", "Loading…");
+      loadingCell.setAttribute("colspan", String(Math.max(1, columns.length)));
+      loadingRow.append(loadingCell);
+      body.append(loadingRow);
+      const load = async () => {
+        if (this.disposed) return;
+        const seq = ++sequence;
+        const params = resolve(spec.params || {}, this.scope(scope.row ? { row: scope.row } : {}));
+        body.setAttribute("aria-busy", "true");
+        let loaded;
+        try {
+          loaded = await this.bridge.query(spec.query, params);
+        } catch (e) {
+          if (seq !== sequence) return;
+          this.release(region);
+          region = { lists: [], watchers: [], cleanups: [] };
+          body.replaceChildren();
+          const tr = el("tr");
+          const td = el("td");
+          td.setAttribute("colspan", String(Math.max(1, columns.length)));
+          const retry = el("button", "pp-button pp-ghost", "Retry loading");
+          retry.type = "button";
+          retry.addEventListener("click", () => { retry.disabled = true; load(); });
+          td.append(el("p", "pp-error", `Couldn’t load items: ${String(e)}`), retry);
+          tr.append(td);
+          body.append(tr);
+          body.setAttribute("aria-busy", "false");
+          return;
+        }
+        if (seq !== sequence) return;
+        rows = loaded || [];
+        if (spec.limit) rows = rows.slice(0, Number(spec.limit));
+        drawBody();
+        body.setAttribute("aria-busy", "false");
+      };
+      this.lists.push(load);
+      return wrap;
     },
   };
 
@@ -1988,6 +2613,7 @@
     eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
     link: "M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1",
     sparkle: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z",
+    grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
   };
 
   function icon(name) {
@@ -2138,5 +2764,9 @@
     },
     resolve,
     markdown,
+    compareValues,
+    sortRows,
+    monthGrid,
+    dayKey,
   };
 })();
