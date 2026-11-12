@@ -9,7 +9,7 @@ mod mcp;
 
 use std::io::{BufReader, IsTerminal, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{json, Map, Value};
@@ -27,6 +27,8 @@ const USAGE: &str = "usage: terrarium <command> [options]
   run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
   run <id> --ids a,b | --where <query> [--where-params json]   run a bulk action on many items (at most 500)
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
+  export [--out file.zip] [--include-trash]   save this space's data as a ZIP (not encrypted)
+  import <plugin>.<importer> <file|folder> [--dry-run]   add items from a CSV file or Markdown folder
   watch                         print app events as data changes
   mcp                           serve these commands as MCP tools on stdin/stdout, for agents
   serve                         run Terrarium without its window until the app opens
@@ -360,18 +362,19 @@ impl Conn {
         args: Value,
         confirmed: bool,
     ) -> Result<Value, Failure> {
-        self.call(
-            "invoke",
-            json!({
-                "kind": kind,
-                "id": id,
-                "space": o.space,
-                "args": args,
-                "dry_run": o.dry_run && kind == "action",
-                "confirmed": confirmed,
-            }),
-        )
+        self.call("invoke", invoke_params(o, kind, id, &args, confirmed))
     }
+}
+
+fn invoke_params(o: &Options, kind: &str, id: &str, args: &Value, confirmed: bool) -> Value {
+    json!({
+        "kind": kind,
+        "id": id,
+        "space": o.space,
+        "args": args,
+        "dry_run": o.dry_run && kind == "action",
+        "confirmed": confirmed,
+    })
 }
 
 fn connect(o: &Options) -> Result<(Conn, Value), Failure> {
@@ -967,6 +970,186 @@ fn cmd_space(o: &Options) -> Outcome {
     }
 }
 
+/// `space.export` arguments: `--out` (default `terrarium-export.zip`)
+/// made absolute against `cwd`, and `--include-trash`.
+fn export_args(o: &Options, cwd: &Path) -> Result<Value, Failure> {
+    const USAGE: &str = "terrarium export [--out file.zip] [--include-trash]";
+    if !o.words.is_empty() || o.args.is_some() {
+        return Err(Failure::usage(USAGE));
+    }
+    let mut path = PathBuf::from("terrarium-export.zip");
+    let mut include_trash = false;
+    for (name, value) in &o.flags {
+        match (name.as_str(), value) {
+            ("out", Some(value)) if !value.is_empty() => path = PathBuf::from(value),
+            ("include-trash", None) => include_trash = true,
+            _ => return Err(Failure::usage(USAGE)),
+        }
+    }
+    if !path.is_absolute() {
+        path = cwd.join(path);
+    }
+    Ok(json!({"path": path, "include_trash": include_trash}))
+}
+
+fn cmd_export(o: &Options) -> Outcome {
+    let cwd = std::env::current_dir().map_err(|e| Failure::new("failed", e.to_string()))?;
+    let args = export_args(o, &cwd)?;
+    let (mut conn, _) = connect(o)?;
+    let outcome = conn.invoke(o, "action", "space.export", args, false)?;
+    let result = &outcome["result"];
+    if human(o) {
+        println!(
+            "Saved {} ({} items from {} apps). It is not encrypted; keep it somewhere safe.",
+            cell(&result["path"]),
+            cell(&result["rows"]),
+            cell(&result["plugins"])
+        );
+    } else {
+        print_json(result);
+    }
+    Ok(())
+}
+
+const IMPORT_LIMIT: usize = 7 * 1024 * 1024 / 2;
+const IMPORT_TOO_LARGE: &str =
+    "Too much to import at once from the command line (3.5 MB at most). Split the folder or file.";
+
+fn import_files(format: &str, root: &Path) -> Result<Vec<Value>, Failure> {
+    fn io_error(e: std::io::Error) -> Failure {
+        Failure::new("invalid", e.to_string())
+    }
+    fn walk(root: &Path, dir: &Path, paths: &mut Vec<(String, PathBuf)>) -> Outcome {
+        for entry in std::fs::read_dir(dir).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            // Do not follow symlinks outside the chosen folder or into cycles.
+            let ty = entry.file_type().map_err(io_error)?;
+            let path = entry.path();
+            if ty.is_dir() {
+                walk(root, &path, paths)?;
+            } else if ty.is_file()
+                && path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+                })
+            {
+                let relative = path.strip_prefix(root).expect("walked beneath root");
+                let name = relative
+                    .to_str()
+                    .ok_or_else(|| Failure::new("invalid", "File paths must be valid UTF-8."))?;
+                paths.push((name.to_string(), path));
+            }
+        }
+        Ok(())
+    }
+    let mut paths = Vec::new();
+    match format {
+        "csv" if root.is_file() => {
+            let name = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| Failure::new("invalid", "File paths must be valid UTF-8."))?;
+            paths.push((name.to_string(), root.to_path_buf()));
+        }
+        "markdown" if root.is_dir() => walk(root, root, &mut paths)?,
+        "csv" => return Err(Failure::new("invalid", "Choose a CSV file to import.")),
+        "markdown" => {
+            return Err(Failure::new(
+                "invalid",
+                "Choose a Markdown folder to import.",
+            ))
+        }
+        _ => return Err(Failure::new("invalid", "Unsupported import format.")),
+    }
+    paths.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut bytes = 0;
+    let mut files = Vec::new();
+    for (path, source) in paths {
+        let mut data = Vec::new();
+        std::fs::File::open(source)
+            .map_err(io_error)?
+            .take((IMPORT_LIMIT - bytes + 1) as u64)
+            .read_to_end(&mut data)
+            .map_err(io_error)?;
+        bytes += data.len() + path.len();
+        if bytes > IMPORT_LIMIT {
+            return Err(Failure::new("invalid", IMPORT_TOO_LARGE));
+        }
+        let text = String::from_utf8(data)
+            .map_err(|_| Failure::new("invalid", "Import files must be valid UTF-8."))?;
+        files.push(json!({"path": path, "text": text}));
+    }
+    Ok(files)
+}
+
+fn check_import_request(o: &Options, args: &Value, id: u64) -> Outcome {
+    let request = Request::new(
+        id,
+        "invoke",
+        invoke_params(o, "action", "space.import", args, false),
+    );
+    let bytes = serde_json::to_vec(&request).map_err(|e| Failure::new("invalid", e.to_string()))?;
+    if bytes.len() > IMPORT_LIMIT {
+        return Err(Failure::new("invalid", IMPORT_TOO_LARGE));
+    }
+    Ok(())
+}
+
+fn import_result(result: &Value, human_output: bool) -> Outcome {
+    if human_output {
+        let failures = result["failures"].as_array().cloned().unwrap_or_default();
+        if !failures.is_empty() {
+            let rows = failures
+                .iter()
+                .map(|f| vec![cell(&f["item"]), cell(&f["code"]), cell(&f["message"])])
+                .collect::<Vec<_>>();
+            print_table(&["ITEM", "CODE", "MESSAGE"].map(String::from), &rows);
+        }
+        println!("{}", result["message"].as_str().unwrap_or_default());
+    } else {
+        print_json(result);
+    }
+    if result["failed"].as_u64().unwrap_or(0) > 0 {
+        return Err(Failure::new(
+            "failed",
+            result["message"].as_str().unwrap_or("Import failed."),
+        ));
+    }
+    Ok(())
+}
+
+fn cmd_import(o: &Options) -> Outcome {
+    if o.words.len() != 2 || !o.flags.is_empty() || o.args.is_some() {
+        return Err(Failure::usage(
+            "terrarium import <plugin>.<importer> <file|folder> [--dry-run]",
+        ));
+    }
+    let name = &o.words[0];
+    let missing = || {
+        Failure::new(
+            "not-found",
+            format!("no importer `{name}`; see `terrarium status`"),
+        )
+    };
+    let (plugin, importer) = name.split_once('.').ok_or_else(missing)?;
+    let (mut conn, _) = connect(o)?;
+    let listing = conn.invoke(o, "query", "plugin.list", json!({}), false)?;
+    let format = listing["result"]
+        .as_array()
+        .and_then(|plugins| plugins.iter().find(|p| p["id"] == plugin))
+        .and_then(|p| p["imports"].as_array())
+        .and_then(|imports| imports.iter().find(|i| i["id"] == importer))
+        .and_then(|i| i["format"].as_str())
+        .ok_or_else(missing)?;
+    let files = import_files(format, Path::new(&o.words[1]))?;
+    let args = json!({"plugin": plugin, "importer": importer, "files": files});
+    check_import_request(o, &args, conn.next + 1)?;
+    let outcome = conn.invoke(o, "action", "space.import", args, false)?;
+    import_result(&outcome["result"], human(o))
+}
+
 fn cmd_search(o: &Options) -> Outcome {
     let q = o.words.join(" ");
     if q.trim().is_empty() {
@@ -1085,6 +1268,8 @@ fn run(args: &[String]) -> Outcome {
             }
         }
         "search" => cmd_search(&o),
+        "export" => cmd_export(&o),
+        "import" => cmd_import(&o),
         "watch" => cmd_watch(&o),
         "mcp" => mcp::cmd_mcp(&o),
         "serve" => cmd_serve(&o),
@@ -1123,6 +1308,92 @@ mod tests {
 
     fn opts(words: &[&str]) -> Options {
         parse(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+    }
+
+    #[test]
+    fn import_files_walks_visible_markdown_in_path_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::create_dir(root.join(".hidden")).unwrap();
+        for name in ["sub/b.md", "a.md", ".hidden/c.md", "x.txt", ".hidden.md"] {
+            std::fs::write(root.join(name), "abc").unwrap();
+        }
+        std::os::unix::fs::symlink(root, root.join("sub/cycle")).unwrap();
+        let files = import_files("markdown", root).unwrap();
+        assert_eq!(
+            files,
+            vec![
+                json!({"path": "a.md", "text": "abc"}),
+                json!({"path": "sub/b.md", "text": "abc"})
+            ]
+        );
+        assert_eq!(import_files("csv", root).unwrap_err().code, "invalid");
+        let csv = root.join("tasks.csv");
+        std::fs::write(&csv, "title\nA").unwrap();
+        assert_eq!(
+            import_files("csv", &csv).unwrap(),
+            vec![json!({"path": "tasks.csv", "text": "title\nA"})]
+        );
+        assert_eq!(import_files("markdown", &csv).unwrap_err().code, "invalid");
+    }
+
+    #[test]
+    fn import_request_limit_counts_json_escaping_and_envelope() {
+        let o = opts(&["--space", "work", "--dry-run"]);
+        let args = json!({"plugin": "todo", "importer": "csv", "files": [{"path": "a.csv", "text": "abc"}]});
+        check_import_request(&o, &args, 3).unwrap();
+        let params = invoke_params(&o, "action", "space.import", &args, false);
+        assert_eq!(params["dry_run"], true);
+        assert_eq!(params["space"], "work");
+        assert_eq!(params["args"], args);
+        let large = json!({"files": [{"path": "a.csv", "text": "\"".repeat(IMPORT_LIMIT / 2)}]});
+        assert_eq!(
+            check_import_request(&o, &large, 3).unwrap_err().message,
+            IMPORT_TOO_LARGE
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.csv");
+        std::fs::write(&path, vec![b'a'; IMPORT_LIMIT + 1]).unwrap();
+        assert_eq!(
+            import_files("csv", &path).unwrap_err().message,
+            IMPORT_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn import_partial_failure_has_exit_code_one() {
+        assert!(import_result(&json!({"message": "1 imported", "failed": 0}), false).is_ok());
+        let failure =
+            import_result(&json!({"message": "1 failed", "failed": 1}), false).unwrap_err();
+        assert_eq!(exit_code(&failure.code), 1);
+    }
+
+    #[test]
+    fn export_args_are_absolute() {
+        let cwd = Path::new("/tmp/w");
+        assert_eq!(
+            export_args(&opts(&["--out", "a.zip"]), cwd).unwrap(),
+            json!({"path": "/tmp/w/a.zip", "include_trash": false})
+        );
+        assert_eq!(
+            export_args(&opts(&[]), cwd).unwrap(),
+            json!({"path": "/tmp/w/terrarium-export.zip", "include_trash": false})
+        );
+        assert_eq!(
+            export_args(&opts(&["--out", "/abs/b.zip", "--include-trash"]), cwd).unwrap(),
+            json!({"path": "/abs/b.zip", "include_trash": true})
+        );
+        for args in [
+            vec!["--nope", "1"],
+            vec!["--out"],
+            vec!["--out="],
+            vec!["--include-trash", "false"],
+            vec!["extra"],
+            vec!["--args", "{}"],
+        ] {
+            assert_eq!(export_args(&opts(&args), cwd).unwrap_err().code, "usage");
+        }
     }
 
     #[test]

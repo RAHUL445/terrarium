@@ -122,6 +122,33 @@
             <button type="submit" class="pp-button pp-primary">Create space</button>
           </form>
         </div>
+            <div class="card" id="export-card">
+              <div class="card-head">
+                <h2>Export</h2>
+                <button type="button" id="export-run">Export this space</button>
+              </div>
+              <p class="muted">Saves this space's data as a ZIP file: every app's items, plus Markdown and CSV copies where apps offer them. The file is not encrypted, so keep it somewhere safe.</p>
+              <label class="pp-checkbox"><input type="checkbox" id="export-trash"> Include items in the trash</label>
+              <p class="muted" id="export-result" role="status"></p>
+            </div>
+            <div class="card" id="import-card" hidden>
+              <div class="card-head"><h2>Import</h2></div>
+              <p class="muted">Add items from files made elsewhere. Each row or file becomes one item; nothing is replaced.</p>
+              <div class="pp-field">
+                <label class="pp-label" for="import-kind">What to import</label>
+                <select class="pp-input" id="import-kind"></select>
+              </div>
+              <div class="pp-field">
+                <label class="pp-label" for="import-files" id="import-files-label">File</label>
+                <input class="pp-input" id="import-files" type="file">
+              </div>
+              <div class="inline-form">
+                <button type="button" id="import-check" class="pp-button">Check</button>
+                <button type="button" id="import-run" class="pp-button pp-primary">Import</button>
+              </div>
+              <p class="muted" id="import-result" role="status"></p>
+              <ul class="pp-list" id="import-failures"></ul>
+            </div>
           </section>
           <section class="settings-section" id="settings-devices" hidden>
             <div class="page-head"><h2 class="section-title">Devices and sync</h2><p class="muted">Every device keeps all your spaces and works offline. Changes leave a device only encrypted and signed.</p></div>

@@ -30,6 +30,8 @@
     "allow-list-themes",
     "allow-install-theme",
     "allow-remove-theme",
+    "allow-export-space",
+    "allow-reveal-export",
     "allow-create-backup",
     "allow-list-backups",
     "allow-restore-backup",

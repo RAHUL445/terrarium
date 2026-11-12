@@ -4,6 +4,7 @@
 
 mod ai;
 mod control;
+mod export;
 #[cfg(desktop)]
 mod headless;
 mod install;
@@ -491,6 +492,8 @@ pub fn run() {
             themes::list_themes,
             themes::install_theme,
             themes::remove_theme,
+            export::export_space,
+            export::reveal_export,
             sync::create_backup,
             sync::list_backups,
             sync::restore_backup,

@@ -309,6 +309,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
                     "version": m.version,
                     "description": m.description,
                     "search": m.search.is_some(),
+                    "imports": m.import.iter().map(|i| json!({"id": i.id, "label": i.label, "format": i.format})).collect::<Vec<_>>(),
                     "pages": m.pages.iter().map(|p| json!({"id": p.id, "title": p.title})).collect::<Vec<_>>(),
                 }))
                 .collect::<Vec<_>>()))
@@ -328,6 +329,21 @@ const HOST_COMMANDS: &[HostCommand] = &[
             ("where", ParamType::Json, false, "Instead of ids: {\"query\": name, \"params\": {...}} — a query of the same plugin whose rows' ids are used"),
             ("args", ParamType::Json, false, "Other arguments, the same for every item"),
             ("dry_run", ParamType::Boolean, false, "Report what it would change and keep nothing"),
+        ],
+        run: |_, _, _, _| unreachable!("answered by invoke"),
+    },
+    HostCommand {
+        id: "space.import",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Import a CSV file or Markdown files into a plugin, through one of its declared importers (see plugin.list). Each row or file becomes one item.",
+        confirm: None,
+        params: &[
+            ("plugin", ParamType::String, true, "Plugin id"),
+            ("importer", ParamType::String, true, "Importer id from plugin.list"),
+            ("files", ParamType::Json, true, "List of {path, text}; one CSV file, or Markdown files with paths inside the chosen folder"),
+            ("dry_run", ParamType::Boolean, false, "Report what it would add and keep nothing"),
         ],
         run: |_, _, _, _| unreachable!("answered by invoke"),
     },
@@ -394,6 +410,24 @@ const HOST_COMMANDS: &[HostCommand] = &[
         run: |host, _, args, _| {
             let id = text(args, "id")?.to_string();
             change_spaces(host, |s| s.set_removed(&id, false).map(|_| Value::Null))
+        },
+    },
+    HostCommand {
+        id: "space.export",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Save this space's data as a new ZIP file: every plugin's items as JSON. The file is not encrypted.",
+        confirm: None,
+        params: &[
+            ("path", ParamType::String, true, "Absolute path of a new .zip file"),
+            ("include_trash", ParamType::Boolean, false, "Also export items in the trash"),
+        ],
+        run: |host, space, args, _| {
+            let path = std::path::PathBuf::from(text(args, "path")?);
+            let include_trash = args.get("include_trash").and_then(Value::as_bool).unwrap_or(false);
+            crate::export::export_space(host, space, &path, crate::export::ExportOptions { include_trash })
+                .map(|s| json!(s))
         },
     },
     HostCommand {
@@ -1078,6 +1112,9 @@ pub fn invoke_with(
     };
     if kind == Kind::Action && id == crate::bulk::BULK_COMMAND {
         return crate::bulk::invoke(host, caller, space, &args, options);
+    }
+    if kind == Kind::Action && id == crate::import::IMPORT_COMMAND {
+        return crate::import::invoke(host, caller, space, &args, options);
     }
     if options.dry_run && kind == Kind::Action && info.owner == Owner::Host {
         return Err(CommandError::invalid(

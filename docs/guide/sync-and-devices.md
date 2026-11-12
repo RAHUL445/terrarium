@@ -83,3 +83,6 @@ every plugin's data and the plugin list.
   before keep syncing with it.
 
 There are no automatic or scheduled backups yet.
+
+For readable JSON, Markdown and CSV copies, see [Export and import](export-and-import.md).
+Exports are not encrypted and cannot be restored like backups.

@@ -1609,3 +1609,175 @@ fn a_task_note_link_resolves() {
     assert_eq!(found[0]["kind"], "Note");
     assert!(!found[0]["title"].as_str().unwrap().is_empty());
 }
+
+#[test]
+fn todo_import_keeps_titles_literal() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let title = "Call Sam tomorrow #work";
+    let imported = host
+        .call("todo", "import", &json!({"title": title, "done": true}))
+        .unwrap();
+    let rows = host
+        .query("todo", "task", &params(json!({"id": imported["id"]})))
+        .unwrap();
+    assert_eq!(rows[0]["title"], title);
+    assert!(rows[0]["due"].is_null());
+    assert_eq!(rows[0]["tags"], "");
+    assert_eq!(rows[0]["done"], 1);
+    let completion = host
+        .store("todo")
+        .unwrap()
+        .query(
+            "SELECT completed_at FROM tasks WHERE id = ?1",
+            &[imported["id"].clone()],
+        )
+        .unwrap();
+    assert!(completion[0]["completed_at"].as_i64().unwrap() > 0);
+    let created = host
+        .call("todo", "create", &json!({"title": title}))
+        .unwrap();
+    let rows = host
+        .query("todo", "task", &params(json!({"id": created["id"]})))
+        .unwrap();
+    assert_eq!(rows[0]["title"], "Call Sam");
+    assert_eq!(rows[0]["due"], add_days(&today(), 1));
+    assert_eq!(rows[0]["tags"], "work");
+}
+
+fn export_import_command(host: &mut PluginHost, id: &str, args: Value) -> Value {
+    use terrarium_runtime::commands::{self, Caller, Kind};
+    commands::invoke(host, Caller::App, Kind::Action, id, None, &args, true).unwrap()
+}
+
+fn exported_files(host: &mut PluginHost, data: &TempDir, plugin: &str) -> Vec<Value> {
+    use std::io::Read;
+    let path = data.path().join("export.zip");
+    export_import_command(host, "space.export", json!({"path": path}));
+    let mut archive = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    let prefix = format!("files/{plugin}/");
+    let mut files = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).unwrap();
+        if let Some(path) = entry
+            .name()
+            .unwrap()
+            .strip_prefix(&prefix)
+            .map(str::to_string)
+        {
+            let mut text = String::new();
+            entry.read_to_string(&mut text).unwrap();
+            files.push(json!({"path": path, "text": text}));
+        }
+    }
+    files
+}
+
+#[test]
+fn todo_csv_round_trip() {
+    let data = TempDir::new().unwrap();
+    let mut original = host(&data);
+    let finished = original
+        .call("todo", "create", &json!({"title": "Finished"}))
+        .unwrap();
+    original
+        .call(
+            "todo",
+            "toggle",
+            &json!({"id": finished["id"], "done": true}),
+        )
+        .unwrap();
+    original
+        .call(
+            "todo",
+            "create",
+            &json!({
+                "title": "Call Sam", "priority": 2, "tags": "work, friends",
+                "notes": "Two lines, with a comma\nand a \"quote\".",
+                "due": "2030-01-02", "remind_time": "09:15", "repeat": "weekly",
+                "in_progress": true, "urgent": true, "important": true
+            }),
+        )
+        .unwrap();
+    original
+        .call(
+            "todo",
+            "import",
+            &json!({"title": "Plan tomorrow #work !high every week"}),
+        )
+        .unwrap();
+    let files = exported_files(&mut original, &data, "todo");
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "tasks.csv");
+    let fresh_data = TempDir::new().unwrap();
+    let mut fresh = host(&fresh_data);
+    let result = export_import_command(
+        &mut fresh,
+        "space.import",
+        json!({
+            "plugin": "todo", "importer": "tasks_csv", "files": files
+        }),
+    );
+    assert_eq!(result["done"], 3);
+    assert_eq!(
+        fresh.query("todo", "export_tasks", &Map::new()).unwrap(),
+        original.query("todo", "export_tasks", &Map::new()).unwrap()
+    );
+
+    let result = export_import_command(
+        &mut fresh,
+        "space.import",
+        json!({
+            "plugin": "todo", "importer": "titles_csv",
+            "files": [{"path": "titles.csv", "text": "title\nCall Sam tomorrow #work\n"}]
+        }),
+    );
+    assert_eq!(result["done"], 1);
+    assert!(fresh
+        .query("todo", "export_tasks", &Map::new())
+        .unwrap()
+        .iter()
+        .any(|row| row["title"] == "Call Sam tomorrow #work"
+            && row["due"].is_null()
+            && row["tags"].is_null()));
+}
+
+#[test]
+fn notes_markdown_round_trip() {
+    let data = TempDir::new().unwrap();
+    let mut original = host(&data);
+    original
+        .call(
+            "notes",
+            "create",
+            &json!({"title": "Plan", "project": "Work", "body": "- [ ] a"}),
+        )
+        .unwrap();
+    original
+        .call(
+            "notes",
+            "create",
+            &json!({"title": "Ideas", "body": "A thought\n\nAnother thought"}),
+        )
+        .unwrap();
+    let files = exported_files(&mut original, &data, "notes");
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().any(|file| file["path"] == "Work/Plan.md"));
+    assert!(files.iter().any(|file| file["path"] == "Ideas.md"));
+    let fresh_data = TempDir::new().unwrap();
+    let mut fresh = host(&fresh_data);
+    let result = export_import_command(
+        &mut fresh,
+        "space.import",
+        json!({
+            "plugin": "notes", "importer": "markdown", "files": files
+        }),
+    );
+    assert_eq!(result["done"], 2);
+    assert_eq!(
+        fresh.query("notes", "export_notes", &Map::new()).unwrap(),
+        original
+            .query("notes", "export_notes", &Map::new())
+            .unwrap()
+    );
+}

@@ -735,7 +735,15 @@ fn todo_existing_tasks_gain_safe_board_and_matrix_defaults() {
         .unwrap()
         .retain(|c| !["in_progress", "urgent", "important"].contains(&c["name"].as_str().unwrap()));
     value["queries"] = json!({"tasks":{"sql":"SELECT id, title FROM tasks", "params":[]}});
-    for field in ["badge", "search", "reminders", "index", "refs"] {
+    for field in [
+        "badge",
+        "search",
+        "reminders",
+        "index",
+        "refs",
+        "export",
+        "import",
+    ] {
         value.as_object_mut().unwrap().remove(field);
     }
     std::fs::write(&manifest, serde_json::to_vec(&value).unwrap()).unwrap();

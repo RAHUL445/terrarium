@@ -1663,6 +1663,101 @@ $("restore-form").addEventListener("submit", async (e) => {
   $("restore-file").value = "";
 });
 
+// ---- Settings → Spaces → Export ----
+async function exportSpace() {
+  const button = $("export-run");
+  button.disabled = true;
+  $("export-result").replaceChildren();
+  try {
+    const r = await call("export_space", { space: currentSpace, includeTrash: $("export-trash").checked });
+    toast(`Export saved (${formatSize(r.bytes)})`);
+    $("export-result").replaceChildren(
+      el("span", {}, `Saved to ${r.path}`), " ",
+      el("button", { type: "button", class: "pp-button pp-ghost", onclick: () => call("reveal_export", { path: r.path }).catch((e) => toast(String(e), "error")) }, "Show in folder"));
+  } catch (e) {
+    toast(String(e), "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+$("export-run").addEventListener("click", exportSpace);
+$("export-card").hidden = isPhone;
+
+// ---- Settings → Spaces → Import ----
+function updateImportPicker() {
+  const format = $("import-kind").selectedOptions[0]?.dataset.format;
+  const files = $("import-files");
+  files.value = "";
+  files.multiple = format === "markdown";
+  if (format === "markdown") {
+    files.setAttribute("webkitdirectory", "");
+    files.removeAttribute("accept");
+  } else {
+    files.removeAttribute("webkitdirectory");
+    files.accept = ".csv,text/csv";
+  }
+  $("import-files-label").textContent = format === "markdown" ? "Folder" : "File";
+  $("import-result").textContent = "";
+  $("import-failures").replaceChildren();
+}
+
+async function loadImporters() {
+  try {
+    const plugins = await call("command", { kind: "query", id: "plugin.list" });
+    const options = plugins.flatMap(plugin => (plugin.imports || [])
+      .filter(imp => !(isPhone && imp.format === "markdown"))
+      .map(imp => el("option", { value: `${plugin.id}.${imp.id}`, "data-format": imp.format }, `${plugin.name} · ${imp.label}`)));
+    $("import-kind").replaceChildren(...options);
+    $("import-card").hidden = options.length === 0;
+    updateImportPicker();
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+async function readImportFiles(input, format) {
+  const files = Array.from(input.files || []).filter(file => format !== "markdown" || /\.(md|markdown)$/i.test(file.name));
+  if (!files.length) throw new Error(format === "markdown" ? "Choose a folder to import." : "Choose a file to import.");
+  const selected = format === "markdown" ? files : files.slice(0, 1);
+  if (selected.reduce((size, file) => size + file.size, 0) > 16 * 1024 * 1024) {
+    throw new Error("These files are too large to import at once (16 MB at most).");
+  }
+  return Promise.all(selected.map(async file => ({
+    path: format === "markdown" && file.webkitRelativePath?.includes("/")
+      ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name,
+    text: await file.text(),
+  })));
+}
+
+async function runImport(dryRun) {
+  $("import-check").disabled = true;
+  $("import-run").disabled = true;
+  $("import-result").textContent = "";
+  $("import-failures").replaceChildren();
+  try {
+    const option = $("import-kind").selectedOptions[0];
+    if (!option) throw new Error("Choose what to import.");
+    const [plugin, importer] = option.value.split(".");
+    const files = await readImportFiles($("import-files"), option.dataset.format);
+    const r = await call("command", { kind: "action", id: "space.import", space: currentSpace,
+      args: { plugin, importer, files, dry_run: dryRun } });
+    $("import-result").textContent = r.message;
+    $("import-failures").replaceChildren(...(r.failures || []).slice(0, 10).map(f => el("li", {}, `${f.item}: ${f.message}`)));
+    if (!dryRun) {
+      toast(r.message, r.failed ? "error" : "ok");
+      await refreshPluginViews();
+    }
+  } catch (e) {
+    toast(String(e), "error");
+  } finally {
+    $("import-check").disabled = false;
+    $("import-run").disabled = false;
+  }
+}
+$("import-kind").addEventListener("change", updateImportPicker);
+$("import-check").addEventListener("click", () => runImport(true));
+$("import-run").addEventListener("click", () => runImport(false));
+
 // ---- Spaces -------------------------------------------------------------------
 
 async function loadSpaces() {
@@ -2385,7 +2480,10 @@ function showSection(section) {
     loadControl();
   }
   if (section === "devices") loadSyncStatus();
-  if (section === "spaces") loadSpaces();
+  if (section === "spaces") {
+    loadSpaces();
+    loadImporters();
+  }
   if (section === "backups") loadBackups();
   if (section === "ai") loadAi();
   if (section === "scheduled") loadSchedules();
@@ -2462,6 +2560,7 @@ async function start() {
       else if (!payload.initial) toast(`${payload.plugin} loaded`, "ok");
       await loadPlugins();
       if (waitingLinks.length) drainLinks();
+      await loadImporters();
       if (!navigated && currentView !== "home") showView("home");
     });
   }

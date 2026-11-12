@@ -83,6 +83,56 @@ pub struct Manifest {
     /// How the host describes and links to rows by ref.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refs: Vec<RefDef>,
+    /// Readable copies of the data added to a space export.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub export: Vec<ExportDef>,
+    /// File formats this plugin can import, each mapped to an operation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import: Vec<ImportDef>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportDef {
+    /// Stable id using a-z, 0-9 and _, unique in the manifest.
+    pub id: String,
+    /// Label shown in Settings (1-60 characters).
+    pub label: String,
+    pub format: ImportFormat,
+    /// Operation called once per row or file.
+    pub op: String,
+    /// Operation argument to CSV column or Markdown source.
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportFormat {
+    Csv,
+    Markdown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportDef {
+    /// A declared query taking only host clock parameters.
+    pub query: String,
+    pub format: ExportFormat,
+    /// Markdown path template, or a plain CSV file name.
+    pub path: String,
+    /// Markdown content column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// CSV columns in header and record order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Markdown,
+    Csv,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -666,6 +716,102 @@ impl Manifest {
                 }
             }
         }
+        let mut import_ids = std::collections::HashSet::new();
+        for entry in &self.import {
+            let id = &entry.id;
+            if id.is_empty()
+                || id.len() > 40
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+            {
+                return bad(format!("import `{id}`: id must use a-z, 0-9 and _"));
+            }
+            if !import_ids.insert(id) {
+                return bad(format!("import `{id}` is declared twice"));
+            }
+            if entry.label.is_empty() || entry.label.chars().count() > 60 {
+                return bad(format!("import `{id}`: label must be 1-60 characters"));
+            }
+            let op = &entry.op;
+            let Some(operation) = self.operations.get(op) else {
+                return bad(format!("import `{id}`: `{op}` is not a declared operation"));
+            };
+            if operation.effect_of(op) == Effect::Read {
+                return bad(format!("import `{id}`: `{op}` is read-only"));
+            }
+            if entry.fields.is_empty() {
+                return bad(format!("import `{id}`: needs `fields`"));
+            }
+            for (key, src) in &entry.fields {
+                if operation
+                    .params
+                    .as_ref()
+                    .is_some_and(|p| !p.contains_key(key))
+                {
+                    return bad(format!(
+                        "import `{id}`: `{key}` is not a parameter of `{op}`"
+                    ));
+                }
+                match entry.format {
+                    ImportFormat::Csv if src.starts_with('$') => return bad(format!("import `{id}`: csv fields name columns, not `{src}`")),
+                    ImportFormat::Markdown if !["$name", "$folder", "$path", "$text"].contains(&src.as_str()) => return bad(format!("import `{id}`: unknown source `{src}` (use $name, $folder, $path or $text)")),
+                    _ => {}
+                }
+            }
+        }
+        if self.export.len() > 10 {
+            return bad("export: at most 10 entries".into());
+        }
+        for entry in &self.export {
+            let q = &entry.query;
+            let Some(query) = self.queries.get(q) else {
+                return bad(format!("export: query `{q}` is not declared"));
+            };
+            if query
+                .params
+                .iter()
+                .any(|p| !CONTEXT_PARAMS.contains(&p.as_str()))
+            {
+                return bad(format!(
+                    "export: query `{q}` may only take today, weekday, now_ms, utc_offset_ms, tz"
+                ));
+            }
+            let path = &entry.path;
+            if path.is_empty()
+                || path.starts_with('/')
+                || path.contains('\\')
+                || path.split('/').any(|p| p == "..")
+            {
+                return bad(format!("export: `{path}` must be a relative path"));
+            }
+            match entry.format {
+                ExportFormat::Markdown => {
+                    if entry.body.is_none() {
+                        return bad(format!("export `{path}`: markdown needs `body`"));
+                    }
+                    if !entry.columns.is_empty() {
+                        return bad(format!("export `{path}`: markdown takes no `columns`"));
+                    }
+                    if !path.ends_with(".md") {
+                        return bad(format!("export `{path}`: must end in .md"));
+                    }
+                }
+                ExportFormat::Csv => {
+                    if entry.columns.is_empty() {
+                        return bad(format!("export `{path}`: csv needs `columns`"));
+                    }
+                    if entry.body.is_some() {
+                        return bad(format!("export `{path}`: csv takes no `body`"));
+                    }
+                    if path.contains("{{") || path.contains('/') || !path.ends_with(".csv") {
+                        return bad(format!(
+                            "export `{path}`: must be a plain file name ending in .csv"
+                        ));
+                    }
+                }
+            }
+        }
         for action in &self.quick_actions {
             if !self.operations.contains_key(&action.op) {
                 return bad(format!(
@@ -922,6 +1068,257 @@ impl Manifest {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    fn minimal() -> Value {
+        json!({
+            "id": "test", "name": "Test", "version": "1.0.0", "api": API_VERSION,
+            "storage": {"version": 1, "tables": [{"name": "items", "columns": [{"name": "text", "type": "text"}]}]},
+            "queries": {"all": {"sql": "SELECT id, text FROM items", "params": []}}
+        })
+    }
+
+    fn import_manifest() -> Value {
+        let mut m = minimal();
+        m["operations"] = json!({"create": {"params": {"title": {"type": "string"}}}, "read": {"effect": "read"}});
+        m["import"] = json!([{"id":"csv", "label":"Tasks from CSV", "format":"csv", "op":"create", "fields":{"title":"Title"}}]);
+        m
+    }
+
+    #[test]
+    fn import_declarations_and_old_manifests_load() {
+        let m = Manifest::parse(&serde_json::to_vec(&import_manifest()).unwrap()).unwrap();
+        assert_eq!(m.import[0].format, ImportFormat::Csv);
+        Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap();
+        let old = Manifest::parse(&serde_json::to_vec(&minimal()).unwrap()).unwrap();
+        assert!(old.import.is_empty());
+        assert!(serde_json::to_value(old).unwrap().get("import").is_none());
+        let mut m = import_manifest();
+        m["import"][0]["format"] = json!("markdown");
+        m["import"][0]["fields"] = json!({"title":"$name"});
+        assert_eq!(
+            Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                .unwrap()
+                .import[0]
+                .format,
+            ImportFormat::Markdown
+        );
+    }
+
+    macro_rules! invalid_import {
+        ($name:ident, $mutate:expr, $message:expr) => {
+            #[test]
+            fn $name() {
+                let mut m = import_manifest();
+                ($mutate)(&mut m);
+                let error = Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains($message), "{error}");
+            }
+        };
+    }
+
+    invalid_import!(
+        import_id_invalid,
+        |m: &mut Value| m["import"][0]["id"] = json!("Bad"),
+        "import `Bad`: id must use a-z, 0-9 and _"
+    );
+    invalid_import!(
+        import_duplicate,
+        |m: &mut Value| {
+            let entry = m["import"][0].clone();
+            m["import"].as_array_mut().unwrap().push(entry);
+        },
+        "import `csv` is declared twice"
+    );
+    invalid_import!(
+        import_empty_label,
+        |m: &mut Value| m["import"][0]["label"] = json!(""),
+        "import `csv`: label must be 1-60 characters"
+    );
+    invalid_import!(
+        import_long_label,
+        |m: &mut Value| m["import"][0]["label"] = json!("é".repeat(61)),
+        "import `csv`: label must be 1-60 characters"
+    );
+    invalid_import!(
+        import_missing_op,
+        |m: &mut Value| m["import"][0]["op"] = json!("missing"),
+        "import `csv`: `missing` is not a declared operation"
+    );
+    invalid_import!(
+        import_read_op,
+        |m: &mut Value| m["import"][0]["op"] = json!("read"),
+        "import `csv`: `read` is read-only"
+    );
+    invalid_import!(
+        import_empty_fields,
+        |m: &mut Value| m["import"][0]["fields"] = json!({}),
+        "import `csv`: needs `fields`"
+    );
+    invalid_import!(
+        import_unknown_param,
+        |m: &mut Value| m["import"][0]["fields"] = json!({"bad":"Title"}),
+        "import `csv`: `bad` is not a parameter of `create`"
+    );
+    invalid_import!(
+        import_csv_source,
+        |m: &mut Value| m["import"][0]["fields"] = json!({"title":"$name"}),
+        "import `csv`: csv fields name columns, not `$name`"
+    );
+    invalid_import!(
+        import_markdown_source,
+        |m: &mut Value| m["import"][0]["format"] = json!("markdown"),
+        "import `csv`: unknown source `Title` (use $name, $folder, $path or $text)"
+    );
+    invalid_import!(
+        import_unknown_field,
+        |m: &mut Value| m["import"][0]["extra"] = json!(true),
+        "unknown field `extra`"
+    );
+
+    fn markdown() -> Value {
+        json!({"query": "all", "format": "markdown", "path": "{{id}}.md", "body": "text"})
+    }
+
+    fn csv() -> Value {
+        json!({"query": "all", "format": "csv", "path": "items.csv", "columns": ["id", "text"]})
+    }
+
+    #[test]
+    fn export_declarations_load() {
+        let mut m = minimal();
+        m["export"] = json!([markdown(), csv()]);
+        m["queries"]["all"]["params"] = json!(CONTEXT_PARAMS);
+        let parsed = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(parsed.export.len(), 2);
+        assert_eq!(parsed.export[0].format, ExportFormat::Markdown);
+        assert_eq!(parsed.export[1].columns, ["id", "text"]);
+        Manifest::parse(&serde_json::to_vec(&parsed).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn old_manifest_without_export_loads() {
+        let m = Manifest::parse(&serde_json::to_vec(&minimal()).unwrap()).unwrap();
+        assert!(m.export.is_empty());
+        assert!(serde_json::to_value(m).unwrap().get("export").is_none());
+    }
+
+    macro_rules! invalid_export {
+        ($name:ident, $entry:expr, $message:expr) => {
+            #[test]
+            fn $name() {
+                let mut m = minimal();
+                m["export"] = json!([$entry]);
+                let error = Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains($message), "{error}");
+            }
+        };
+    }
+
+    invalid_export!(
+        export_query_missing,
+        json!({"query":"missing", "format":"csv", "path":"items.csv", "columns":["text"]}),
+        "export: query `missing` is not declared"
+    );
+    invalid_export!(
+        export_markdown_body_missing,
+        json!({"query":"all", "format":"markdown", "path":"a.md"}),
+        "export `a.md`: markdown needs `body`"
+    );
+    invalid_export!(
+        export_markdown_columns,
+        json!({"query":"all", "format":"markdown", "path":"a.md", "body":"text", "columns":["text"]}),
+        "export `a.md`: markdown takes no `columns`"
+    );
+    invalid_export!(
+        export_markdown_extension,
+        json!({"query":"all", "format":"markdown", "path":"a.txt", "body":"text"}),
+        "export `a.txt`: must end in .md"
+    );
+    invalid_export!(
+        export_csv_columns_missing,
+        json!({"query":"all", "format":"csv", "path":"a.csv"}),
+        "export `a.csv`: csv needs `columns`"
+    );
+    invalid_export!(
+        export_csv_body,
+        json!({"query":"all", "format":"csv", "path":"a.csv", "body":"text", "columns":["text"]}),
+        "export `a.csv`: csv takes no `body`"
+    );
+
+    #[test]
+    fn export_count_limit() {
+        let mut m = minimal();
+        m["export"] = json!(vec![markdown(); 11]);
+        assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("export: at most 10 entries"));
+    }
+
+    #[test]
+    fn export_only_context_params() {
+        let mut m = minimal();
+        m["export"] = json!([csv()]);
+        m["queries"]["all"]["params"] = json!(["q"]);
+        assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains(
+                "export: query `all` may only take today, weekday, now_ms, utc_offset_ms, tz"
+            ));
+    }
+
+    #[test]
+    fn export_relative_path_required() {
+        for path in ["", "/a.md", "a\\b.md", "../a.md", "a/../b.md"] {
+            let mut m = minimal();
+            let mut entry = markdown();
+            entry["path"] = json!(path);
+            m["export"] = json!([entry]);
+            let error = Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("export: `{path}` must be a relative path")),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_csv_plain_filename() {
+        for path in ["a/b.csv", "{{title}}.csv", "a.txt"] {
+            let mut m = minimal();
+            let mut entry = csv();
+            entry["path"] = json!(path);
+            m["export"] = json!([entry]);
+            let error = Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "export `{path}`: must be a plain file name ending in .csv"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn export_unknown_fields_rejected() {
+        let mut m = minimal();
+        let mut entry = csv();
+        entry["unknown"] = json!(true);
+        m["export"] = json!([entry]);
+        assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field"));
+    }
 
     fn base() -> Value {
         json!({

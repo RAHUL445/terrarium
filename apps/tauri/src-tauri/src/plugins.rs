@@ -224,7 +224,7 @@ pub fn run_action(
 }
 
 /// Runs a registry command for the app's own UI.
-fn app_command(
+pub(crate) fn app_command(
     state: &Plugins,
     kind: Kind,
     id: &str,
@@ -258,9 +258,16 @@ pub fn command(
     space: Option<String>,
     args: Option<Value>,
 ) -> Result<Value, String> {
-    let out = app_command(&state, kind, &id, space, args.unwrap_or(Value::Null))?;
+    let args = args.unwrap_or(Value::Null);
+    let importing = id == "space.import";
+    let dry_run = args["dry_run"] == true;
+    let out = app_command(&state, kind, &id, space, args)?;
     if kind == Kind::Action {
-        if id.starts_with("space.") {
+        if importing {
+            if !dry_run {
+                let _ = app.emit("data-changed", ());
+            }
+        } else if id.starts_with("space.") {
             let _ = app.emit("spaces-changed", ());
         } else if id.starts_with("schedule.") || id == "plugin.run_bulk" {
             let _ = app.emit("data-changed", ());

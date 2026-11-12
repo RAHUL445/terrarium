@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open`, `refs` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -449,6 +449,126 @@ Example selection block from the To-do plugin:
   ]
 }
 ```
+
+## Export and import
+
+The optional top-level `export` and `import` arrays let the host make readable
+copies and feed files through plugin operations. Unknown fields are rejected
+in both entry types.
+
+### Export fields
+
+Declare up to ten `export` entries to add Markdown and CSV copies alongside
+space export JSON. Each entry names a declared query whose only parameters
+may be `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz`; the host supplies
+these in the configured timezone. Queries run without UI row or byte limits.
+Use `WHERE _deleted IS NULL` when readable copies should exclude trash.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `query` | Yes | Declared query to read rows from this plugin's store |
+| `format` | Yes | `markdown` or `csv` |
+| `path` | Yes | Markdown path template or plain CSV file name |
+| `body` | Markdown only | Query column containing the file text |
+| `columns` | CSV only | Nonempty array of query column names, in output order |
+
+```json
+"export": [
+  {"query": "export_notes", "format": "markdown", "path": "{{project}}/{{title}}.md", "body": "body"},
+  {"query": "all_tasks", "format": "csv", "path": "tasks.csv", "columns": ["title", "due", "done"]}
+]
+```
+
+Files appear under `files/<plugin-id>/`. Markdown requires a `body` column
+and a relative path ending in `.md`, with no `columns`. Row placeholders
+become safe path segments, trimmed and limited to 80 characters. Empty names
+use `Untitled.md`; duplicate names receive ` (2)`, ` (3)` and so on.
+CSV requires explicit ordered `columns`, no `body`, and a plain `.csv` file
+name without folders or placeholders. Those column names form the header.
+Null or missing values become empty cells; other values keep their text.
+Paths cannot be absolute, contain backslashes, or contain `..` segments.
+A failed query fails the export rather than producing an incomplete archive.
+The export manifest records the number of readable `files` for each plugin.
+
+Hosts predating this declaration reject the new field. Upgrade all hosts that
+share a plugin set before installing a plugin that declares `export`; plugins
+without it continue to load unchanged.
+
+### Import fields
+
+An optional `import` list maps CSV columns or Markdown file sources to a
+write operation's arguments. The host parses files and calls the operation once
+per item, so the plugin's own validation and store writes still apply.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `id` | Yes | Unique importer id within the plugin |
+| `label` | Yes | Name shown in the import picker |
+| `format` | Yes | `csv` or `markdown` |
+| `op` | Yes | Declared operation called once per item; may be hidden with `cli: false` |
+| `fields` | Yes | Nonempty object mapping operation parameter names to input sources |
+
+Notes uses the following declaration:
+
+```json
+"import": [{
+  "id": "markdown",
+  "label": "Notes from a folder of Markdown files",
+  "format": "markdown",
+  "op": "create",
+  "fields": {"title": "$name", "body": "$text", "project": "$folder"}
+}]
+```
+
+Ids use 1–40 characters from `a-z`, `0-9` and `_`, and labels are 1–60
+characters. Each operation must exist and must not be read-only. Field keys
+must be declared parameters when the operation declares `params`. CSV sources
+are column headers matched ignoring case and surrounding spaces; they cannot
+start with `$`. Every mapped header must exist, even for optional parameters;
+extra columns are ignored. Rows with only blank mapped cells are skipped.
+Markdown sources are `$name` (without extension), `$folder`
+(parent path, empty at the top), `$path` (relative file path) and `$text`
+(whole file with CRLF normalized to LF). Only `.md` and `.markdown` files are
+imported; hidden file names are skipped. Paths are data, never storage paths.
+
+`plugin.list` exposes `imports` with each importer's `id`, `label` and `format`.
+See the [host command record](../design/cli-control.md#export-and-import-as-built)
+for transport and execution details. Call `space.import` with `plugin`,
+`importer`, `files: [{path, text}]` and optional
+`dry_run: true`. CSV accepts one file. Limits are 2,000 items and 16 MB of text.
+Empty strings are omitted. Values are converted using the target operation's
+parameter types: `integer` parses an i64, `number` a finite f64, and `boolean`
+accepts `true`/`yes`/`1`/`x` or `false`/`no`/`0` ignoring case. Failed
+conversions and other types remain strings for validation. Each item
+commits independently. The report gives total, done, failed and skipped counts,
+with at most 50 labelled failure reasons. Dry runs roll back every item.
+Declared importers can call hidden operations; clients still need change access.
+
+Older hosts reject manifests containing `import`. Upgrade every device sharing
+the plugin set before installing a plugin that declares importers. Manifests
+without `import` remain compatible; omit the field when no importer is declared.
+
+To-do's title-only CSV importer shows the simplest mapping:
+
+```json
+"import": [{
+  "id": "titles_csv",
+  "label": "Task titles from a CSV file",
+  "format": "csv",
+  "op": "import",
+  "fields": {"title": "title"}
+}]
+```
+
+Its `tasks_csv` importer maps every header in the
+[full To-do CSV](../guide/export-and-import.md#import-tasks-or-notes) to the
+same-named parameter. Its `export_tasks` query exports those columns in that
+order to `tasks.csv`. Notes uses `export_notes`, path
+`{{project}}/{{title}}.md`, and body column `body` as shown above.
+
+Use a dedicated import operation if normal creation parses quick-add text.
+To-do's hidden `import` operation preserves the title literally and accepts
+completion state; `create` parses dates, tags and priority out of the title.
 
 ## Home and search entry
 

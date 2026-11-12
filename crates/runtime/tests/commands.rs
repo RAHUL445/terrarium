@@ -85,6 +85,11 @@ fn described_todo(root: &Path) -> PathBuf {
     });
     m["queries"]["badge"]["cli"] = json!(false);
     m["queries"]["search"]["types"] = json!({ "q": { "type": "string", "required": true } });
+    m["queries"]["export_tasks"] = json!({"sql": "SELECT title, due, done FROM tasks WHERE _deleted IS NULL ORDER BY title", "params": []});
+    m["export"] = json!([
+        {"query": "export_tasks", "format": "csv", "path": "tasks.csv", "columns": ["title", "due", "done"]},
+        {"query": "export_tasks", "format": "markdown", "path": "notes/{{title}}.md", "body": "title"}
+    ]);
     m["operations"]["toggle"]["bulk"] = json!(true);
     m["operations"]["delete"]["bulk"] = json!(true);
     m["open"] = json!({ "page": "main" });
@@ -714,6 +719,98 @@ fn ui_commands_need_the_app() {
     assert!(!read.iter().any(|c| c.id.starts_with("ui.")));
 }
 
+fn read_zip(path: &Path) -> std::collections::BTreeMap<String, String> {
+    use std::io::Read;
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+    (0..zip.len())
+        .map(|i| {
+            let mut entry = zip.by_index(i).unwrap();
+            let name = entry.name().unwrap().into_owned();
+            let mut text = String::new();
+            entry.read_to_string(&mut text).unwrap();
+            (name, text)
+        })
+        .collect()
+}
+
+#[test]
+fn export_writes_every_table_as_json() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    for title in ["Pay rent", "Call Sam"] {
+        run(&mut host, CHANGE, "todo.create", json!({"title": title})).unwrap();
+    }
+    let path = data.path().join("out.ZIP");
+    let summary = run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap();
+    assert_eq!(summary["path"], path.to_str().unwrap());
+    assert_eq!(summary["plugins"], 1);
+    assert!(summary["rows"].as_u64().unwrap() >= 2);
+    assert_eq!(summary["bytes"], std::fs::metadata(&path).unwrap().len());
+    let entries = read_zip(&path);
+    let tasks: Vec<Value> = serde_json::from_str(&entries["data/todo/tasks.json"]).unwrap();
+    let mut titles: Vec<_> = tasks.iter().map(|r| r["title"].as_str().unwrap()).collect();
+    titles.sort();
+    assert_eq!(titles, ["Call Sam", "Pay rent"]);
+    assert!(tasks.iter().all(|r| r.get("_deleted").is_none()));
+    let manifest: Value = serde_json::from_str(&entries["manifest.json"]).unwrap();
+    assert_eq!(manifest["format"], "terrarium-export");
+    assert_eq!(manifest["version"], 1);
+    assert_eq!(manifest["space"]["id"], "personal");
+    assert_eq!(manifest["include_trash"], false);
+    assert!(manifest["created_ms"].as_i64().unwrap() > 0);
+    assert_eq!(manifest["plugins"][0]["tables"]["tasks"], 2);
+    let store = host.store_in("personal", "todo").unwrap();
+    let tables = store.dump().unwrap();
+    assert_eq!(entries.len(), tables.len() + 5);
+    for table in tables.keys() {
+        let rows: Vec<Value> =
+            serde_json::from_str(&entries[&format!("data/todo/{table}.json")]).unwrap();
+        assert_eq!(manifest["plugins"][0]["tables"][table], rows.len());
+    }
+    assert_eq!(
+        manifest["plugins"][0]["schema_version"],
+        store.schema().version
+    );
+    assert_eq!(entries["README.txt"], "Terrarium export\n\nThis file holds the data of one space as plain JSON (and Markdown or\nCSV copies where apps offer them). It is not encrypted: anyone who\nhas this file can read everything in it. Keep it somewhere safe and\ndelete it when you no longer need it.\n\ndata/<app>/<table>.json  every item, one JSON object per item\nfiles/<app>/...             Markdown and CSV copies, where apps offer them\nmanifest.json            what was exported and when\n");
+}
+
+#[test]
+fn export_leaves_out_trash_unless_asked() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    run(&mut host, CHANGE, "todo.create", json!({"title": "Keep"})).unwrap();
+    let id =
+        run(&mut host, CHANGE, "todo.create", json!({"title": "Trash"})).unwrap()["id"].clone();
+    run(&mut host, Caller::App, "todo.delete", json!({"id": id})).unwrap();
+    for include_trash in [false, true] {
+        let path = data.path().join(format!("trash-{include_trash}.zip"));
+        let args = if include_trash {
+            json!({"path": path, "include_trash": true})
+        } else {
+            json!({"path": path})
+        };
+        run(&mut host, Caller::App, "space.export", args).unwrap();
+        let entries = read_zip(&path);
+        let tasks: Vec<Value> = serde_json::from_str(&entries["data/todo/tasks.json"]).unwrap();
+        if include_trash {
+            assert_eq!(tasks.len(), 2);
+            assert!(tasks.iter().all(|r| r.get("_deleted").is_some()));
+            assert_eq!(tasks.iter().filter(|r| !r["_deleted"].is_null()).count(), 1);
+        } else {
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0]["title"], "Keep");
+            assert!(tasks[0].get("_deleted").is_none());
+        }
+    }
+}
+
 fn limits_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
@@ -772,6 +869,52 @@ fn bulk_runs_once_per_id_with_per_item_results() {
 }
 
 #[test]
+fn export_refuses_bad_paths() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let existing = data.path().join("existing.zip");
+    std::fs::write(&existing, "keep me").unwrap();
+    for path in [
+        PathBuf::from("out.zip"),
+        data.path().join("out.txt"),
+        data.path().join("nope/out.zip"),
+        existing.clone(),
+    ] {
+        assert_eq!(
+            code(run(
+                &mut host,
+                Caller::App,
+                "space.export",
+                json!({"path": path})
+            )),
+            "invalid"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(existing).unwrap(), "keep me");
+}
+
+#[test]
+#[cfg(unix)]
+fn export_file_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let path = data.path().join("private.zip");
+    run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
 fn bulk_refuses_bad_input() {
     let data = TempDir::new().unwrap();
     let mut h = host(&data);
@@ -821,6 +964,163 @@ fn bulk_refuses_bad_input() {
             .len(),
         6
     );
+}
+
+#[test]
+fn read_only_clients_cannot_export() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let path = data.path().join("forbidden.zip");
+    assert_eq!(
+        code(run(&mut host, READ, "space.export", json!({"path": path}))),
+        "forbidden"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn export_changes_nothing() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    run(&mut host, CHANGE, "todo.create", json!({"title": "Keep"})).unwrap();
+    let before = query(&mut host, READ, "todo.tasks", json!({"filter": "all"})).unwrap();
+    let dump = host.store_in("personal", "todo").unwrap().dump().unwrap();
+    run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": data.path().join("unchanged.zip")}),
+    )
+    .unwrap();
+    assert_eq!(
+        before,
+        query(&mut host, READ, "todo.tasks", json!({"filter": "all"})).unwrap()
+    );
+    assert_eq!(
+        dump,
+        host.store_in("personal", "todo").unwrap().dump().unwrap()
+    );
+}
+
+#[test]
+fn export_removes_partial_file_for_unopened_space() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let path = data.path().join("partial.zip");
+    let result = commands::invoke(
+        &mut host,
+        Caller::App,
+        Kind::Action,
+        "space.export",
+        Some("unopened"),
+        &json!({"path": path}),
+        true,
+    );
+    assert_eq!(code(result), "unknown-space");
+    assert!(!path.exists());
+}
+
+#[test]
+fn export_writes_csv_and_markdown() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    for title in ["Pay, rent", "a/b"] {
+        run(&mut host, CHANGE, "todo.create", json!({"title": title})).unwrap();
+    }
+    let path = data.path().join("out.zip");
+    run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap();
+    let entries = read_zip(&path);
+    assert!(entries["files/todo/tasks.csv"].starts_with("title,due,done\r\n"));
+    assert!(entries["files/todo/tasks.csv"].contains("\"Pay, rent\""));
+    assert_eq!(entries["files/todo/notes/Pay, rent.md"], "Pay, rent");
+    assert_eq!(entries["files/todo/notes/a-b.md"], "a/b");
+    let manifest: Value = serde_json::from_str(&entries["manifest.json"]).unwrap();
+    assert_eq!(manifest["plugins"][0]["files"], 3);
+}
+
+#[test]
+fn markdown_names_are_unique() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    for title in ["Same", "Same", "Same (2)"] {
+        run(&mut host, CHANGE, "todo.create", json!({"title": title})).unwrap();
+    }
+    let path = data.path().join("out.zip");
+    run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap();
+    let entries = read_zip(&path);
+    assert_eq!(entries["files/todo/notes/Same.md"], "Same");
+    assert_eq!(entries["files/todo/notes/Same (2).md"], "Same");
+    assert_eq!(entries["files/todo/notes/Same (2) (2).md"], "Same (2)");
+}
+
+#[test]
+fn export_binds_clock_params_in_query_order() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let dir = data.path().join("todo");
+    let path = dir.join("manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["queries"]["export_clock"] = json!({
+        "sql": "SELECT ?1 AS zone, ?2 AS clock, ?3 AS day, ?4 AS weekday, ?5 AS offset",
+        "params": ["tz", "now_ms", "today", "weekday", "utc_offset_ms"]
+    });
+    m["export"] = json!([{"query":"export_clock", "format":"csv", "path":"clock.csv", "columns":["zone", "clock", "day", "weekday", "offset", "missing"]}]);
+    std::fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+    host.load(&dir).unwrap();
+    let path = data.path().join("out.zip");
+    run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap();
+    let entries = read_zip(&path);
+    let lines: Vec<_> = entries["files/todo/clock.csv"].split("\r\n").collect();
+    assert_eq!(lines[0], "zone,clock,day,weekday,offset,missing");
+    let cells: Vec<_> = lines[1].split(',').collect();
+    assert_eq!(cells[0], "Asia/Kolkata");
+    assert!(cells[1].parse::<i64>().unwrap() > 0);
+    assert_eq!(cells[2].len(), 10);
+    assert!(!cells[3].is_empty());
+    assert_eq!(cells[4], "19800000");
+    assert_eq!(cells[5], "");
+}
+
+#[test]
+fn export_query_failure_names_plugin_and_removes_archive() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let dir = data.path().join("todo");
+    let path = dir.join("manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    // Valid SQL whose evaluation fails, after the JSON has been written.
+    m["queries"]["export_tasks"]["sql"] = json!("SELECT abs(-9223372036854775808) AS title");
+    std::fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+    host.load(&dir).unwrap();
+    let path = data.path().join("out.zip");
+    let error = run(
+        &mut host,
+        Caller::App,
+        "space.export",
+        json!({"path": path}),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "failed");
+    assert!(error.message.contains("todo"), "{error:?}");
+    assert!(!path.exists());
 }
 
 #[test]
@@ -942,6 +1242,70 @@ fn bulk_where_uses_query_rows() {
     }
 }
 
+fn import_host(data: &TempDir) -> PluginHost {
+    static NOTES: OnceLock<PathBuf> = OnceLock::new();
+    let from = NOTES.get_or_init(|| {
+        let path = support::package_root()
+            .join("notes")
+            .canonicalize()
+            .unwrap();
+        build_plugin(&path).unwrap();
+        path
+    });
+    let to = data.path().join("notes");
+    for entry in walk(from) {
+        let dest = to.join(entry.strip_prefix(from).unwrap());
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::copy(entry, dest).unwrap();
+    }
+    let path = to.join("manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["import"] = json!([{"id":"markdown", "label":"Notes from Markdown files", "format":"markdown", "op":"create", "fields":{"title":"$name", "body":"$text", "project":"$folder"}}]);
+    // A deliberately declared importer may call a hidden operation.
+    m["operations"]["create"]["cli"] = json!(false);
+    std::fs::write(path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    let mut host = host(data);
+    host.load(&to).unwrap();
+    host
+}
+
+fn import_args() -> Value {
+    json!({"plugin":"notes", "importer":"markdown", "files":[
+        {"path":"Work/Plan.md", "text":"Plan body"},
+        {"path":"Ideas.md", "text":"Idea body"}
+    ]})
+}
+
+fn imported_notes(host: &mut PluginHost) -> Vec<Value> {
+    query(
+        host,
+        Caller::App,
+        "notes.list",
+        json!({"q":"", "project":"", "utc_offset_ms":0, "today":"2026-11-11"}),
+    )
+    .unwrap()
+    .as_array()
+    .unwrap()
+    .clone()
+}
+
+#[test]
+fn import_markdown_creates_notes() {
+    for caller in [Caller::App, CHANGE] {
+        let data = TempDir::new().unwrap();
+        let mut host = import_host(&data);
+        let result = run(&mut host, caller, "space.import", import_args()).unwrap();
+        assert_eq!(result["done"], 2);
+        assert_eq!(result["message"], "2 imported");
+        let notes = imported_notes(&mut host);
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().any(|n| n["title"] == "Ideas"));
+        assert!(notes
+            .iter()
+            .any(|n| n["title"] == "Plan" && n["project"] == "Work"));
+    }
+}
+
 #[test]
 fn bulk_where_is_checked() {
     let data = TempDir::new().unwrap();
@@ -1015,4 +1379,112 @@ fn bulk_where_hidden_query_is_not_found_for_clients() {
     )
     .unwrap_err();
     assert_ne!(app.code, "not-found");
+}
+
+#[test]
+fn import_dry_run_keeps_nothing() {
+    let data = TempDir::new().unwrap();
+    let mut host = import_host(&data);
+    for options_dry_run in [false, true] {
+        let mut args = import_args();
+        args["dry_run"] = json!(!options_dry_run);
+        let out = run_with(
+            &mut host,
+            Caller::App,
+            "space.import",
+            args,
+            options_dry_run,
+            false,
+        )
+        .unwrap();
+        assert!(out.dry_run);
+        assert_eq!(out.result["done"], 2);
+        assert!(out.result["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Dry run:"));
+        assert!(out.result["message"]
+            .as_str()
+            .unwrap()
+            .ends_with(" Nothing was kept."));
+        assert!(imported_notes(&mut host).is_empty());
+    }
+}
+
+#[test]
+fn import_errors() {
+    let data = TempDir::new().unwrap();
+    let mut host = import_host(&data);
+    let mut args = import_args();
+    args["importer"] = json!("unknown");
+    let error = run(&mut host, Caller::App, "space.import", args).unwrap_err();
+    assert_eq!(error.code, "not-found");
+    assert_eq!(error.message, "no importer `notes.unknown`");
+    assert_eq!(
+        code(run(&mut host, READ, "space.import", import_args())),
+        "forbidden"
+    );
+    let mut args = import_args();
+    args["files"] = json!("x");
+    assert_eq!(
+        run(&mut host, Caller::App, "space.import", args).unwrap_err(),
+        CommandError {
+            code: "invalid".into(),
+            message: "`files` must be a list of {path, text}".into()
+        }
+    );
+}
+
+#[test]
+fn plugin_list_shows_importers() {
+    let data = TempDir::new().unwrap();
+    let mut host = import_host(&data);
+    let plugins = query(&mut host, READ, "plugin.list", json!({})).unwrap();
+    let plugins = plugins.as_array().unwrap();
+    let notes = plugins.iter().find(|p| p["id"] == "notes").unwrap();
+    assert_eq!(
+        notes["imports"],
+        json!([{"id":"markdown", "label":"Notes from Markdown files", "format":"markdown"}])
+    );
+    let todo = plugins.iter().find(|p| p["id"] == "todo").unwrap();
+    assert_eq!(
+        todo["imports"],
+        json!([
+            {"id":"tasks_csv", "label":"Tasks from a CSV file", "format":"csv"},
+            {"id":"titles_csv", "label":"Task titles from a CSV file", "format":"csv"}
+        ])
+    );
+}
+
+#[test]
+fn import_csv_reports_failures_and_keeps_successful_items() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    // Declare an importer on the test copy, keeping the real To-do create checks.
+    let path = data.path().join("todo/manifest.json");
+    let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    m["import"] = json!([{"id":"csv", "label":"Tasks", "format":"csv", "op":"create", "fields":{"title":"Title"}}]);
+    std::fs::write(path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
+    host.load(&data.path().join("todo")).unwrap();
+    // Overlong titles fail plugin validation; a blank mapped row is skipped.
+    let text = format!(
+        "Title\nFirst\n{}\nLast\n,\n",
+        ("z".repeat(501) + "\n").repeat(52)
+    );
+    let result = run(
+        &mut host,
+        CHANGE,
+        "space.import",
+        json!({"plugin":"todo", "importer":"csv", "files":[{"path":"tasks.csv", "text":text}]}),
+    )
+    .unwrap();
+    assert_eq!(result["done"], 2);
+    assert_eq!(result["failed"], 52);
+    assert_eq!(result["skipped"], 2);
+    assert_eq!(result["message"], "2 imported, 52 failed, 2 skipped");
+    assert_eq!(result["failures"].as_array().unwrap().len(), 50);
+    assert_eq!(result["failures"][0]["item"], "Row 3");
+    let mut titles = task_titles(&mut host);
+    titles.sort();
+    assert_eq!(titles, ["First", "Last"]);
 }

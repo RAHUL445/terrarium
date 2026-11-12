@@ -13,6 +13,7 @@ for an overview.
 | [Install on Android](guide/install-android.md) | Build the APK, sideload it, permissions, updates |
 | [First steps](guide/first-steps.md) | Home and pages, widgets, apps, search, Companion, spaces |
 | [Sync and devices](guide/sync-and-devices.md) | Pairing over Tailscale, Google Drive, recovery phrase, backups |
+| [Export and import](guide/export-and-import.md) | Save readable copies of a space, import tasks from CSV and notes from Markdown |
 | [Plugins](guide/plugins.md) | Install, review, update, roll back and remove plugins |
 | [AI, schedules and voice](guide/ai-and-schedules.md) | AI provider, scheduled runs, reminders, local transcription |
 | [Appearance](guide/appearance.md) | Light and dark mode, themes, app icons, workspace layout |

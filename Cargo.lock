@@ -5619,6 +5619,7 @@ name = "terrarium-cli"
 version = "0.1.0-alpha.1"
 dependencies = [
  "serde_json",
+ "tempfile",
  "terrarium-control-proto",
 ]
 

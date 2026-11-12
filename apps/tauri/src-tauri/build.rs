@@ -39,6 +39,8 @@ fn main() {
             "list_themes",
             "install_theme",
             "remove_theme",
+            "export_space",
+            "reveal_export",
             "create_backup",
             "list_backups",
             "restore_backup",

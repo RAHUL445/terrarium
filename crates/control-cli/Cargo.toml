@@ -15,3 +15,6 @@ path = "src/main.rs"
 [dependencies]
 terrarium-control-proto = { path = "../control-proto" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

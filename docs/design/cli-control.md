@@ -129,7 +129,7 @@ Add a command registry to `terrarium-runtime`. Every capability becomes a
 | Namespace | Commands | Covers |
 | --- | --- | --- |
 | `app` | `status`, `describe`, `version` | Running state, device, open spaces |
-| `space` | `list`, `create`, `rename`, `remove`, `restore` | Same as the existing Tauri commands |
+| `space` | `list`, `create`, `rename`, `remove`, `restore`, `export`, `import` | Manage spaces; export files and import items (see “Export and import as built”) |
 | `page` | `list`, `get`, `create`, `update`, `remove`, `widgets`, `place`, `move`, `unplace` | Wraps `page_*` in `services.rs`; placements are rows with `x,y,w,h` on a 12-column grid |
 | `search` | `query {q, space?, plugins?, limit?}` | Search fan-out moves from `app.js` into the runtime |
 | `plugin` | `list`, `info`, `install` (file only), `rollback`, `remove`, `restore` | `install` keeps the existing signer and permission checks; a human confirms |
@@ -315,7 +315,7 @@ command, and `terra preview` gets the same commands for free.
   `voice.transcribe_pending`) `"cli": false` instead.
 - Host commands so far: `app.describe`, `plugin.list`,
   `plugin.run_bulk`,
-  `space.list/create/rename/remove/restore`,
+  `space.list/create/rename/remove/restore/export/import`,
   `page.list/get/widgets/create/update/save/remove`, `search.query`,
   `schedule.list/runs/run_now/enable/disable`. `page.place/move/unplace`,
   `app.status`, and the theme, backup, sync and ui namespaces come later.
@@ -532,6 +532,45 @@ clients, tokens, scopes and audit log.
     item count.
   - Changed rows are still recorded as normal row-level change summaries.
 - No WIT, sync format, or storage schema changes were required for bulk.
+
+### Export and import as built
+
+Both host commands are space-scoped actions with `effect: write`, available
+to Read and change clients. `space.export` writes a file even though it does
+not change stored rows. Neither command requires destructive confirmation.
+
+| Command | Arguments | Result |
+| --- | --- | --- |
+| `space.export` | Required absolute `path` to a new `.zip`; optional `include_trash` (default false) | `path`, plugin count `plugins`, JSON row count `rows`, file size `bytes` |
+| `space.import` | Required `plugin`, `importer`, `files: [{path, text}]`; optional `dry_run` (default false) | Counts and labelled failures; see [CLI output](../guide/command-line.md#export-and-import) |
+
+Export uses ZIP layout v1 (`format: "terrarium-export"`, `version: 1`):
+`manifest.json`, `README.txt`, `data/<plugin>/<table>.json` arrays, and
+optional `files/<plugin>/…` readable copies. The manifest records `created_ms`,
+space id/name, `include_trash`, plugin id/name/version/schema version,
+per-table row counts and readable file counts. JSON includes every declared
+plugin table, without the normal query row/byte caps; trash is filtered
+unless requested. Readable copies come from declared export queries, whose
+own SQL determines trash inclusion. The JSON export is not a restore format.
+The archive is unencrypted. Existing files are refused, Unix permissions are
+0600, and partial output is removed on failure. The parent folder must exist.
+Export does not support dry run.
+
+`plugin.list` exposes each plugin's `imports` (`id`, `label`, `format`). The
+host parses one CSV file or a list of Markdown files, maps declared sources
+to operation parameters, then calls `bulk::run_each` once per item. Each item
+has its own transaction: failures do not undo successful items. Import has
+no replacement or deduplication step; the recommended importers create new
+items. It supports both the invoke option `dry_run` and argument
+`dry_run: true`; either rolls back each item, including interop changes and
+queued effects. The report retains at most 50 failure reasons.
+
+Host parsing limits are 2,000 items and 16 MiB of text. The CLI caps the
+complete serialized request at 3.5 MiB to stay below the socket's 4 MiB
+message limit. The app shows up to ten failure reasons. See the
+[user guide](../guide/export-and-import.md) for settings and file selection,
+and the [manifest reference](../develop/plugin-authoring.md#export-and-import)
+for declaration validation and type conversion.
 
 ## 4. Decisions
 

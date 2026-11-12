@@ -151,6 +151,42 @@ stops with exit code 7; pass `--yes` only after approving that removal.
   summary line is the command result, and the command exits with code 1 when
   any item fails.
 
+## Export and import
+
+Both commands need a **Read and change** client. Export writes a file, so it
+needs this access even though it leaves your space's data unchanged.
+
+```sh
+terrarium export                                       # terrarium-export.zip in the current folder
+terrarium export --out ~/Documents/work.zip --space work --include-trash
+terrarium import todo.tasks_csv tasks.csv --dry-run      # check without keeping anything
+terrarium import todo.titles_csv titles.csv
+terrarium import notes.markdown ./notes --space work
+```
+
+`terrarium export [--out file.zip] [--include-trash]` writes a new ZIP on the
+computer running the host. Relative paths are resolved against the CLI's
+current folder; the destination folder must exist and the file must not
+already exist. Export has no dry run. **The file is not encrypted. Anyone
+with it can read it.** See the [export guide](export-and-import.md) for its
+contents, trash handling and how it differs from an encrypted backup.
+
+`terrarium import <plugin>.<importer> <path> [--dry-run]` reads a CSV file or
+Markdown folder locally and sends its text to the host.
+`terrarium query plugin.list --json` lists installed plugins and their importers. Markdown traversal skips hidden
+files and folders and does not follow symlinks within the folder; files and
+paths must be valid UTF-8. The complete serialized request, including paths
+and JSON escaping, must fit within **3.5 MB** over the socket. Split larger
+inputs. The [import guide](export-and-import.md#import-tasks-or-notes) covers
+headers, folder rules and the host's item and text limits.
+
+Import prints counts and labelled failures (up to 50); it exits with code 1
+if any item fails, including during a dry run. Successful items remain after
+a real import with partial failures. JSON output for these shortcuts is the
+result object itself: export returns `path`, `plugins`, `rows`, `bytes`;
+import returns `plugin`, `importer`, `total`, `done`, `failed`, `skipped`,
+`message`, `failures` (each with `item`, `code`, `message`).
+
 ## Use it from an AI agent (MCP)
 
 `terrarium mcp` offers the same commands as tools to any agent that speaks
