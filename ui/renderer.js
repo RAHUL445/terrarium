@@ -65,6 +65,7 @@
 
   function displayValue(value, format) {
     if (value == null || value === "") return "";
+    if (format === "date") return Number(value) ? new Date(Number(value)).toLocaleDateString() : "";
     if (format === "datetime") return Number(value) ? new Date(Number(value)).toLocaleString() : "";
     if (format === "local-time") return String(value).replace(/\b([01]\d|2[0-3]):([0-5]\d)\b/g, (_, hour, minute) => {
       const date = new Date(2000, 0, 1, Number(hour), Number(minute));
@@ -604,13 +605,14 @@
       if (this.disposed) return true;
       if (unmount && this.root.querySelector?.('.pp-recorder[data-state="recording"], .pp-recorder[data-state="saving"]')) return false;
       // A user may keep typing while a save is in flight. Drain those edits
-      // too before allowing the host to replace this view.
+      // too before allowing the host to replace this view. Only autosave
+      // forms can drain dirty edits here; manual drafts travel in snapshot().
       const forms = [...this.root.querySelectorAll("form")];
       do {
         const detail = { waits: [] };
         for (const form of forms) form.dispatchEvent(new CustomEvent("pp-flush", { detail }));
         if ((await Promise.all(detail.waits)).some((ok) => ok === false)) return false;
-      } while (forms.some((form) => form.dataset?.ppUnsaved === "true"));
+      } while (forms.some((form) => form.dataset?.ppAutosave === "true" && form.dataset.ppUnsaved === "true"));
       return true;
     }
 
@@ -1674,6 +1676,7 @@
       const flag = Number(resolve(spec.flag, scope)) || 0;
       const done = spec.strike_done !== false && truthy(resolve(spec.done, scope));
       const node = el("div", `pp-item${flag ? ` pp-flag-${Math.min(flag, 3)}` : ""}${done ? " pp-item-done" : ""}`);
+      if (spec.read !== undefined) node.className += truthy(resolve(spec.read, scope)) ? " pp-item-read" : " pp-item-unread";
       const title = String(resolve(spec.title, scope) ?? "");
       if (spec.check) {
         const input = el("input", "pp-item-check");

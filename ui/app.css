@@ -1285,3 +1285,6 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .pp-heatmap-legend .pp-heat { width: 12px; height: 12px; }
 .palette-text mark { background: var(--accent-soft); color: var(--ink); }
 .pp-heatmap-months { display: grid; grid-auto-flow: column; grid-auto-columns: 15px; padding-left: 28px; margin-bottom: 4px; font-size: 9px; color: var(--muted); }
+
+.pp-item-unread .pp-item-title { font-weight: 700; }
+.pp-item-read .pp-item-main { color: var(--muted); }

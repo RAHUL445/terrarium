@@ -1957,10 +1957,11 @@ function autoDeviceName(id) {
 }
 
 function ruleSentence(rule, state) {
-  const pluginName = id => pluginList.plugins.find(p => p.id === id)?.name || id;
   const trigger = state.events?.find(e => e.plugin === rule.trigger.plugin && e.event === rule.trigger.event);
   const action = state.operations?.find(o => o.plugin === rule.action.plugin && o.operation === rule.action.operation);
-  return `When ${pluginName(rule.trigger.plugin)}: ${String(trigger?.description || rule.trigger.event).trim().replace(/\.+$/, "")}${rule.filter?.length ? " (with conditions)" : ""} → ${pluginName(rule.action.plugin)}: ${action?.description || rule.action.operation}`;
+  const habit = rule.action.plugin === "habits" && rule.action.operation === "checkin"
+    ? state.habits?.find(h => h.id === rule.action.args?.id) : null;
+  return `When ${autoPluginName(rule.trigger.plugin)}: ${autoEventLabel(trigger || rule.trigger)}${rule.filter?.length ? " (with conditions)" : ""} → ${autoPluginName(rule.action.plugin)}: ${autoActionLabel(action || rule.action) || action?.description || rule.action.operation}${habit ? ` for ${habit.title}` : ""}`;
 }
 
 async function autoMutate(action) {
@@ -1981,9 +1982,15 @@ const AUTO_ACTION_LABELS = {
 function autoActionLabel(operation) {
   return AUTO_ACTION_LABELS[`${operation.plugin}.${operation.operation}`];
 }
+function autoEventLabel(event) {
+  return ({ "todo.task_done": "A task is marked done", "habits.checked_in": "A habit is checked in" })[`${event.plugin}.${event.event}`] || String(event.description || event.event).trim().replace(/\.+$/, "");
+}
+function autoHasPicker(operation, param) {
+  return operation?.plugin === "habits" && operation.operation === "checkin" && param === "id";
+}
 function autoActionAvailable(operation, event) {
   if (!autoActionLabel(operation)) return false;
-  return Object.values(operation.params || {}).every(spec => !spec.required || spec.type !== "id" ||
+  return Object.entries(operation.params || {}).every(([param, spec]) => !spec.required || spec.type !== "id" || autoHasPicker(operation, param) ||
     event?.plugin === operation.plugin && Object.values(event?.payload || {}).some(source => source.type === "id" && autoCompatible(source, spec)));
 }
 
@@ -2081,7 +2088,7 @@ function automationEditor(rule, state, example = null) {
   const key = item => JSON.stringify([item.plugin, item.event || item.operation]);
   const name = el("input", { class: "pp-input", type: "text", maxlength: "60", required: true });
   name.value = initial?.name || "";
-  const trigger = select([["", "Choose an event"], ...(state.events || []).map(e => [key(e), `${autoPluginName(e.plugin)}: ${String(e.description || e.event).trim().replace(/\.+$/, "")}`])], initial ? key(initial.trigger) : "", "When");
+  const trigger = select([["", "Choose an event"], ...(state.events || []).map(e => [key(e), `${autoPluginName(e.plugin)}: ${autoEventLabel(e)}`])], initial ? key(initial.trigger) : "", "When");
   const action = select([["", "Choose an action"], ...(state.operations || []).filter(o => autoActionAvailable(o, state.events?.find(e => initial && key(e) === key(initial.trigger)))).map(o => [key(o), `${autoPluginName(o.plugin)}: ${autoActionLabel(o)}`])], initial ? key(initial.action) : "", "Then");
   const actionHelp = el("p", { class: "muted" });
   const conditions = el("div", { class: "auto-conditions" }), argumentsBox = el("div", { class: "auto-arguments" });
@@ -2127,12 +2134,16 @@ function automationEditor(rule, state, example = null) {
       const sources = Object.entries(event()?.payload || {}).filter(([, s]) => autoCompatible(s, spec)).map(([f]) => [f, `From the event: ${f}`]);
       // Preserve metadata bindings and unavailable sources on edits; never silently replace them.
       if (binding && !sources.some(([f]) => f === binding)) sources.push([binding, `From the event: ${binding}`]);
-      const idFromEvent = spec.required && spec.type === "id" && !value;
+      const picker = autoHasPicker(operation(), param);
+      const idFromEvent = spec.required && spec.type === "id" && !value && !picker;
       const source = select([...(idFromEvent ? [] : [["", "Fixed value"]]), ...sources], binding || (idFromEvent ? sources[0]?.[0] : ""), `${param} source`);
-      const input = inputFor(spec, binding ? undefined : value, param);
+      const choices = state.habits || [];
+      const input = picker ? select([["", "Choose a habit"], ...choices.map(h => [h.id, h.title]),
+        ...(value && !binding && !choices.some(h => h.id === value) ? [[value, "Unavailable habit (choose another)"]] : [])], binding ? "" : value, param) : inputFor(spec, binding ? undefined : value, param);
+      if (picker) input.required = true;
       const include = el("input", { type: "checkbox", "aria-label": `Include ${param}` });
       include.checked = spec.required || Object.hasOwn(values, param);
-      const update = () => { input.hidden = !!source.value; input.disabled = !spec.required && !include.checked; source.disabled = input.disabled; };
+      const update = () => { input.hidden = !!source.value; source.disabled = !spec.required && !include.checked; input.disabled = source.disabled || !!source.value; };
       source.addEventListener("change", update); include.addEventListener("change", update); update();
       const node = el("div", { class: "auto-field" }, el("span", {}, `${param}${spec.required ? " (required)" : ""}`), el("div", { class: "auto-argument" },
         !spec.required ? el("label", {}, include, "Include") : null, source, input));
@@ -2152,6 +2163,9 @@ function automationEditor(rule, state, example = null) {
     try {
       const t = event(), a = operation();
       if (!t || !a) throw new Error("Choose an event and an action");
+      for (const arg of args) {
+        if (autoHasPicker(a, arg.param) && !arg.source.value && !state.habits?.some(h => h.id === arg.input.value)) throw new Error("Choose an available habit");
+      }
       const input = ruleFromForm({ name: name.value, trigger: { plugin: t.plugin, event: t.event },
         filter: rows.map(r => ({ field: r.field.value, op: r.op.value, value: read(r.input, r.spec) })),
         action: a, args: Object.fromEntries(args.map(arg => [arg.param, {
@@ -2272,7 +2286,13 @@ async function loadAutomations(before = null) {
   autoBefore = before;
   autoLocalDevice = sync?.device || null;
   autoDevices = sync?.devices?.length ? sync.devices : autoLocalDevice ? [{ device: autoLocalDevice, name: "This device", this_device: true }] : [];
-  if (state) renderAutomations({ ...state, space });
+  let habits = [];
+  if (state?.operations?.some(o => autoHasPicker(o, "id"))) {
+    try { habits = await call("run_query", { space, plugin: "habits", name: "habits", params: {} }); }
+    catch { if (space === currentSpace) autoError("Habits could not be loaded. Try opening Automations again."); }
+  }
+  if (seq !== autoLoad || space !== currentSpace) return;
+  if (state) renderAutomations({ ...state, habits: Array.isArray(habits) ? habits : [], space });
   if (page) renderAutomationRuns(page);
 }
 

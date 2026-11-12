@@ -1965,7 +1965,11 @@ fn gym_rule_checks_in_habit() {
     )
     .unwrap()
     .is_err());
-    rule["action"]["args"]["id"] = id.clone();
+    let choices = h.query("habits", "habits", &params(json!({}))).unwrap();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0]["title"], "Gym");
+    assert_eq!(choices[0]["id"], id);
+    rule["action"]["args"]["id"] = choices[0]["id"].clone();
     approve_event_rule(&mut h, rule);
     event_service(
         &mut h,

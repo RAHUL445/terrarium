@@ -67,7 +67,7 @@ More components and keys:
 
 | Component or key | What it does |
 | --- | --- |
-| `item` | A list row: `title`, `subtitle`, `done`, `flag` (priority 1–3 colors the checkbox), `check: {checked, action}`, `chips: [{text, tone, icon}]` (empty ones are dropped; `icon` and `tone` may be bindings), `avatar` (a letter tile colored from the text, e.g. a link's host), `trailing` nodes, and `action` when the row is tapped |
+| `item` | A list row: `title`, `subtitle`, `done`, `flag` (priority 1–3 colors the checkbox), `check: {checked, action}`, `read` (optional read-state binding; unread titles are bold and read rows muted), `chips: [{text, tone, icon, format}]` (`format: "date"` renders epoch milliseconds as a locale date) (empty ones are dropped; `icon` and `tone` may be bindings), `avatar` (a letter tile colored from the text, e.g. a link's host), `trailing` nodes, and `action` when the row is tapped |
 | `sheet` | A side panel (desktop) or bottom sheet (phone) shown while `bind` holds a value: `{bind: "state.open", title, query, params, children}`. The query's first row is `row` inside. Closing it clears `bind` |
 | `choice` | A form field shown as chips: `{name, label, value, options: [{value, label}]}` |
 | `choice.multiple` | `multiple: true` allows several chips; the value is a comma list in option order (`"0,2,4"`). `value` can be a comma string or an array |

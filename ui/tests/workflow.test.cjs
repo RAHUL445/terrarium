@@ -63,7 +63,7 @@ test('navigation flush waits for every save and propagates a failure', async () 
 test('navigation flush also saves text typed during an in-flight save', async () => {
   let calls = 0;
   const form = {
-    dataset: { ppUnsaved: 'true' },
+    dataset: { ppUnsaved: 'true', ppAutosave: 'true' },
     dispatchEvent(event) {
       calls++;
       event.detail.waits.push(Promise.resolve().then(() => {
@@ -74,4 +74,18 @@ test('navigation flush also saves text typed during an in-flight save', async ()
   };
   assert.equal(await mount({ state: {} }, null, [form]).flush(), true);
   assert.equal(calls, 2);
+});
+
+
+test('navigation flush does not spin on a retained manual-entry draft', async () => {
+  let calls = 0;
+  const form = {
+    dataset: { ppUnsaved: 'true' },
+    dispatchEvent() {
+      // Fail promptly on the old loop instead of starving the test runner.
+      assert.equal(++calls, 1, 'manual drafts cannot clear themselves during flush');
+    },
+  };
+  assert.equal(await mount({ state: {} }, null, [form]).flush({ unmount: true }), true);
+  assert.equal(form.dataset.ppUnsaved, 'true', 'navigation must not discard the draft');
 });

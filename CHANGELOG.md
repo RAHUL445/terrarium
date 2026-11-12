@@ -8,13 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed in UI review round 2
 
+- Quick-entry drafts no longer stall navigation when marked unsaved; returning to the app restores their text.
 - Capture inputs clear on submit and recover failed entries without replacing a newer draft.
-- Automation choices use short action labels, selected-action help and suitable actions with usable event IDs.
+- Automation choices and summaries share short labels; habit check-ins and the Gym example use a titled habit picker as well as event bindings.
 - The automation device picker shows “This device” once.
 - Plugin permissions use plain descriptions for shared events, app data and extra resources.
 - Plugin account sections sit below their action buttons and hide when unavailable.
 - Navigation badges use an optional plugin query noun; Feeds reports unread articles.
 - Browser preview opens article links in a separate browser tab.
+- Feed rows distinguish unread articles from muted read articles and support locale date-only formatting.
 - Display times can follow the user locale without changing stored times.
 - Today can collapse undated tasks while preserving their membership and the saved view choice.
 - Habit day dots show full-date tooltips, and heatmaps include months, weekdays and a check-in legend.

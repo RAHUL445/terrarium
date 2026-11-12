@@ -307,17 +307,37 @@ test('review refuses a token for a trigger or action different from the displaye
   assert.equal(h.requests.some(r=>r.name==='rule_approve'),false);
 });
 
-test('examples needing an unrelated habit ID are hidden', async () => {
-  const h = harness(); editorState(h);
-  h.state.operations[0].operation = 'checkin';
-  h.state.examples = [{ name: 'Gym task done → Gym habit', trigger: { plugin: 'todo', event: 'done' },
-    action: { plugin: 'habits', operation: 'checkin', args: { habit: '', day: '{{event.day}}' } } }];
+test('Gym example offers titled habit choices, requires a selection and saves a fixed ID', async () => {
+  const h = harness();
+  const manifest = JSON.parse(readFileSync(join(__dirname, '../../../terrarium-plugins/packages/habits/manifest.json'), 'utf8'));
+  const services = readFileSync(join(__dirname, '../../crates/runtime/src/services.rs'), 'utf8');
+  const example = JSON.parse(services.match(/json!\(\[({\s*"name": "Gym task done[^]*?})\]\)/)[1]);
+  h.state.events = [{plugin:'todo',event:'task_done',description:'A task was marked done.',payload:{tags:{type:'string'},completed_date:{type:'date',required:true}}}];
+  h.state.operations = [{plugin:'habits',operation:'checkin',...manifest.operations.checkin}];
+  h.state.examples = [example];
+  h.respond = async cmd => cmd === 'run_query' ? [{id:'habit-gym',title:'Gym'}] : undefined;
   await h.render(); await h.$('auto-new').fire('click');
-  assert.equal(control(h, 'Start from an example'), undefined);
-  assert.equal(control(h, 'Then').children.length, 1);
+  const examples = control(h, 'Start from an example');
+  assert.ok(examples.children.some(n => text(n) === example.name));
+  examples.value='0'; await examples.fire('change');
+  assert.ok(control(h, 'Then').children.some(n => text(n) === 'Habits: Record a check-in'));
+  assert.equal(control(h,'id').tag,'select');
+  await submit(h); assert.match(h.$('auto-error').textContent,/Choose an available habit/);
+  assert.equal(h.requests.some(r=>r.name==='rule_create'),false);
+  const habit = control(h,'id'); assert.ok(habit.children.some(n=>text(n)==='Gym' && n.value==='habit-gym'));
+  habit.value='habit-gym'; await submit(h);
+  const saved=h.requests.find(r=>r.name==='rule_create').args.rule;
+  assert.equal(saved.action.args.id,'habit-gym');
+  assert.equal(saved.action.args.status,'done');
+  assert.equal(saved.action.args.day,'{{event.completed_date}}');
+  assert.equal(saved.filter[0].value,'gym');
+  const summary=h.run(`ruleSentence(${JSON.stringify(saved)}, autoState)`);
+  assert.match(summary,/When To-do: A task is marked done \(with conditions\) → Habits: Record a check-in for Gym/);
+  assert.doesNotMatch(summary,/default today|daily target/);
+  assert.ok(h.requests.some(r=>r.cmd==='run_query' && r.plugin==='habits' && r.name==='habits' && r.space==='personal'));
 });
 
-test('action labels are curated and ID actions require a matching app event', () => {
+test('action labels are curated and required IDs need a picker or matching app event', () => {
   const h = harness();
   assert.equal(h.run('autoActionLabel({plugin:"todo",operation:"create"})'), 'Create a task');
   assert.equal(h.run('autoActionAvailable({plugin:"voice",operation:"capture_audio"}, {})'), false);
@@ -326,6 +346,8 @@ test('action labels are curated and ID actions require a matching app event', ()
   const event = {plugin:'habits',payload:{id:{type:'id',required:true}}};
   assert.equal(h.run(`autoActionAvailable(${JSON.stringify(operation)}, ${JSON.stringify(event)})`), true);
   event.plugin='todo';
+  assert.equal(h.run(`autoActionAvailable(${JSON.stringify(operation)}, ${JSON.stringify(event)})`), true);
+  operation.params={other_id:{type:'id',required:true}};
   assert.equal(h.run(`autoActionAvailable(${JSON.stringify(operation)}, ${JSON.stringify(event)})`), false);
 });
 
