@@ -23,6 +23,8 @@ pub fn build_plugin(dir: &Path) -> Result<PathBuf> {
     let output = Command::new(cargo)
         .args(["build", "--release", "--target", TARGET, "--manifest-path"])
         .arg(&cargo_toml)
+        .arg("--target-dir")
+        .arg(dir.join("target"))
         .output()
         .map_err(|e| RuntimeError::Build(format!("could not run cargo: {e}")))?;
     if !output.status.success() {

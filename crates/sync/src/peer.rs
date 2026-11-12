@@ -17,7 +17,7 @@
 //!   GET  /challenge                   single-use request nonce
 //!   POST /pair                        JSON PairRequest -> PairResponse
 
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -42,6 +42,8 @@ use crate::transport::{BatchStore, FolderStore};
 const MAX_BATCH_BODY: usize = 32 * 1024 * 1024;
 const MAX_SNAPSHOT_BODY: usize = 128 * 1024 * 1024;
 const MAX_PAIR_BODY: usize = 64 * 1024;
+const MAX_CLOSE_DRAIN: usize = 64 * 1024;
+const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
 
 type RosterHook = Box<dyn Fn(&Roster) -> Result<()> + Send + Sync>;
 
@@ -297,18 +299,39 @@ impl PeerServer {
                             let (endpoint, requests) = (endpoint.clone(), requests.clone());
                             tokio::spawn(async move {
                                 let _permit = permit;
+                                let rejected = Arc::new(AtomicBool::new(false));
+                                let response_rejected = rejected.clone();
                                 let service = hyper::service::service_fn(move |request| {
-                                    handle(endpoint.clone(), requests.clone(), request)
+                                    let response =
+                                        handle(endpoint.clone(), requests.clone(), request);
+                                    let rejected = response_rejected.clone();
+                                    async move {
+                                        let response = response.await?;
+                                        rejected.store(
+                                            response.status().is_client_error()
+                                                || response.status().is_server_error(),
+                                            Ordering::Relaxed,
+                                        );
+                                        Ok::<_, Infallible>(response)
+                                    }
                                 });
                                 let mut http = hyper::server::conn::http1::Builder::new();
                                 http.keep_alive(false)
                                     .max_buf_size(16 * 1024)
                                     .max_headers(64);
-                                let _ = tokio::time::timeout(
+                                if let Ok(Ok(parts)) = tokio::time::timeout(
                                     Duration::from_secs(15),
-                                    http.serve_connection(TokioIo::new(stream), service),
+                                    http.serve_connection(TokioIo::new(stream), service)
+                                        .without_shutdown(),
                                 )
-                                .await;
+                                .await
+                                {
+                                    close_connection(
+                                        parts.io.into_inner(),
+                                        rejected.load(Ordering::Relaxed),
+                                    )
+                                    .await;
+                                }
                             });
                         }
                     });
@@ -339,6 +362,37 @@ impl Drop for PeerServer {
             let _ = thread.join();
         }
     }
+}
+
+/// Send FIN after the response, then bound the unread-input drain so a reset
+/// cannot race the error response. Never collect or drain the entire upload.
+async fn close_connection(stream: tokio::net::TcpStream, rejected: bool) {
+    let Ok(stream) = stream.into_std() else {
+        return;
+    };
+    if stream.shutdown(Shutdown::Write).is_err() || !rejected {
+        return;
+    }
+    let Ok(stream) = tokio::net::TcpStream::from_std(stream) else {
+        return;
+    };
+    let _ = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+        let mut remaining = MAX_CLOSE_DRAIN;
+        let mut buffer = [0; 4096];
+        while remaining > 0 {
+            if stream.readable().await.is_err() {
+                break;
+            }
+            let limit = remaining.min(buffer.len());
+            match stream.try_read(&mut buffer[..limit]) {
+                Ok(0) => break,
+                Ok(read) => remaining -= read,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(_) => break,
+            }
+        }
+    })
+    .await;
 }
 
 pub(crate) type PeerResponse = Response<Full<Bytes>>;

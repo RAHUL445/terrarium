@@ -260,8 +260,9 @@ fn oversized_declared_bodies_are_rejected_before_reading_or_allocating_them() {
         .set_read_timeout(Some(std::time::Duration::from_secs(3)))
         .unwrap();
     chunked.write_all(b"POST /v1/pair HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n10001\r\n").unwrap();
-    chunked.write_all(&vec![b'x'; 64 * 1024 + 1]).unwrap();
-    chunked.write_all(b"\r\n0\r\n\r\n").unwrap();
+    // Rejection can arrive while the client is still sending the body.
+    let _ = chunked.write_all(&vec![b'x'; 64 * 1024 + 1]);
+    let _ = chunked.write_all(b"\r\n0\r\n\r\n");
     let mut response = String::new();
     chunked.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 413"), "{response}");
