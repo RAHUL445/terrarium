@@ -3,6 +3,49 @@ const assert = require("node:assert/strict");
 const views = require("../views.js");
 const { rendererHarness } = require("./helpers/renderer-dom.cjs");
 
+test("unavailable saved choices fail closed without dropping valid filters", async () => {
+  const view = { filters: [{ param: "lists", label: "Lists", multiple: true, choices_query: "lists" }] };
+  const bridge = { query: async () => [{ value: "l1" }, { value: "l2" }] };
+  await views.validateChoices(view, { filters: '{"lists":"l1,l2"}' }, bridge);
+  await assert.rejects(views.validateChoices(view, { filters: '{"lists":"l1,removed"}' }, bridge), /unavailable choice/);
+  await views.validateChoices(view, { filters: '{}' }, bridge);
+});
+
+test("structured filters and page focus reach SQL before client presentation", async () => {
+  const entry = { query: "tasks", view: { title_column: "title", params: { page_focus: "" },
+    filters: [{ param: "lists" }, { param: "tags" }], columns: [{ key: "title", type: "string" }] } };
+  let received;
+  const bridge = views.wrapBridge({ query: async (name, params) => { received = { name, params }; return [{ title: "SQL matched notes" }]; } }, entry,
+    { filters: JSON.stringify({ lists: "l1,l2", tags: "work" }) }, "notes match");
+  const rows = await bridge.query("tasks", { filter: "all" });
+  assert.deepEqual(received.params, { filter: "all", lists: "l1,l2", tags: "work", page_focus: "notes match" });
+  assert.equal(rows.length, 1); // No second text filter over a truncated presentation.
+  await bridge.query("choices", {});
+  assert.deepEqual(received, { name: "choices", params: {} });
+  assert.throws(() => views.filterParams(entry.view, { filters: '{"removed":"x"}' }), /no longer available/);
+  assert.throws(() => views.filterParams(entry.view, { filters: "not json" }), /invalid/);
+});
+
+test("dynamic status choices supply stable board ids and labels", async () => {
+  const entry = { query: "tasks", view: { columns: [
+    { key: "title", type: "string" },
+    { key: "status", label: "Status", type: "enum", choices_query: "statuses", move: { op: "organize", args: { status_id: "{{value}}" } } }],
+  } };
+  const resolved = await views.resolveChoices(entry, { query: async (name) => {
+    assert.equal(name, "statuses"); return [{ value: "s1", label: "Review" }, { value: "s2", label: "Done" }];
+  } });
+  assert.equal(entry.view.columns[1].values, undefined);
+  const template = views.template(resolved, { layout: "board", group: "status" });
+  assert.deepEqual(template.body.columns.map(c => c.value), ["s1", "s2"]);
+  assert.equal(views.prepareRows([{ title: "Task", status: "s1" }], resolved.view, {}, "")[0].status__label, "Review");
+});
+
+test("string grouping is retained for lists and rejected for boards", () => {
+  const view = { columns: [{ key: "project", type: "string" }, { key: "stage", type: "enum", values: ["open"] }] };
+  assert.equal(views.settings(view, { layout: "list", group: "project" }).group, "project");
+  assert.equal(views.settings(view, { layout: "board", group: "project" }).group, "stage");
+});
+
 const plugins = [
   {
     id: "todo",

@@ -361,6 +361,34 @@
     // A plugin's viewable query drawn by the shell: the plugin's own bridge,
     // rows filtered by this placement's focus and sorted by its settings.
     viewWidget(body, placement, config) {
+      if (config.saved_view) {
+        let inner = null, dead = false, seq = 0, signature = "";
+        const load = async () => {
+          const revision = ++seq;
+          try {
+            const saved = await this.service("view_get", { id: config.saved_view });
+            if (dead || revision !== seq) return;
+            if (!saved) throw new Error("The saved view was removed.");
+            if (saved.space !== this.space) throw new Error("This saved view belongs to another space.");
+            const card = this.cards?.get(placement.id);
+            const heading = card?.querySelector(".widget-head h2");
+            if (heading) heading.textContent = saved.title;
+            card?.setAttribute("aria-label", saved.title);
+            const next = JSON.stringify(saved.config);
+            if (inner && next === signature) return inner.refresh();
+            inner?.dispose(); body.replaceChildren(); signature = next;
+            inner = this.viewWidget(body, placement, saved.config);
+            await inner.ready;
+          } catch (error) {
+            if (dead || revision !== seq) return;
+            inner?.dispose(); inner = null; signature = "";
+            body.replaceChildren(this.el("p", { class: "pp-error" }, `Saved view unavailable: ${String(error)}. Choose another view in widget settings.`));
+          }
+        };
+        const handle = { refresh: load, flush: async () => inner ? inner.flush() : true,
+          snapshot: () => inner?.snapshot(), dispose() { dead = true; seq++; inner?.dispose(); } };
+        handle.ready = load(); return handle;
+      }
       const inert = { refresh() {}, flush: async () => true, dispose() {} };
       if (!config.plugin || !config.query) {
         body.append(this.el("p", { class: "muted" }, "Choose what to show: edit the page and open this widget's settings."));
@@ -377,16 +405,9 @@
         return inert;
       }
       const focus = this.focusOf(placement);
-      const view = this.o.mount(
-        body,
-        window.TerrariumViews.template(found, config, this.grid.sizeClass(placement)),
-        window.TerrariumViews.wrapBridge(this.o.bridge(found.plugin.id), found, config, focus),
-        {
-          snapshot: this.o.session.get(this.sessionKey(placement.id)),
-          page: { focus, title: this.page?.title || "" },
-          size: this.grid.sizeClass(placement),
-        },
-      );
+      const view = window.TerrariumViews.mount(body, { entry: found, config,
+        bridge: this.o.bridge(found.plugin.id), focus, mount: this.o.mount,
+        snapshot: this.o.session.get(this.sessionKey(placement.id)), size: this.grid.sizeClass(placement), pageTitle: this.page?.title || "" });
       view.sessionKey = this.sessionKey(placement.id);
       return view;
     }
@@ -498,6 +519,17 @@
         .sort((left, right) => left.view.title.localeCompare(right.view.title));
       const row = (name, label, control, help = "") => this.el("div", { class: "page-config-field" },
         this.el("span", { class: "page-config-label", id: `pp-cfg-${name}` }, label), control, help || "");
+      const saved = this.el("select", { "aria-label": "Saved view" },
+        this.el("option", { value: "" }, "Custom view for this page"));
+      if (fields.saved_view) saved.append(this.el("option", { value: fields.saved_view, selected: true }, "Saved view"));
+      const savedHelp = this.el("p", { class: "page-config-help" }, "Choose a shared view created in the app's Saved views tab. Changes to that view appear on every page that uses it.");
+      this.service("views_list", { space: this.space }).then(views => {
+        const keep = saved.value;
+        saved.replaceChildren(this.el("option", { value: "" }, "Custom view for this page"),
+          ...views.map(view => this.el("option", { value: view.id }, view.title)));
+        if (keep && !views.some(view => view.id === keep)) saved.append(this.el("option", { value: keep }, "Unavailable saved view"));
+        saved.value = keep;
+      }).catch(error => { savedHelp.textContent = `Could not load saved views: ${String(error)}`; });
 
       const app = this.el("select", { "aria-labelledby": "pp-cfg-view-app" },
         this.el("option", { value: "" }, "Choose an app"),
@@ -644,6 +676,9 @@
 
       const update = () => {
         apply();
+        for (const element of [app, data, sort, group, date, ...layoutByValue.values(), ...dirByValue.values()]) {
+          if (saved.value) element.disabled = true;
+        }
         dataAlert.hidden = true;
         const found = selected();
         const parts = this.filterParts(entry, read(), focus.read());
@@ -660,6 +695,11 @@
       };
 
       fillData(false);
+      saved.addEventListener("change", () => {
+        app.disabled = false;
+        data.disabled = !app.value;
+        update();
+      });
       app.addEventListener("change", () => {
         fillData(true);
         resetDisplay();
@@ -672,7 +712,7 @@
       for (const input of layoutByValue.values()) input.addEventListener("change", update);
       for (const input of dirByValue.values()) input.addEventListener("change", update);
 
-      rows.push(summary, section("Data", [
+      rows.push(section("Saved view", [saved, savedHelp]), summary, section("Data", [
         row("view-app", "App", app),
         row("view-data", "Data", data),
         dataAlert,
@@ -687,6 +727,7 @@
       rows.push(section("Filters", focus.rows));
 
       const read = () => {
+        if (saved.value) return { saved_view: saved.value };
         const found = selected();
         const raw = readRaw();
         const safe = found ? window.TerrariumViews.settings(found.view, raw) : raw;
@@ -698,10 +739,12 @@
           dir: safe.dir || "asc",
           group: safe.group || "",
           date: safe.date || "",
+          filters: raw.plugin === fields.plugin && raw.query === fields.query ? fields.filters : undefined,
         });
       };
 
       const validate = () => {
+        if (saved.value) return true;
         if (data.value) return true;
         dataAlert.hidden = false;
         data.focus();

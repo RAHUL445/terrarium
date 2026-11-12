@@ -342,8 +342,18 @@ const blobCacheDrop = (id) => { if (id) blobCache.delete(id); };
 function bridge(plugin) {
   const space = currentSpace;
   const desktopSave = Boolean(window.__TAURI__ && !/Android/.test(navigator.userAgent) && !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname));
-  return {
+  const api = {
     plugin,
+    mountViewLibrary: (node, spec) => window.TerrariumViewLibrary.mount(node, spec, {
+      plugin,
+      plugins: pluginList.plugins,
+      bridge: api,
+      service: (name, args = {}) => {
+        if (space !== currentSpace) return Promise.reject(new Error("The active space changed. Reopen this view before saving."));
+        return call("service", { name, args: { space, ...args } });
+      },
+      toast,
+    }),
     command: (kind, id, args) => HOST_BRIDGE_COMMANDS.has(id)
       ? call("command", { kind, id, space, args }) : Promise.reject(new Error("Not allowed")),
     openRef: (hit) => {
@@ -394,6 +404,7 @@ function bridge(plugin) {
     // Any successful action may change data shown elsewhere.
     changed: () => refreshPluginViews(),
   };
+  return api;
 }
 
 // ---- History ----

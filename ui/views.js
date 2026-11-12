@@ -40,7 +40,8 @@
     const layout = allowedLayouts.includes(safe.layout) ? safe.layout : "list";
     const sort = keys.has(safe.sort) ? safe.sort : "";
     const dir = safe.dir === "desc" ? "desc" : "asc";
-    let group = keys.has(safe.group) && enumColumns.some((column) => column.key === safe.group) ? safe.group : "";
+    const groupable = layout === "board" ? enumColumns : columns(view, ["enum", "string"]);
+    let group = keys.has(safe.group) && groupable.some((column) => column.key === safe.group) ? safe.group : "";
     let date = keys.has(safe.date) && dateColumns.some((column) => column.key === safe.date) ? safe.date : "";
     if (layout === "board" && !group) group = enumColumns[0]?.key || "";
     if (layout === "calendar" && !date) date = dateColumns[0]?.key || "";
@@ -87,7 +88,7 @@
   }
 
   function enumLabel(column, value) {
-    if (value == null || value === "") return "";
+    value = value ?? "";
     const values = Array.isArray(column?.values) ? column.values : [];
     const labels = Array.isArray(column?.labels) ? column.labels : [];
     const index = values.findIndex((item) => item === value);
@@ -212,7 +213,7 @@
         type: "list",
         query: entry.query,
         params,
-        ...(s.group ? { group: s.group } : {}),
+        ...(s.group ? { group: enumColumns.some(c => c.key === s.group) ? `${s.group}__label` : s.group } : {}),
         empty: "Nothing to show.",
         empty_focus: "Nothing matches “{{$page.focus}}”.",
         item,
@@ -222,11 +223,88 @@
 
   function wrapBridge(base, entry, config, focus) {
     return Object.assign({}, base, {
-      query: async (name, params) => prepareRows(await base.query(name, params), entry.view, config, focus),
+      query: async (name, params) => {
+        if (name !== entry.query) return base.query(name, params);
+        const values = filterParams(entry.view, config);
+        const scoped = Object.assign({}, params, values);
+        const queryFocus = Object.hasOwn(entry.view.params || {}, "page_focus");
+        if (queryFocus) scoped.page_focus = String(focus || "");
+        return prepareRows(await base.query(name, scoped), entry.view, config, queryFocus ? "" : focus);
+      },
     });
   }
 
-  const api = { viewsOf, find, columns, layouts, settings, layoutFor, compareValues, prepareRows, template, wrapBridge };
+  function filterParams(view, config) {
+    let filters = {};
+    if (config?.filters) {
+      try { filters = JSON.parse(config.filters); } catch (_) { throw new Error("Saved filters are invalid. Edit this view to repair them."); }
+    }
+    if (!filters || typeof filters !== "object" || Array.isArray(filters)) throw new Error("View filters must be an object.");
+    const allowed = new Set((view.filters || []).map(f => f.param));
+    for (const [key, value] of Object.entries(filters)) {
+      if (!allowed.has(key) || (value !== null && typeof value === "object")) throw new Error(`Filter ${key} is no longer available. Edit this view to repair it.`);
+    }
+    return filters;
+  }
+
+  async function resolveChoices(entry, bridge) {
+    const view = structuredClone(entry.view);
+    await Promise.all((view.columns || []).map(async column => {
+      if (!column.choices_query) return;
+      const rows = await bridge.query(column.choices_query, {});
+      column.values = rows.map(r => String(r.value ?? ""));
+      column.labels = rows.map(r => String(r.label ?? r.value ?? ""));
+    }));
+    return { ...entry, view };
+  }
+
+  async function validateChoices(view, config, bridge) {
+    const filters = filterParams(view, config);
+    await Promise.all((view.filters || []).map(async definition => {
+      const value = filters[definition.param];
+      if (value == null || value === "") return;
+      let choices = definition.values || [];
+      if (definition.choices_query) {
+        choices = (await bridge.query(definition.choices_query, {})).map(row => String(row.value ?? ""));
+      } else if (!choices.length) return;
+      const selected = definition.multiple ? String(value).split(",") : [String(value)];
+      if (selected.some(item => !choices.includes(item))) {
+        throw new Error(`${definition.label} contains an unavailable choice. Edit this view to repair it.`);
+      }
+    }));
+  }
+
+  // Used by both page placements and the host view library inside plugin pages.
+  function mount(body, options) {
+    let child = null, dead = false, revision = 0, signature = "";
+    const load = async () => {
+      const seq = ++revision;
+      try {
+        await validateChoices(options.entry.view, options.config, options.bridge);
+        const entry = await resolveChoices(options.entry, options.bridge);
+        if (dead || seq !== revision) return;
+        const next = JSON.stringify(entry.view);
+        if (child && signature === next) { await child.refresh(); return; }
+        child?.dispose(); body.replaceChildren(); signature = next;
+        child = (options.mount || root.TerrariumRenderer.mount)(body, template(entry, options.config, options.size),
+          wrapBridge(options.bridge, entry, options.config, options.focus), { snapshot: options.snapshot, size: options.size,
+            page: { focus: options.focus || "", title: options.pageTitle || "" } });
+        await child.ready;
+      } catch (error) {
+        if (dead || seq !== revision) return;
+        child?.dispose(); child = null; signature = "";
+        const message = document.createElement("p"); message.className = "pp-error";
+        message.textContent = String(error); body.replaceChildren(message);
+      }
+    };
+    const handle = { refresh: load, flush: async (...args) => child ? child.flush(...args) : true,
+      snapshot: () => child?.snapshot(),
+      dispose() { dead = true; revision++; child?.dispose(); } };
+    handle.ready = load();
+    return handle;
+  }
+
+  const api = { viewsOf, find, columns, layouts, settings, layoutFor, compareValues, prepareRows, template, wrapBridge, filterParams, resolveChoices, validateChoices, mount };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TerrariumViews = api;
 })(typeof window === "undefined" ? globalThis : window);

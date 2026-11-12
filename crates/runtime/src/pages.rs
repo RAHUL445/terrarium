@@ -27,10 +27,11 @@ const MAX_TITLE: usize = 40;
 const MAX_FOCUS: usize = 40;
 const MAX_ROWS: i64 = 400;
 const MAX_CONFIG_BYTES: usize = 4096;
+const MAX_FILTERS_BYTES: usize = 2048;
 const MAX_ID: usize = 64;
 
 const SCHEMA: &str = r#"{
-  "version": 3,
+  "version": 4,
   "tables": [
     { "name": "pages", "delete_policy": "delete-wins", "columns": [
       { "name": "space", "type": "text" },
@@ -50,6 +51,11 @@ const SCHEMA: &str = r#"{
       { "name": "h", "type": "integer", "default": 3 },
       { "name": "config", "type": "text" },
       { "name": "focus", "type": "text" }
+    ]},
+    { "name": "saved_views", "delete_policy": "delete-wins", "columns": [
+      { "name": "space", "type": "text" },
+      { "name": "title", "type": "text" },
+      { "name": "config", "type": "text" }
     ]}
   ]
 }"#;
@@ -84,6 +90,14 @@ pub struct Placement {
     /// all items, other text filters by that project, tag or word.
     #[serde(default)]
     pub focus: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedView {
+    pub id: String,
+    pub space: String,
+    pub title: String,
+    pub config: Map<String, Value>,
 }
 
 pub fn home_id(space: &str) -> String {
@@ -148,7 +162,70 @@ fn valid_manifest_id(id: &str) -> bool {
 }
 
 fn valid_view_setting_id(id: &str) -> bool {
-    id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn valid_saved_view_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn clean_filters(value: &Value) -> Result<Value> {
+    let raw = value.as_str().ok_or_else(|| bad("View filters must be JSON text"))?;
+    if raw.len() > MAX_FILTERS_BYTES {
+        return Err(bad("View filters are limited to 2 KB"));
+    }
+    let parsed: Value = serde_json::from_str(raw).map_err(|_| bad("View filters must be a JSON object"))?;
+    let filters = parsed.as_object().ok_or_else(|| bad("View filters must be a JSON object"))?;
+    if filters.iter().any(|(key, value)| {
+        !valid_view_setting_id(key)
+            || !(value.is_null() || value.is_boolean() || value.is_string() || value.is_number())
+    }) {
+        return Err(bad("View filters need safe parameter names and scalar values"));
+    }
+    Ok(json!(raw))
+}
+
+/// Validates a complete reusable view definition; references cannot nest.
+pub fn clean_saved_view_config(config: &Map<String, Value>) -> Result<Map<String, Value>> {
+    if config.contains_key("saved_view") {
+        return Err(bad("A saved view cannot reference another saved view"));
+    }
+    let allowed = ["plugin", "query", "layout", "sort", "dir", "group", "date", "filters"];
+    if config.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(bad("Saved view has an unknown setting"));
+    }
+    let plugin = config.get("plugin").and_then(Value::as_str)
+        .filter(|id| valid_manifest_id(id)).ok_or_else(|| bad("Saved view needs a valid app id"))?;
+    let query = config.get("query").and_then(Value::as_str)
+        .filter(|id| valid_view_setting_id(id)).ok_or_else(|| bad("Saved view needs a valid data id"))?;
+    let mut out = Map::new();
+    out.insert("plugin".into(), json!(plugin));
+    out.insert("query".into(), json!(query));
+    if let Some(value) = config.get("layout") {
+        let layout = value.as_str().filter(|value| ["list", "table", "board", "calendar"].contains(value))
+            .ok_or_else(|| bad("Invalid saved view layout"))?;
+        out.insert("layout".into(), json!(layout));
+    }
+    if let Some(value) = config.get("dir") {
+        let dir = value.as_str().filter(|value| ["asc", "desc"].contains(value))
+            .ok_or_else(|| bad("Invalid saved view sort direction"))?;
+        out.insert("dir".into(), json!(dir));
+    }
+    for key in ["sort", "group", "date"] {
+        if let Some(value) = config.get(key) {
+            let setting = value.as_str().filter(|id| id.is_empty() || valid_view_setting_id(id))
+                .ok_or_else(|| bad(format!("Invalid saved view `{key}` setting")))?;
+            if !setting.is_empty() {
+                out.insert(key.into(), json!(setting));
+            }
+        }
+    }
+    if let Some(value) = config.get("filters") {
+        out.insert("filters".into(), clean_filters(value)?);
+    }
+    Ok(out)
 }
 
 fn random_id(prefix: char) -> Result<String> {
@@ -175,6 +252,17 @@ fn text(row: &Map<String, Value>, key: &str) -> Option<String> {
 fn truthy(row: &Map<String, Value>, key: &str) -> bool {
     row.get(key)
         .is_some_and(|v| v.as_bool().unwrap_or(v.as_i64().unwrap_or(0) != 0))
+}
+
+fn saved_view_info(row: &Map<String, Value>) -> Option<SavedView> {
+    Some(SavedView {
+        id: text(row, "id")?,
+        space: text(row, "space")?,
+        title: text(row, "title")?,
+        config: text(row, "config")
+            .and_then(|config| serde_json::from_str(&config).ok())
+            .unwrap_or_default(),
+    })
 }
 
 /// Checks a placement's ids, keeps it inside the grid and its config small.
@@ -224,6 +312,8 @@ pub fn host_widgets() -> Value {
             "config": {
                 "plugin": { "type": "text", "label": "App", "max_length": 63, "default": "" },
                 "query": { "type": "text", "label": "Data", "max_length": 64, "default": "" },
+                "saved_view": { "type": "text", "label": "Saved view", "max_length": 64, "default": "" },
+                "filters": { "type": "text", "label": "Filters", "max_length": 2048, "default": "" },
                 "layout": {
                     "type": "enum",
                     "label": "Show as",
@@ -254,6 +344,11 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
         .as_array()
         .and_then(|w| w.iter().find(|w| w["id"] == widget))
         .ok_or_else(|| bad(format!("`{widget}` is not a built-in widget")))?;
+    let preserved_filters = if widget == "view" {
+        config.get("filters").map(clean_filters).transpose()?
+    } else {
+        None
+    };
     let mut out = clean_config(&spec["page"]["config"], config);
     if widget == "link" {
         let web = out
@@ -279,6 +374,14 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
             if !ok {
                 out.remove(key);
             }
+        }
+        if let Some(id) = out.get("saved_view").and_then(Value::as_str) {
+            if !valid_saved_view_id(id) {
+                out.remove("saved_view");
+            }
+        }
+        if let Some(filters) = preserved_filters {
+            out.insert("filters".into(), filters);
         }
     }
     Ok(out)
@@ -430,6 +533,53 @@ impl Pages {
                 })
             })
             .collect())
+    }
+
+    pub fn list_saved_views(&self, space: &str) -> Result<Vec<SavedView>> {
+        let rows = self.store.query(
+            "SELECT id, space, title, config FROM saved_views WHERE _deleted IS NULL AND space = ?1 ORDER BY title COLLATE NOCASE, id",
+            &[json!(space)],
+        )?;
+        Ok(rows.iter().filter_map(saved_view_info).collect())
+    }
+
+    pub fn get_saved_view(&self, id: &str) -> Result<Option<SavedView>> {
+        let rows = self.store.query(
+            "SELECT id, space, title, config FROM saved_views WHERE _deleted IS NULL AND id = ?1",
+            &[json!(id)],
+        )?;
+        Ok(rows.first().and_then(saved_view_info))
+    }
+
+    pub fn save_view(&mut self, space: &str, id: Option<&str>, title: &str, config: Map<String, Value>) -> Result<SavedView> {
+        let title = clean_title(title)?;
+        let config = clean_saved_view_config(&config)?;
+        let updating = id.is_some();
+        let id = match id {
+            Some(id) => {
+                if !valid_saved_view_id(id) { return Err(bad(format!("`{id}` is not a valid saved view id"))); }
+                let existing = self.get_saved_view(id)?.ok_or_else(|| bad(format!("no saved view `{id}`")))?;
+                if existing.space != space { return Err(bad("Saved view belongs to another space")); }
+                id.to_string()
+            }
+            None => random_id('v')?,
+        };
+        let mut values = Map::new();
+        values.insert("space".into(), json!(space));
+        values.insert("title".into(), json!(title));
+        values.insert("config".into(), json!(serde_json::to_string(&config)?));
+        self.store.write(|w| {
+            if updating { w.update("saved_views", &id, &values) }
+            else { w.upsert("saved_views", &id, &values) }
+        })?;
+        self.get_saved_view(&id)?.ok_or_else(|| bad("Saved view could not be read after saving"))
+    }
+
+    /// Removes a saved definition only. Placements referencing its id remain intact.
+    pub fn remove_saved_view(&mut self, id: &str) -> Result<()> {
+        if self.get_saved_view(id)?.is_none() { return Err(bad(format!("no saved view `{id}`"))); }
+        self.store.write(|w| w.delete("saved_views", id))?;
+        Ok(())
     }
 
     pub fn create(&mut self, space: &str, title: &str, icon: Option<&str>) -> Result<PageInfo> {
@@ -688,6 +838,88 @@ mod tests {
         );
     }
 
+    fn named_config(filters: &str) -> Map<String, Value> {
+        json!({"plugin":"todo", "query":"tasks", "layout":"list", "filters":filters})
+            .as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn saved_views_round_trip_update_and_leave_shared_placements_on_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages = open(&dir, "device-a");
+        let saved = pages.save_view("personal", None, "Open tasks", named_config(r#"{"status":"open"}"#)).unwrap();
+        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved.clone()));
+        assert_eq!(pages.list_saved_views("personal").unwrap(), vec![saved.clone()]);
+        let home = pages.ensure_home("personal", vec![]).unwrap();
+        let mut placement = widget(HOST_WIDGETS, "view", 0, 0);
+        placement.config = json!({"saved_view": saved.id}).as_object().unwrap().clone();
+        let placement = pages.save(&home.id, vec![placement]).unwrap().remove(0);
+        let updated = pages.save_view("personal", Some(&saved.id), "Urgent", named_config(r#"{"status":"urgent"}"#)).unwrap();
+        assert_eq!(updated.id, saved.id);
+        assert_eq!(updated.title, "Urgent");
+        assert_eq!(pages.placements(&home.id).unwrap()[0], placement);
+        pages.remove_saved_view(&saved.id).unwrap();
+        assert!(pages.get_saved_view(&saved.id).unwrap().is_none());
+        assert_eq!(pages.placements(&home.id).unwrap()[0].config["saved_view"], saved.id);
+    }
+
+    #[test]
+    fn saved_view_configs_accept_empty_optional_fields_and_round_trip_builder_shape() {
+        let config = json!({"plugin":"todo", "query":"tasks", "layout":"list", "sort":"", "dir":"asc", "group":"", "date":"", "filters":"{}"});
+        let clean = clean_saved_view_config(config.as_object().unwrap()).unwrap();
+        assert!(!clean.contains_key("sort"));
+        assert!(!clean.contains_key("group"));
+        assert!(!clean.contains_key("date"));
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages = open(&dir, "device-a");
+        let saved = pages.save_view("personal", None, "Default tasks", clean).unwrap();
+        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn saved_view_configs_reject_bad_filters_and_nested_references() {
+        for invalid in ["[]", r#"{"bad-key":"x"}"#, r#"{"status":{"nested":true}}"#] {
+            assert!(clean_saved_view_config(&named_config(invalid)).is_err(), "accepted {invalid}");
+        }
+        assert!(clean_saved_view_config(&named_config(&format!("{{\"q\":\"{}\"}}", "x".repeat(2100)))).is_err());
+        let mut recursive = named_config("{}");
+        recursive.insert("saved_view".into(), json!("vabc"));
+        assert!(clean_saved_view_config(&recursive).is_err());
+        assert!(clean_host_config("view", json!({"filters":"not-json"}).as_object().unwrap()).is_err());
+    }
+
+    #[test]
+    fn saved_view_update_cannot_cross_spaces_and_legacy_view_config_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages = open(&dir, "device-a");
+        let saved = pages.save_view("personal", None, "Tasks", named_config("{}")).unwrap();
+        assert!(pages.save_view("work", Some(&saved.id), "Hijack", named_config("{}")).is_err());
+        assert_eq!(pages.get_saved_view(&saved.id).unwrap().unwrap().space, "personal");
+        let legacy = json!({"plugin":"todo", "query":"tasks", "layout":"board", "sort":"due", "dir":"desc", "group":"lane", "date":"due"});
+        assert_eq!(clean_host_config("view", legacy.as_object().unwrap()).unwrap(), legacy.as_object().unwrap().clone());
+        let reference = json!({"saved_view":"vabc123"});
+        assert_eq!(clean_host_config("view", reference.as_object().unwrap()).unwrap(), reference.as_object().unwrap().clone());
+        let filters = format!("{{\"q\":\"{}\"}}", "x".repeat(2030));
+        let config = json!({"filters":filters.clone()});
+        assert_eq!(clean_host_config("view", config.as_object().unwrap()).unwrap()["filters"], filters);
+    }
+
+    #[test]
+    fn a_version_three_store_gains_the_saved_views_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old_schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        old_schema["version"] = json!(3);
+        old_schema["tables"].as_array_mut().unwrap().retain(|table| table["name"] != "saved_views");
+        let old_schema: PluginSchema = serde_json::from_value(old_schema).unwrap();
+        let old = CoreStore::open(dir.path().join(format!("{PAGES_STORE_ID}.db")), StoreConfig {
+            space: "personal".into(), plugin: PAGES_STORE_ID.into(), device: "a".into(), user: "owner".into(),
+        }, old_schema, Box::new(SystemTime)).unwrap();
+        drop(old);
+        let mut pages = open(&dir, "a");
+        let saved = pages.save_view("personal", None, "Tasks", named_config("{}")).unwrap();
+        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved));
+    }
+
     #[test]
     fn host_widgets_list_the_view_widget_hidden_from_home() {
         let all = host_widgets().as_array().cloned().unwrap_or_default();
@@ -824,10 +1056,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v1: PluginSchema = serde_json::from_str(
             &SCHEMA
-                .replace("\"version\": 3", "\"version\": 1")
+                .replace("\"version\": 4", "\"version\": 1")
                 .replace(",\n      { \"name\": \"focus\", \"type\": \"text\" }", ""),
         )
         .unwrap();
+        assert_eq!(v1.version, 1);
         assert!(v1.tables[0].columns.iter().all(|c| c.name != "focus"));
         let mut old = CoreStore::open(
             dir.path().join(format!("{PAGES_STORE_ID}.db")),

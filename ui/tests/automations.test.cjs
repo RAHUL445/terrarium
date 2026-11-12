@@ -309,7 +309,8 @@ test('review refuses a token for a trigger or action different from the displaye
 
 test('Gym example offers titled habit choices, requires a selection and saves a fixed ID', async () => {
   const h = harness();
-  const manifest = JSON.parse(readFileSync(join(__dirname, '../../../terrarium-plugins/packages/habits/manifest.json'), 'utf8'));
+  const packages = process.env.TERRA_PLUGIN_SOURCE || join(__dirname, '../../../terrarium-plugins/packages');
+  const manifest = JSON.parse(readFileSync(join(packages, 'habits/manifest.json'), 'utf8'));
   const services = readFileSync(join(__dirname, '../../crates/runtime/src/services.rs'), 'utf8');
   const example = JSON.parse(services.match(/json!\(\[({\s*"name": "Gym task done[^]*?})\]\)/)[1]);
   h.state.events = [{plugin:'todo',event:'task_done',description:'A task was marked done.',payload:{tags:{type:'string'},completed_date:{type:'date',required:true}}}];

@@ -364,6 +364,24 @@ pub fn invoke(
             Ok(schedules_state(host))
         })(),
         "page_widgets" => Ok(host_widgets()),
+        "views_list" => (|| {
+            Ok(json!(host.pages().list_saved_views(arg_str(args, "space")?).map_err(|e| e.to_string())?))
+        })(),
+        "view_get" => (|| {
+            let id = arg_str(args, "id")?;
+            host.pages().get_saved_view(id).map_err(|e| e.to_string())?
+                .map(|view| Ok(json!(view))).unwrap_or_else(|| Err(format!("no saved view `{id}`")))
+        })(),
+        "view_save" => (|| {
+            let config = arg(args, "config")?.as_object().cloned().ok_or("`config` must be an object")?;
+            let id = args.get("id").and_then(Value::as_str);
+            let view = host.pages_mut().save_view(arg_str(args, "space")?, id, arg_str(args, "title")?, config).map_err(|e| e.to_string())?;
+            Ok(json!(view))
+        })(),
+        "view_remove" => (|| {
+            host.pages_mut().remove_saved_view(arg_str(args, "id")?).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })(),
         "pages_list" => (|| {
             Ok(json!(host
                 .pages()

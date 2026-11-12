@@ -777,10 +777,29 @@ Field rules:
 - `columns`: 1–20 entries in display order.
 - `columns[*].key`: 1–64 characters, only `A-Z`, `a-z`, `0-9`, `_`, unique per view.
 - `columns[*].type`: one of `string`, `text`, `integer`, `number`, `boolean`, `date`, `time`, `id`, `enum`, `json`.
-- Enum columns require `values` (1–12 entries); `labels` is optional but if present must match `values` length.
+- Enum columns require `values` (1–12 entries), or `choices_query` naming a parameterless query returning `value` and `label`. Dynamic choices support user-defined groups/statuses. Include retained archived or unavailable assignments so board cards remain visible. `labels` is optional for fixed values but must match their length when present.
 - `move` is allowed only on enum columns, must point to a declared operation, and that operation must not be destructive.
 - `title_column` must name a declared string/text column.
 - `params` sets fixed values for the query's own declared params only; context params (`today`, `weekday`, `now_ms`, `utc_offset_ms`, `tz`) are host-filled and must not be listed here.
+
+Views may also declare up to 16 `filters`: each has a declared query `param`, a
+`label`, optional `multiple`, and either `choices_query` or fixed `values` and
+`labels`. Without choices the control is text. Multiple choices pass a CSV
+string; the plugin query owns OR/AND and tag matching semantics. Saved filters
+are applied to query parameters before the query runs. A declared `page_focus`
+parameter lets the query intersect page focus before its result limit; otherwise
+the host retains legacy client-side focus matching.
+
+The `view-library` UI node (optional preferred `query`) mounts the host's shared
+view builder inside an app. Definitions live in the space's host store, with
+Apply for a temporary preview, Save changes for all references, and Save as new.
+Host services `views_list`, `view_get`, `view_save`, `view_remove` and commands
+`view.list`, `view.get`, `view.save`, `view.remove` manage them. Config contains
+plugin/query, layout/sort/dir/group/date, and `filters` as JSON text containing
+declared scalar query parameters. A page View placement can use
+`{"saved_view":"<id>"}` while retaining its own geometry and focus. Removed
+definitions or unavailable filter choices remain visibly unresolved; they do
+not fall back to an unfiltered query. Existing inline View placements still work.
 
 Query result requirements:
 

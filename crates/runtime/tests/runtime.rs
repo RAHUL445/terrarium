@@ -420,6 +420,11 @@ fn todo_v4_to_v5_additive_schema_preserves_tasks_and_steps() {
             "list_detail",
             "group_detail",
             "status_detail",
+            "view_list_choices",
+            "view_group_choices",
+            "view_status_choices",
+            "filter_list_choices",
+            "filter_group_choices",
         ] {
             queries.remove(query);
         }
@@ -525,6 +530,21 @@ fn todo_organization_definitions_create_defaults_and_update_metadata() {
     let data = TempDir::new().unwrap();
     let mut host = host(&data);
     host.load(&todo_dir()).unwrap();
+
+    // Inbox is the unassigned (NULL list_id) task set. Generic board lanes
+    // must resolve to category flags without custom status definitions.
+    let virtual_task = host.call("todo", "create", &json!({
+        "title": "Virtual status routing",
+    })).unwrap()["id"].as_str().unwrap().to_string();
+    assert!(todo_stored_task(&host, &virtual_task)["list_id"].is_null());
+    for (virtual_status, category) in [
+        ("@active", "active"),
+        ("@completed", "completed"),
+        ("@not_started", "not_started"),
+    ] {
+        host.call("todo", "organize", &json!({"id": virtual_task, "status_id": virtual_status})).unwrap();
+        assert_eq!(todo_organization_row(&host, &virtual_task)["status_category"], json!(category));
+    }
 
     let list = host
         .call(

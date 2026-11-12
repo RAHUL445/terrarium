@@ -29,7 +29,7 @@ use crate::spaces::DEFAULT_SPACE;
 /// Namespaces of host commands. Plugin ids can't use them.
 pub const HOST_NAMESPACES: &[&str] = &[
     "app", "plugin", "space", "page", "rule", "search", "schedule", "theme", "sync", "backup",
-    "ui", "ref", "link", "blob", "item",
+    "ui", "ref", "link", "blob", "item", "view",
 ];
 
 const SEARCH_LIMIT: usize = 200;
@@ -655,6 +655,50 @@ const HOST_COMMANDS: &[HostCommand] = &[
         confirm: None,
         params: &[],
         run: |host, space, args, d| service(host, "pages_list", Some(space), args, d),
+    },
+    HostCommand {
+        id: "view.list",
+        kind: Kind::Query,
+        effect: Effect::Read,
+        space: true,
+        description: "Saved reusable views in a space.",
+        confirm: None,
+        params: &[],
+        run: |host, space, args, d| service(host, "views_list", Some(space), args, d),
+    },
+    HostCommand {
+        id: "view.get",
+        kind: Kind::Query,
+        effect: Effect::Read,
+        space: false,
+        description: "A saved reusable view by id.",
+        confirm: None,
+        params: &[("id", ParamType::Id, true, "Saved view id")],
+        run: |host, _, args, d| service(host, "view_get", None, args, d),
+    },
+    HostCommand {
+        id: "view.save",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Create or update a reusable view in this space.",
+        confirm: None,
+        params: &[
+            ("id", ParamType::Id, false, "Existing saved view id to update"),
+            ("title", ParamType::String, true, "View title, at most 40 characters"),
+            ("config", ParamType::Json, true, "Direct plugin query and view settings"),
+        ],
+        run: |host, space, args, d| service(host, "view_save", Some(space), args, d),
+    },
+    HostCommand {
+        id: "view.remove",
+        kind: Kind::Action,
+        effect: Effect::Destructive,
+        space: false,
+        description: "Remove a saved view definition. Page placements that reference it are kept.",
+        confirm: Some("Remove this saved view?"),
+        params: &[("id", ParamType::Id, true, "Saved view id")],
+        run: |host, _, args, d| service(host, "view_remove", None, args, d),
     },
     HostCommand {
         id: "page.get",
@@ -1757,6 +1801,21 @@ mod tests {
             HOST_COMMANDS[0].info(),
         ] {
             assert!(serde_json::to_value(command).unwrap().get("bulk").is_none());
+        }
+    }
+
+    #[test]
+    fn saved_view_commands_have_the_requested_scope_and_arguments() {
+        let command = |id| HOST_COMMANDS.iter().find(|command| command.id == id).unwrap();
+        assert_eq!(command("view.list").kind, Kind::Query);
+        assert!(command("view.list").space);
+        assert_eq!(command("view.get").kind, Kind::Query);
+        assert!(!command("view.get").space);
+        assert_eq!(command("view.save").kind, Kind::Action);
+        assert!(command("view.save").space);
+        assert_eq!(command("view.remove").kind, Kind::Action);
+        for id in ["view.list", "view.get", "view.save", "view.remove"] {
+            assert!(HOST_NAMESPACES.contains(&id.split('.').next().unwrap()));
         }
     }
 }

@@ -5,7 +5,8 @@ const {join} = require('node:path');
 const {rendererHarness} = require('./helpers/renderer-dom.cjs');
 const flatten = node => [node, ...(node.children || []).filter(n => typeof n !== 'string').flatMap(flatten)];
 test('grouped feed rows show locale dates, distinct read states and no repeated source', async () => {
-  const template=JSON.parse(readFileSync(join(__dirname,'../../../terrarium-plugins/packages/feeds/ui/page-main.json'),'utf8'));
+  const packages = process.env.TERRA_PLUGIN_SOURCE || join(__dirname, '../../../terrarium-plugins/packages');
+  const template=JSON.parse(readFileSync(join(packages,'feeds/ui/page-main.json'),'utf8'));
   const list=template.body.children.find(n=>n.query==='items');
   const date=new Date(2026,10,11,5,30).getTime();
   const ui=rendererHarness();

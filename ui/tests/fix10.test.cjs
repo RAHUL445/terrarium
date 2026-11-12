@@ -10,8 +10,9 @@ function findForm(node) {
 }
 
 test('Bookmarks quick entry permits navigation and restores its unsaved draft', async () => {
-  const template = JSON.parse(readFileSync(join(__dirname,
-    '../../../terrarium-plugins/packages/bookmarks/ui/page-main.json'), 'utf8'));
+  const packages = process.env.TERRA_PLUGIN_SOURCE || join(__dirname, '../../../terrarium-plugins/packages');
+  const template = JSON.parse(readFileSync(join(packages,
+    'bookmarks/ui/page-main.json'), 'utf8'));
   const form = findForm(template.body);
   assert.ok(form, 'exercise the actual Bookmarks quick-entry form');
   const body = { body: form };

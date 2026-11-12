@@ -502,6 +502,24 @@ pub struct QueryView {
     /// The host cannot check SQL output names statically; queries should
     /// return each declared `key` and `id`.
     pub columns: Vec<ViewColumn>,
+    /// User-editable query parameters; filtering remains in plugin SQL.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<ViewFilter>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewFilter {
+    pub param: String,
+    pub label: String,
+    #[serde(default)]
+    pub multiple: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices_query: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -517,6 +535,9 @@ pub struct ViewColumn {
     /// Labels for `values`, same length.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Dynamic enum values from a parameterless query returning value/label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices_query: Option<String>,
     /// Operation that moves a row to another value of this enum column
     /// (board drag and drop). `args` may bind `{{row.*}}` and `{{value}}`.
     #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
@@ -1124,6 +1145,23 @@ impl Manifest {
                     return bad(format!("query `{name}`: a view needs 1-20 columns"));
                 }
                 let mut seen = BTreeSet::new();
+                if view.filters.len() > 16 {
+                    return bad(format!("query `{name}`: at most 16 view filters"));
+                }
+                let valid_choices = |id: &str| self.queries.get(id).is_some_and(|q| q.params.is_empty());
+                let mut filter_names = BTreeSet::new();
+                for filter in &view.filters {
+                    if !query.params.contains(&filter.param)
+                        || CONTEXT_PARAMS.contains(&filter.param.as_str())
+                        || !filter_names.insert(&filter.param)
+                        || !(1..=40).contains(&filter.label.trim().chars().count())
+                        || filter.values.len() > 40
+                        || (!filter.labels.is_empty() && filter.labels.len() != filter.values.len())
+                        || filter.choices_query.as_ref().is_some_and(|q| !valid_choices(q))
+                    {
+                        return bad(format!("query `{name}`: invalid view filter `{}`", filter.param));
+                    }
+                }
                 for column in &view.columns {
                     let key_len = column.key.chars().count();
                     let key_ok = (1..=64).contains(&key_len)
@@ -1151,15 +1189,19 @@ impl Manifest {
                         ));
                     }
                     if column.ty == ParamType::Enum {
-                        let values_ok = (1..=12).contains(&column.values.len())
-                            && column.values.iter().all(|v| !v.is_empty());
+                        let values_ok = if let Some(q) = &column.choices_query {
+                            valid_choices(q) && column.values.is_empty() && column.labels.is_empty()
+                        } else {
+                            (1..=12).contains(&column.values.len())
+                                && column.values.iter().all(|v| !v.is_empty())
+                        };
                         if !values_ok {
                             return bad(format!(
                                 "query `{name}`: view column `{}`: an enum needs 1-12 values",
                                 column.key
                             ));
                         }
-                    } else if !column.values.is_empty() {
+                    } else if !column.values.is_empty() || column.choices_query.is_some() {
                         return bad(format!(
                             "query `{name}`: view column `{}`: only an enum takes values",
                             column.key
@@ -1733,6 +1775,21 @@ mod tests {
         assert_eq!(view["title_column"], "note");
         assert!(view["columns"][1].get("move").is_some());
         assert!(view["columns"][1].get("move_op").is_none());
+    }
+
+    #[test]
+    fn view_filters_and_dynamic_choices_are_declared_queries() {
+        let mut value = with_view(valid_view());
+        value["queries"]["all"]["params"] = json!(["lists"]);
+        value["queries"]["choices"] = json!({"sql":"SELECT 'a' AS value, 'A' AS label", "params":[]});
+        value["queries"]["all"]["view"]["filters"] = json!([{"param":"lists", "label":"Lists", "multiple":true,"choices_query":"choices"}]);
+        value["queries"]["all"]["view"]["columns"][1] = json!({"key":"state", "label":"State", "type":"enum", "choices_query":"choices"});
+        assert!(Manifest::parse(&serde_json::to_vec(&value).unwrap()).is_ok());
+        value["queries"]["choices"]["params"] = json!(["scope"]);
+        assert!(Manifest::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["queries"]["choices"]["params"] = json!([]);
+        value["queries"]["all"]["view"]["filters"][0]["param"] = json!("undeclared");
+        assert!(Manifest::parse(&serde_json::to_vec(&value).unwrap()).is_err());
     }
 
     #[test]

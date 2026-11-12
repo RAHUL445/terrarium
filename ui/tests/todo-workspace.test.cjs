@@ -4,7 +4,8 @@ const { readFileSync } = require('node:fs');
 const { resolve } = require('node:path');
 const { rendererHarness } = require('./helpers/renderer-dom.cjs');
 
-const templatePath = resolve(__dirname, '../../../../todo-organization/terrarium-plugins/packages/todo/ui/page-main.json');
+const packages = process.env.TERRA_PLUGIN_SOURCE || resolve(__dirname, '../../../terrarium-plugins/packages');
+const templatePath = resolve(packages, 'todo/ui/page-main.json');
 const template = JSON.parse(readFileSync(templatePath, 'utf8'));
 const walk = (node, visit, parent = null) => {
   if (!node || typeof node !== 'object') return;
