@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `permissions`, `open`, `refs` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -75,7 +75,13 @@ More components and keys:
 | `json_each` | Queries may unpack JSON stored in a text column: `SELECT json_extract(j.value, '$.day') AS day FROM t, json_each(t.daily) j WHERE t.id = ?1` |
 | `action.then` | `{"state.open": ""}`: state set after the operation succeeds. `success` and `then` can use `{{result.*}}`, the operation's return value |
 | `{{!path}}`, `{{path == word}}`, `{{path != word}}` | Whole-string bindings for not and text comparison |
-| `markdown-editor` | Form field for Markdown: toolbar (heading, bold, italic, lists, checklist), Enter continues a list, live preview with tickable checkboxes, word count. `start: "preview"` opens in preview; `actions: [{label, icon, op, arg, success}]` send the selection or current line to an operation |
+| `ref` | `{type: "ref", ref: "todo/tasks/{{row.task_id}}", label: "Task"}` draws a host-resolved chip with the current title, kind icon and done state. Empty or invalid refs draw nothing; missing or trashed items show “Missing” or “In trash” and are disabled. Resolution is batched and cached until the view refreshes; titles never enter plugin scope. |
+| `backlinks` | `{type: "backlinks", ref: "{{row.$ref}}", title: "Linked from", empty: "Nothing links here yet."}` merges text mentions and relations, grouped by item kind. Each entry is a ref chip; relations also have Remove link. Reloads on view refresh. |
+| `ref-picker` | `{label?, placeholder?, action}` searches indexed items across plugins in this space. For example, `{type: "ref-picker", action: {link: {from: "{{row.$ref}}", to: "{{value.ref}}"}}}` runs the action with only `value.ref`; default label is “Link to…” and placeholder is “Search items”. A failed action keeps the choice open. |
+| `list.table` / `sheet.table` | `table: "tasks"` adds `row.$ref` as `plugin/tasks/<row.id>` using this template's plugin id. For example, `{type: "list", table: "tasks", query: "tasks", item: {type: "text", text: "{{row.$ref}}"}}`. A sheet with `query` uses its first row. Without `table`, no ref binding is added. |
+| `action.link` | `{"link": {"from": "{{row.$ref}}", "to": "{{value.ref}}", "kind": "related"}}` calls host `link.add` before an optional `op`. Kind defaults to `related`; success shows “Linked” (or `success`) and refreshes views. Failure shows an error and stops the operation. |
+| `markdown` links | `[Task](terrarium:todo/tasks/id)` renders the same chip in Markdown nodes and editor previews; http(s) links keep their usual behavior. Refs stay within the current space. |
+| `markdown-editor` | Form field for Markdown: toolbar (heading, bold, italic, lists, checklist), Enter continues a list, live preview with tickable checkboxes, word count. Typing `@` plus 1–40 characters offers indexed items across plugins; choosing one inserts a `terrarium:` Markdown link. Use arrows and Enter/Tab to choose or Escape to close. `start: "preview"` opens in preview; `actions: [{label, icon, op, arg, success}]` send the selection or current line to an operation |
 | `form.autosave` | Saves a moment after typing stops and when its sheet closes; no button. Status shows next to the editor's word count |
 | `sheet.size: "large"`, `sheet.on_close` | Wide panel (full screen on phones); an action run after closing, with the sheet's `row` (e.g. drop an empty note) |
 | `list.layout: "chips"`, `button.variant: "chip"`, `button.pressed` | A row of filter chips (scrolls sideways on phones) |
@@ -153,9 +159,150 @@ Optional manifest fields for the shell:
 | `icon` | One of `check`, `note`, `target`, `bookmark`, `chart`, `mic`, `calendar`, `book`, `star`, `heart`, `folder`, `inbox`, `link`, `clock`, `list`. Without one, the tile shows the name's first letter. |
 | `color` | Tile color, `#rrggbb`. The icon is white, so pick a color dark enough for it. |
 | `badge` | A declared query returning one row with `count`, shown next to the app in the menu and on its tile. Params may be `today` and `weekday`. |
-| `search` | A declared query taking `q` and returning `id`, `title` and optionally `subtitle`, for ⌘K search (this space or all spaces) and the host's `search.query` command. |
+| `search` | A declared query taking `q` and returning `id`, `title` and optionally `subtitle`, for ⌘K search (this space or all spaces) and the host's `search.query` command; used while the index is being built, and for plugins without `index`. |
+| `index` | `[{"table": "tasks", "query": "index_tasks", "kind": "Task"}]`: tables the host's search index holds. The query takes exactly `ids` (a JSON array) and returns `id`, `title` and optionally `body`, `keywords`, `subtitle`; filter out trashed or hidden rows in its SQL. At most 8 entries, with each table listed once. |
+| `refs` | `[{"table": "tasks", "resolve": "ref_tasks", "kind": "Task", "icon": "check"}]`: item descriptions for host chips. The query takes exactly `ids`, returns `id`, `title`, optional `subtitle` and `done`. Keep it slim (no long text). At most 8 entries, one per declared table; `icon` is optional. |
 | `open` | `{"page": "main"}`: the page a search hit opens, with the hit's `id` as the item. Defaults to the first page. |
 | `quick_actions` | `[{"label": "New task", "op": "create", "arg": "title"}]`: offered in search, quick add and the Apps screen; the typed text goes to `op` as `arg`. |
+
+### Search index
+
+Add an index declaration and a query like To-do's to your manifest:
+
+```json
+{
+  "index": [
+    {
+      "table": "tasks",
+      "query": "index_tasks",
+      "kind": "Task"
+    }
+  ],
+  "queries": {
+    "index_tasks": {
+      "sql": "SELECT id, title, substr(COALESCE(notes, ''), 1, 20000) AS body, tags AS keywords, CASE WHEN done = 1 THEN 'Done' ELSE COALESCE(due, tags) END AS subtitle FROM tasks WHERE _deleted IS NULL AND cleared_at IS NULL AND id IN (SELECT value FROM json_each(?1))",
+      "params": [
+        "ids"
+      ],
+      "cli": false
+    }
+  }
+}
+```
+
+The host passes up to 500 ids per call, including during a rebuild; mark the
+query `"cli": false`. Titles weigh most, then keywords, then body; indexed
+search requires all words and matches the last typed word as a prefix.
+Bodies are capped at 20,000 characters; `kind` is a label of 1–20 characters.
+Keep `search` for fallback while rebuilding and in plugin versions for older
+hosts. Changing a query or plugin version rebuilds its index. Hosts predating
+`index` reject manifests containing it: upgrade the host before installing
+such a plugin; keeping `search` alone does not make that manifest compatible.
+
+The indexer also extracts `terrarium:` Markdown links from indexed titles,
+keywords and bodies, up to 100 distinct refs per item. The host-only query
+`ref.backlinks {"ref": "todo/tasks/id"}` returns `{mentions, indexing}`:
+mentioning item refs (newest indexed first, at most 200) and plugin ids still
+indexing. It catches up each indexed plugin before answering. Re-indexing,
+trash and unload remove old mentions; self-links are omitted. Mentions are
+local derived data and are never passed to plugin code or synced. Index
+schema version 2 rebuilds older local indexes to extract existing mentions.
+
+## Item references
+
+A ref names an item as `plugin/table/id`, for example `todo/tasks/t1`,
+within one space. Refs never cross spaces. Declare a slim resolve query
+separately from your index query so resolving chips does not fetch bodies
+or hide cleared items. This manifest fragment assumes a declared `tasks`
+table:
+
+```json
+{
+  "refs": [{"table": "tasks", "resolve": "ref_tasks", "kind": "Task", "icon": "check"}],
+  "queries": {
+    "ref_tasks": {
+      "sql": "SELECT id, title, CASE WHEN done = 1 THEN 'Done' ELSE due END AS subtitle, done FROM tasks WHERE _deleted IS NULL AND id IN (SELECT value FROM json_each(?1))",
+      "params": ["ids"],
+      "cli": false,
+      "description": "Tasks by id, for links."
+    }
+  }
+}
+```
+
+Each table may appear once, with at most 8 declarations. `kind` is a
+1–20-character label and `icon`, if given, is one of the manifest icon
+names above. Renderer icons differ: unsupported chip icons fall back to
+`link`. Older hosts reject manifests containing `refs`; upgrade the host
+before installing these plugin versions. Old manifests without `refs`
+continue to load.
+
+`ref.resolve {"refs": ["todo/tasks/t1"]}` describes up to 200 input refs
+per call, deduplicated in input order. Each result has `ref` and `state`:
+`ok`, `missing`, `trash` or `unknown`. Known tables also supply the item
+identity and kind; live results include the current title, optional
+subtitle, done state and `open: {plugin, page, item}` (or null when no page
+is available). Invalid refs and undeclared plugin or table refs are
+`unknown`. A chip uses its label for unknown refs;
+backlinks omit them. Resolve failures can appear as missing items.
+
+A list or queried sheet with `table: "tasks"` supplies `{{row.$ref}}` for
+its children. For example, this sheet lets a task show its attached note,
+create a relation and show incoming mentions plus relations. Declare
+`state.open` in the containing template and return `note_id` from `task`.
+
+```json
+{
+  "type": "sheet", "bind": "state.open", "table": "tasks", "query": "task",
+  "params": {"id": "{{state.open}}"},
+  "children": [
+    {"type": "ref", "ref": "notes/notes/{{row.note_id}}", "label": "Note", "if": "{{row.note_id}}"},
+    {"type": "ref-picker", "label": "Link to…", "action": {"link": {"from": "{{row.$ref}}", "to": "{{value.ref}}", "kind": "related"}}},
+    {"type": "backlinks", "ref": "{{row.$ref}}", "title": "Linked from", "empty": "Nothing links here yet."}
+  ]
+}
+```
+
+In Markdown nodes and editor previews,
+`[Buy lamp](terrarium:todo/tasks/t1)` becomes a chip with the current title.
+Typing `@lam` in `markdown-editor` offers indexed items; choosing one
+inserts the Markdown link. Other Markdown callers without a ref hook show
+its label as plain text. HTTP links keep their existing behavior.
+
+The host draws chips, backlinks and picker results. Resolved titles and
+other plugins' result rows never enter template `row`, `state` or action
+`value`; `ref-picker` exposes only `value.ref`, so your plugin code gets no
+other plugin's resolved title fields. The Markdown `@` choice deliberately
+writes a label and ref into the user's edited text, saved like any other
+note text. No plugin-facing links WIT interface exists.
+
+Chips resolve in batches of at most 200 and cache descriptions until view
+refresh. Backlinks merge `ref.backlinks` mentions with `link.list`
+relations, favor a relation when the same ref occurs in both, and group
+chips by kind (missing/trash go under Other). They select at most 500
+entries, relations first, resolve sequential 200-ref chunks, and show
+“N more not shown” for excess entries. Removing a relation leaves text
+mentions intact.
+
+## Host-owned relations
+
+The host stores `related` relations between item refs in `_links`, separate
+from plugin databases. `link.add {source, target, kind?}` returns the live
+relation (`id`, `source`, `target`, `kind`, `created_ms`), reusing an
+existing one in that direction; `kind` defaults to `related`. Both refs must be valid and different, but the referenced items
+need not be present on this device yet.
+
+`link.list {ref}` returns relations in either direction, newest first (at
+most 500), adding `other` and `direction` (`out` or `in`) to those fields.
+Concurrent duplicate rows are shown once using the smallest row id. `link.remove {source,
+target, kind?}` trashes every matching live row in either direction and
+returns `{removed: count}`; outside callers must confirm this destructive
+action. The items themselves are unchanged.
+
+Relations are scoped to one space and sync and back up with the other host
+stores. `_links` starts at schema version 1; future migrations only add to
+it. Plugins have no WIT access to relations. These host commands require a
+host version that implements them; older hosts do not provide them.
 
 ## Describing commands
 
@@ -197,7 +344,7 @@ Every operation and query is also a command that the command line and agents can
 
 Outside callers can't pass arguments you didn't declare, and their types and required fields are checked before your code runs. Your own UI templates aren't checked, so a template can still pass extra fields.
 
-The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup` and `ui` are reserved for host commands.
+The host fills in `today`, `weekday`, `now_ms`, `utc_offset_ms` and `tz` for queries when a caller leaves them out; don't give them types. It hides operations named `on_…` (AI callbacks) from outside callers automatically. Mark other internal operations, such as job targets nobody should run by hand, `"cli": false`. The plugin ids `app`, `plugin`, `space`, `page`, `search`, `schedule`, `theme`, `sync`, `backup`, `ui`, `ref` and `link` are reserved for host commands.
 
 ## Home and search entry
 

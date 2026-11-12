@@ -387,6 +387,10 @@ ul.plain li strong { color: var(--ink); font-weight: 600; }
 .pp-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .widget .pp-card { border: 0; padding: 0; }
 .pp-section { display: flex; flex-direction: column; gap: 8px; }
+.pp-backlinks, .pp-backlinks-body { display: flex; flex-direction: column; gap: 8px; }
+.pp-backlinks-rows { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pp-backlinks-row { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; }
+.pp-backlinks .pp-group { margin: 0; padding: 8px 0 4px; }
 .pp-section-title { font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 8px 0 0; }
 .pp-heading { margin: 0; }
 .pp-h1 { font-size: 24px; }
@@ -588,6 +592,14 @@ button.pp-item-main { cursor: pointer; border-radius: 6px; }
 .pp-item-done .pp-item-title { text-decoration: line-through; color: var(--muted); }
 .pp-item-subtitle { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pp-item-chips { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; }
+/* Host-resolved item references, inline in templates and Markdown. */
+.pp-ref { display: inline-flex; align-items: center; vertical-align: middle; gap: 4px; border-radius: 5px; padding: 1px 5px; color: var(--accent); border: 1px solid var(--border); background: transparent; max-width: 100%; font: inherit; cursor: pointer; }
+.pp-ref .pp-icon { width: 13px; height: 13px; flex-shrink: 0; }
+.pp-ref-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.pp-ref-title.pp-done { text-decoration: line-through; color: var(--muted); }
+.pp-ref-gone { color: var(--muted); cursor: default; }
+.pp-ref:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .pp-meta { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-weight: 500; }
 .pp-meta .pp-icon { width: 13px; height: 13px; }
 .pp-meta.pp-tone-danger { color: var(--danger); }
@@ -624,7 +636,13 @@ button.pp-item-main { cursor: pointer; border-radius: 6px; }
 .pp-save-status { font-size: 12px; color: var(--muted); min-height: 18px; }
 
 /* Markdown editor. */
-.pp-md { gap: 0; }
+.pp-md { gap: 0; position: relative; }
+.pp-ref-picker { position: relative; }
+.pp-mention { position: absolute; top: 100%; left: 0; right: 0; z-index: 5; max-height: 240px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 4px; box-shadow: 0 8px 24px rgb(0 0 0 / .18); }
+.pp-mention-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 8px 12px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.pp-mention-item[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); color: var(--accent); }
+.pp-mention-item .pp-muted { flex-shrink: 0; font-size: 12px; }
+.pp-mention > p { margin: 8px 12px; }
 .pp-md-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--border); border-bottom: 0; border-radius: 10px 10px 0 0; background: var(--bg); }
 .pp-md-tool { min-height: 34px; min-width: 36px; padding: 0 8px; font-weight: 700; }
 .pp-md-tool[aria-label="Italic"] { font-style: italic; font-family: Georgia, serif; }

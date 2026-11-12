@@ -60,6 +60,37 @@ terrarium search "milk" --all-spaces --plugin notes
 terrarium watch                               # print events as data changes
 ```
 
+`terrarium search` ranks results across plugins and shows a `kind` column
+for indexed hits, such as Task or Note. Indexed search requires all words
+and matches the last typed word as a prefix.
+
+With `--json` (or when piped), hits include `kind` and `snippet` (both null
+on fallback hits), plus `ref` (`plugin/table/id`) on indexed hits. The result
+also includes `truncated` (some matches were left out) and `indexing` (plugin
+ids whose indexes are still rebuilding). Existing `results` and `errors`
+fields remain available.
+
+### Read item references and links
+
+These illustrative examples use placeholder IDs. Replace `<task-id>` and `<note-id>` with real item IDs in
+this space. Keep the quotes: `refs` is a JSON array, while `ref` is a string.
+All five link/ref commands operate in the default space unless you pass
+`--space <space-id>`.
+
+```sh
+terrarium query ref.resolve --refs '["todo/tasks/<task-id>"]'
+terrarium query ref.backlinks --ref 'todo/tasks/<task-id>'
+terrarium query link.list --ref 'notes/notes/<note-id>'
+```
+
+`ref.resolve` accepts at most 200 refs and returns descriptions with state
+`ok`, `missing`, `trash` or `unknown`; live descriptions include the title,
+kind, done state and open target. `ref.backlinks` returns
+`{mentions: [ref, …], indexing: [plugin, …]}` from indexed text, catching
+up first; an unfinished index can return fewer mentions. `link.list`
+returns stored relations in either direction (at most 500), with `other`
+and `direction` (`out` or `in`). It does not include text mentions.
+
 ## Change
 
 These need a **Read and change** client.
@@ -87,6 +118,20 @@ terrarium space remove <id>                            # data is kept; `space re
 terrarium open todo --item <id>                        # show it in the app window
 terrarium notify "Report is ready"
 ```
+
+For the same illustrative placeholder IDs, add or remove a stored relation:
+
+```sh
+terrarium run link.add --source 'notes/notes/<note-id>' --target 'todo/tasks/<task-id>'
+terrarium run link.remove --source 'notes/notes/<note-id>' --target 'todo/tasks/<task-id>'
+```
+
+`link.add` returns the existing live relation when the same directional
+link is already present. Optional `--kind related` is the default and the
+only supported kind. `link.remove` asks **Remove this link?** and trashes
+all matching relations in either direction, returning `{removed: count}`.
+It leaves both items untouched. Without an interactive terminal, removal
+stops with exit code 7; pass `--yes` only after approving that removal.
 
 - **Results** of an action come with the rows it changed: which plugin,
   table and row, and what happened (`create`, `set`, `delete` and so on).
@@ -125,7 +170,8 @@ For agents configured with JSON:
 Without `TERRA_TOKEN` it uses the token `terrarium login` saved.
 
 - **Tools** are the commands with `.` turned into `_`: `todo_create`,
-  `notes_list`, `search_query`, `page_place`. A query that shares its name
+  `notes_list`, `search_query`, `page_place`, `ref_resolve`, `ref_backlinks`,
+  `link_add`, `link_list`, `link_remove`. A query that shares its name
   with an action ends in `_query`. A **Read only** client gets only the
   tools that read.
 - **Arguments** are checked the same way as on the command line. Tools that

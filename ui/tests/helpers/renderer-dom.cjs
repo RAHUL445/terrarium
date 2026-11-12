@@ -15,15 +15,31 @@ function rendererHarness(environment = {}) {
       this.classList = { add() {}, remove() {}, toggle() {} };
     }
     append(...nodes) { for (const node of nodes) {
+      if (typeof node === 'string') { this.children.push(node); continue; }
       if (node.tag === 'fragment') { this.append(...node.children); node.children = []; }
       else { node.parent = this; this.children.push(node); }
     } }
+    get childNodes() { return this.children; }
     replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
     setAttribute(name, value) { this.attrs[name] = value; }
     removeAttribute(name) { delete this.attrs[name]; }
     addEventListener(name, listener) { (this.listeners[name] ||= []).push(listener); }
-    dispatchEvent(event) { for (const listener of this.listeners[event.type] || []) listener(event); }
-    async fire(type, event = {}) { await Promise.all((this.listeners[type] || []).map(listener => listener({ target: this, preventDefault() {}, ...event }))); }
+    dispatchEvent(event) {
+      if (!event.target) event.target = this;
+      for (const listener of this.listeners[event.type] || []) listener(event);
+      if (event.bubbles && this.parent) this.parent.dispatchEvent(event);
+    }
+    async fire(type, event = {}) {
+      let stopped = false;
+      const e = { target: this, preventDefault() {}, ...event, stopImmediatePropagation() { stopped = true; } };
+      for (const listener of this.listeners[type] || []) {
+        await listener(e);
+        if (stopped) break;
+      }
+    }
+    focus() { this.focused = true; }
+    setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; }
+    setRangeText(text, start, end) { this.value = this.value.slice(0, start) + text + this.value.slice(end); }
     closest(selector) {
       for (let node = this; node; node = node.parent) {
         if (selector === '.pp-sheet' && node.tag === 'dialog') return node;
@@ -32,9 +48,9 @@ function rendererHarness(environment = {}) {
     }
     showModal() { this.open = true; }
     close() { this.open = false; queueMicrotask(() => this.dispatchEvent({ type: 'close' })); }
-    contains(node) { return this === node || this.children.some(child => child.contains(node)); }
+    contains(node) { return this === node || this.children.some(child => typeof child !== 'string' && child.contains(node)); }
     querySelectorAll(selector) {
-      const nodes = this.children.flatMap(node => [node, ...node.querySelectorAll(selector)]);
+      const nodes = this.children.filter(node => typeof node !== 'string').flatMap(node => [node, ...node.querySelectorAll(selector)]);
       if (selector === '[data-pp-name]') return nodes.filter(node => node.dataset.ppName);
       if (selector === 'form[data-pp-draft]') return nodes.filter(node => node.tag === 'form' && node.attrs['data-pp-draft']);
       if (selector === 'form') return nodes.filter(node => node.tag === 'form');
@@ -45,10 +61,10 @@ function rendererHarness(environment = {}) {
   }
   const window = environment.window || {};
   vm.runInNewContext(readFileSync(join(__dirname, '../../renderer.js'), 'utf8'), {
-    window, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, matchMedia: () => ({ matches: false }),
+    window, structuredClone, queueMicrotask, setTimeout, clearTimeout, setInterval, clearInterval, matchMedia: () => ({ matches: false }),
     CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
     document: { createElement: tag => new Node(tag), createElementNS: (ns, tag) => new Node(tag), createDocumentFragment: () => new Node('fragment') },
-    Event: class { constructor(type) { this.type = type; } },
+    Event: class { constructor(type, options = {}) { this.type = type; this.bubbles = options.bubbles; } },
     ...environment,
   });
   return { renderer: window.TerrariumRenderer, root: new Node('root'), allocations: () => allocations };

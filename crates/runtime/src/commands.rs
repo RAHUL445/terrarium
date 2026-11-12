@@ -28,7 +28,8 @@ use crate::spaces::DEFAULT_SPACE;
 
 /// Namespaces of host commands. Plugin ids can't use them.
 pub const HOST_NAMESPACES: &[&str] = &[
-    "app", "plugin", "space", "page", "search", "schedule", "theme", "sync", "backup", "ui",
+    "app", "plugin", "space", "page", "search", "schedule", "theme", "sync", "backup", "ui", "ref",
+    "link",
 ];
 
 const SEARCH_LIMIT: usize = 200;
@@ -533,11 +534,91 @@ const HOST_COMMANDS: &[HostCommand] = &[
         run: |host, _, args, d| service(host, "page_remove", None, args, d),
     },
     HostCommand {
+        id: "link.add", kind: Kind::Action, effect: Effect::Write, space: true,
+        description: "Link two items in this space (`plugin/table/id` refs).",
+        confirm: None,
+        params: &[
+            ("source", ParamType::String, true, "Source item ref"),
+            ("target", ParamType::String, true, "Target item ref"),
+            ("kind", ParamType::String, false, "Link kind (default related)"),
+        ],
+        run: |host, space, args, _| {
+            let kind = if args.contains_key("kind") { text(args, "kind")? } else { "related" };
+            Ok(json!(host.links_mut().add(space, text(args, "source")?, text(args, "target")?, kind)?))
+        },
+    },
+    HostCommand {
+        id: "link.remove", kind: Kind::Action, effect: Effect::Destructive, space: true,
+        description: "Remove the link between two items. The items themselves are not touched.",
+        confirm: Some("Remove this link?"),
+        params: &[
+            ("source", ParamType::String, true, "Source item ref"),
+            ("target", ParamType::String, true, "Target item ref"),
+            ("kind", ParamType::String, false, "Link kind (default related)"),
+        ],
+        run: |host, space, args, _| {
+            let kind = if args.contains_key("kind") { text(args, "kind")? } else { "related" };
+            Ok(json!({"removed":host.links_mut().remove(space, text(args, "source")?, text(args, "target")?, kind)?}))
+        },
+    },
+    HostCommand {
+        id: "link.list", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Links to and from an item, newest first.",
+        confirm: None,
+        params: &[("ref", ParamType::String, true, "Item ref")],
+        run: |host, space, args, _| {
+            let item = text(args, "ref")?;
+            let links: Vec<_> = host.links().list(space, item)?.into_iter().map(|link| {
+                let out = link.source == item;
+                json!({"id":link.id,"source":link.source,"target":link.target,"kind":link.kind,"created_ms":link.created_ms,
+                    "other":if out { &link.target } else { &link.source },"direction":if out { "out" } else { "in" }})
+            }).collect();
+            Ok(json!(links))
+        },
+    },
+    HostCommand {
+        id: "ref.backlinks", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Items that mention a ref in their text, most recent first.",
+        confirm: None,
+        params: &[("ref", ParamType::String, true, "Ref like `todo/tasks/<id>`")],
+        run: |host, space, args, _| {
+            let to = args.get("ref").and_then(Value::as_str)
+                .filter(|text| crate::ItemRef::parse(text).is_some())
+                .ok_or_else(|| CommandError::invalid("`ref` must look like plugin/table/id"))?;
+            let plugins: Vec<_> = host.manifests().filter(|m| !m.index.is_empty())
+                .map(|m| m.id.clone()).collect();
+            let mut indexing = Vec::new();
+            for plugin in plugins {
+                match host.index_catch_up(space, &plugin, crate::SEARCH_CATCH_UP_ROWS) {
+                    Ok(progress) if progress.done => {},
+                    _ => indexing.push(plugin),
+                }
+            }
+            let refs = host.with_index(|index, _| index.mentioning(space, to))?;
+            Ok(json!({"mentions":refs,"indexing":indexing}))
+        },
+    },
+    HostCommand {
+        id: "ref.resolve", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Describe items by ref (`plugin/table/id`): title, kind, done, and whether they are missing or in trash.",
+        confirm: None,
+        params: &[("refs", ParamType::Json, true, "List of refs, at most 200")],
+        run: |host, space, args, _| {
+            let refs: Vec<String> = args.get("refs").and_then(Value::as_array)
+                .and_then(|items| items.iter().map(|v|v.as_str().map(str::to_string)).collect())
+                .ok_or_else(|| CommandError::invalid("`refs` must be a list of refs"))?;
+            if refs.len() > crate::MAX_RESOLVE {
+                return Err(CommandError::invalid("At most 200 refs at a time"));
+            }
+            Ok(json!(crate::refs::resolve(host, space, &refs)))
+        },
+    },
+    HostCommand {
         id: "search.query",
         kind: Kind::Query,
         effect: Effect::Read,
         space: true,
-        description: "Search every plugin that offers search, in one space or all of them.",
+        description: "Search every plugin that offers search, in one space or all of them. Each plugin gets a fair share of the results; `truncated` says some were left out.",
         confirm: None,
         params: &[
             ("q", ParamType::String, true, "Text to look for"),
@@ -1054,50 +1135,320 @@ fn run_search(
 /// Runs each plugin's search query in each of `spaces`. A plugin that
 /// fails is reported in `errors`; the others still answer.
 pub fn search(
-    host: &PluginHost,
+    host: &mut PluginHost,
     q: &str,
     spaces: &[String],
     plugins: Option<&[String]>,
     limit: usize,
 ) -> Value {
-    let mut results = Vec::new();
-    let mut errors = Vec::new();
-    let params = Map::from_iter([("q".to_string(), json!(q))]);
-    'plugins: for m in host.manifests() {
-        let Some(query) = &m.search else { continue };
-        if plugins.is_some_and(|only| !only.contains(&m.id)) {
-            continue;
-        }
-        let page = m
-            .open
-            .as_ref()
-            .map(|o| o.page.clone())
-            .or_else(|| m.pages.first().map(|p| p.id.clone()));
-        for space in spaces {
-            match host.query_in(space, &m.id, query, &params) {
-                Ok(rows) => {
-                    for row in rows {
-                        if results.len() >= limit {
-                            break 'plugins;
-                        }
-                        let id = row.get("id").cloned().unwrap_or(Value::Null);
-                        results.push(json!({
-                            "space": space,
-                            "plugin": m.id,
-                            "id": id,
-                            "title": row.get("title").cloned().unwrap_or(json!("")),
-                            "subtitle": row.get("subtitle").cloned().unwrap_or(Value::Null),
-                            "open": page.as_ref().map(|p| json!({ "plugin": m.id, "page": p, "item": id })),
-                        }));
+    let indexed_plugins: Vec<_> = host
+        .manifests()
+        .filter(|m| !m.index.is_empty() && plugins.is_none_or(|only| only.contains(&m.id)))
+        .map(|m| m.id.clone())
+        .collect();
+    let mut catch_up_errors = Vec::new();
+    let mut indexing = std::collections::BTreeSet::new();
+    let mut failed = std::collections::BTreeSet::new();
+    for space in spaces {
+        for plugin in &indexed_plugins {
+            match host.index_catch_up(space, plugin, crate::SEARCH_CATCH_UP_ROWS) {
+                Ok(progress) => {
+                    if !progress.done {
+                        indexing.insert(plugin.clone());
                     }
                 }
-                Err(e) => errors.push(json!({
-                    "space": space,
-                    "plugin": m.id,
-                    "message": e.to_string(),
-                })),
+                Err(e) => {
+                    catch_up_errors
+                        .push(json!({"space":space,"plugin":plugin,"message":e.to_string()}));
+                    failed.insert((space.clone(), plugin.clone()));
+                    indexing.insert(plugin.clone());
+                }
             }
         }
     }
-    json!({ "results": results, "errors": errors })
+    host.with_index(|index, host| {
+        let manifests: Vec<_> = host
+            .manifests()
+            .filter(|m| plugins.is_none_or(|only| only.contains(&m.id)))
+            .collect();
+        let mut errors = catch_up_errors;
+        let mut fallback: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut indexed = Vec::new();
+        for space in spaces {
+            let mut ids = Vec::new();
+            for m in &manifests {
+                let ready = !failed.contains(&(space.clone(), m.id.clone()))
+                    && match crate::index::fingerprint(m) {
+                        Some(fp) => match index.ready(space, &m.id, &fp) {
+                            Ok(ready) => ready,
+                            Err(e) => {
+                                errors.push(
+                                    json!({"space":space,"plugin":m.id,"message":e.to_string()}),
+                                );
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+                if ready {
+                    ids.push(m.id.clone());
+                } else if m.search.is_some() {
+                    fallback
+                        .entry(m.id.clone())
+                        .or_default()
+                        .push(space.clone());
+                }
+            }
+            // One extra hit establishes whether the requested limit dropped matches.
+            match index.search(space, q, &ids, limit.saturating_add(1)) {
+                Ok(hits) => indexed.extend(hits.into_iter().map(|hit| (space.clone(), hit))),
+                Err(e) => {
+                    for id in ids {
+                        errors.push(json!({"space":space,"plugin":id,"message":e.to_string()}));
+                        if manifests.iter().any(|m| m.id == id && m.search.is_some()) {
+                            fallback.entry(id).or_default().push(space.clone());
+                        }
+                    }
+                }
+            }
+        }
+        indexed.sort_by(|(_, a), (_, b)| {
+            a.score
+                .total_cmp(&b.score)
+                .then_with(|| b.changed_ms.cmp(&a.changed_ms))
+        });
+        let mut truncated = indexed.len() > limit;
+        indexed.truncate(limit);
+        let mut groups: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
+        for (space, hit) in &indexed {
+            groups
+                .entry((space.clone(), hit.plugin.clone(), hit.table.clone()))
+                .or_default()
+                .push(hit.item.clone());
+        }
+        let words = crate::index::query_words(q);
+        let mut snippets = BTreeMap::new();
+        for ((space, plugin, table), ids) in groups {
+            let Some(m) = manifests.iter().find(|m| m.id == plugin) else {
+                continue;
+            };
+            let Some(entry) = m.index.iter().find(|e| e.table == table) else {
+                continue;
+            };
+            if let Ok(rows) = host.query_in(
+                &space,
+                &plugin,
+                &entry.query,
+                &Map::from_iter([("ids".into(), json!(ids))]),
+            ) {
+                for row in rows {
+                    if let (Some(id), Some(body)) = (
+                        row.get("id").and_then(Value::as_str),
+                        row.get("body").and_then(Value::as_str),
+                    ) {
+                        snippets.insert(
+                            (space.clone(), plugin.clone(), table.clone(), id.to_string()),
+                            crate::index::snippet(body, &words),
+                        );
+                    }
+                }
+            }
+        }
+        let mut results = Vec::new();
+        for (space, hit) in indexed {
+            let m = manifests
+                .iter()
+                .find(|m| m.id == hit.plugin)
+                .expect("searched manifest");
+            let snippet = snippets
+                .remove(&(
+                    space.clone(),
+                    hit.plugin.clone(),
+                    hit.table.clone(),
+                    hit.item.clone(),
+                ))
+                .flatten();
+            results.push(json!({
+                "space":space,"plugin":hit.plugin,"id":hit.item,"title":hit.title,
+                "subtitle":hit.subtitle,"kind":hit.kind,"snippet":snippet,
+                "ref":format!("{}/{}/{}",hit.plugin,hit.table,hit.item),
+                "open":search_open(m, &json!(hit.item)),
+            }));
+        }
+        let mut sources = Vec::new();
+        let params = Map::from_iter([("q".to_string(), json!(q))]);
+        for m in manifests {
+            let Some(spaces) = fallback.get(&m.id) else {
+                continue;
+            };
+            let Some(query) = &m.search else { continue };
+            let mut hits = Vec::new();
+            for space in spaces {
+                match host.query_in(space, &m.id, query, &params) {
+                    Ok(rows) => {
+                        for row in rows {
+                            let id = row.get("id").cloned().unwrap_or(Value::Null);
+                            hits.push(json!({"space":space,"plugin":m.id,"id":id,
+                            "title":row.get("title").cloned().unwrap_or(json!("")),
+                            "subtitle":row.get("subtitle").cloned().unwrap_or(Value::Null),
+                            "kind":null,"snippet":null,"open":search_open(m,&id)}));
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(json!({"space":space,"plugin":m.id,"message":e.to_string()}))
+                    }
+                }
+            }
+            sources.push(hits);
+        }
+        let (fallback, dropped) = merge_fair(sources, q, limit);
+        results.extend(fallback);
+        results.sort_by_key(|hit| match_rank(hit["title"].as_str().unwrap_or(""), q));
+        truncated |= dropped || results.len() > limit;
+        results.truncate(limit);
+        json!({"results":results,"errors":errors,"truncated":truncated,"indexing":indexing})
+    })
+}
+
+pub(crate) fn open_page(m: &Manifest) -> Option<String> {
+    m.open
+        .as_ref()
+        .map(|o| o.page.clone())
+        .or_else(|| m.pages.first().map(|p| p.id.clone()))
+}
+
+fn search_open(m: &Manifest, id: &Value) -> Option<Value> {
+    open_page(m).map(|page| json!({"plugin":m.id,"page":page,"item":id}))
+}
+
+/// Keeps at most `ceil(limit / sources)` hits from each source first,
+/// then fills the rest of `limit` from sources that had more, in source
+/// order. Then orders hits by how well their title matches `q`, stable.
+/// Returns the hits and whether any were dropped.
+fn merge_fair(sources: Vec<Vec<Value>>, q: &str, limit: usize) -> (Vec<Value>, bool) {
+    let share = limit.div_ceil(sources.len().max(1));
+    let total_hits: usize = sources.iter().map(Vec::len).sum();
+    let mut results = Vec::new();
+    let mut remaining = Vec::new();
+    for source in sources {
+        let take = share.min(source.len()).min(limit - results.len());
+        let mut source = source.into_iter();
+        results.extend(source.by_ref().take(take));
+        remaining.push(source);
+    }
+    for source in remaining {
+        let room = limit - results.len();
+        if room == 0 {
+            break;
+        }
+        results.extend(source.take(room));
+    }
+    let truncated = total_hits > results.len();
+    results.sort_by_key(|hit| match_rank(hit["title"].as_str().unwrap_or(""), q));
+    (results, truncated)
+}
+
+pub(crate) fn match_rank(title: &str, q: &str) -> u8 {
+    let title = title.trim().to_lowercase();
+    let q = q.trim().to_lowercase();
+    if title == q {
+        0
+    } else if title.starts_with(&q) {
+        1
+    } else if title.contains(&q) {
+        2
+    } else {
+        3
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(plugin: &str, title: &str) -> Value {
+        json!({"plugin": plugin, "title": title})
+    }
+
+    fn hits(plugin: &str, count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|i| hit(plugin, &format!("{plugin}{i}")))
+            .collect()
+    }
+
+    #[test]
+    fn fair_share_keeps_every_plugin() {
+        let (results, truncated) = merge_fair(vec![hits("a", 8), hits("b", 2)], "zzz", 4);
+        assert_eq!(
+            results,
+            vec![
+                hit("a", "a0"),
+                hit("a", "a1"),
+                hit("b", "b0"),
+                hit("b", "b1")
+            ]
+        );
+        assert!(truncated);
+    }
+
+    #[test]
+    fn leftover_room_is_filled_in_plugin_order() {
+        let (results, truncated) = merge_fair(vec![hits("a", 5), hits("b", 1)], "zzz", 5);
+        assert_eq!(
+            results,
+            vec![
+                hit("a", "a0"),
+                hit("a", "a1"),
+                hit("a", "a2"),
+                hit("b", "b0"),
+                hit("a", "a3")
+            ]
+        );
+        assert!(truncated);
+    }
+
+    #[test]
+    fn nothing_dropped_is_not_truncated() {
+        let (results, truncated) = merge_fair(vec![hits("a", 2), hits("b", 1)], "zzz", 10);
+        assert_eq!(
+            results,
+            vec![hit("a", "a0"), hit("a", "a1"), hit("b", "b0")]
+        );
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn hits_are_ordered_exact_prefix_contains_other() {
+        let source = ["Milk the budget", "Other", "milk", "Buy milk", "Milkshake"]
+            .into_iter()
+            .map(|title| hit("a", title))
+            .collect();
+        let (results, truncated) = merge_fair(vec![source], "Milk", 10);
+        let titles: Vec<_> = results
+            .iter()
+            .map(|hit| hit["title"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            titles,
+            ["milk", "Milk the budget", "Milkshake", "Buy milk", "Other"]
+        );
+        assert!(!truncated);
+        assert_eq!(match_rank("  МОЛОКО  ", " молоко "), 0);
+    }
+
+    #[test]
+    fn small_limit_is_never_exceeded() {
+        let (results, truncated) = merge_fair(vec![hits("a", 3), hits("b", 3)], "zzz", 1);
+        assert_eq!(results, vec![hit("a", "a0")]);
+        assert!(truncated);
+        assert_eq!(
+            merge_fair(vec![hits("a", 3), hits("b", 3)], "zzz", 0),
+            (vec![], true)
+        );
+    }
+
+    #[test]
+    fn empty_sources_give_nothing() {
+        assert_eq!(merge_fair(vec![], "x", 10), (vec![], false));
+    }
 }

@@ -28,6 +28,7 @@ for an overview.
 | [Making a theme](develop/themes.md) | Theme file format, tokens and contrast checks |
 | [Building from source](develop/building-from-source.md) | Debug builds, checks, plugin bundle lock, SDK export |
 | [Design: command-line control](design/cli-control.md) | The command registry, control socket and CLI, by phase |
+| [Design: global search and links](design/links-and-search.md) | Ranked search index across plugins, references between items, backlinks |
 
 The recommended plugins live in
 [terrarium-plugins](https://github.com/RAHUL445/terrarium-plugins), with their

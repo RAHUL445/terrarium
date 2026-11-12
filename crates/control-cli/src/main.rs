@@ -879,6 +879,7 @@ fn cmd_search(o: &Options) -> Outcome {
         .map(|r| {
             vec![
                 cell(&r["plugin"]),
+                cell(&r["kind"]),
                 cell(&r["title"]),
                 cell(&r["subtitle"]),
                 cell(&r["space"]),
@@ -888,7 +889,7 @@ fn cmd_search(o: &Options) -> Outcome {
         .collect();
     if !rows.is_empty() {
         print_table(
-            &["plugin", "title", "detail", "space", "id"].map(String::from),
+            &["plugin", "kind", "title", "detail", "space", "id"].map(String::from),
             &rows,
         );
     }

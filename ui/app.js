@@ -322,9 +322,19 @@ function toast(message, kind = "ok", action = null) {
   }, action ? 10000 : kind === "error" ? 6000 : 2500);
 }
 
+const HOST_BRIDGE_COMMANDS = new Set(["ref.resolve", "search.query", "ref.backlinks", "link.list", "link.remove", "link.add"]);
+
 function bridge(plugin) {
   const space = currentSpace;
   return {
+    plugin,
+    command: (kind, id, args) => HOST_BRIDGE_COMMANDS.has(id)
+      ? call("command", { kind, id, space, args }) : Promise.reject(new Error("Not allowed")),
+    openRef: (hit) => {
+      if (space !== currentSpace || !hit?.open) return;
+      rails?.closeDrawer();
+      return openPage(hit.open.plugin, hit.open.page, { item: hit.open.item });
+    },
     query: (name, params) => call("run_query", { space, plugin, name, params }),
     action: (op, args) => call("run_action", { space, plugin, op, args }),
     toast,
@@ -1889,20 +1899,19 @@ function commands() {
 
 async function searchPlugins(q, seq) {
   const returnTo = { query: q, allSpaces: palette.allSpaces };
-  let hits = [];
+  let result = { results: [] };
   try {
-    const found = await call("command", { kind: "query", id: "search.query", space: currentSpace, args: { q, all_spaces: palette.allSpaces } });
-    hits = found.results;
+    result = await call("command", { kind: "query", id: "search.query", space: currentSpace, args: { q, all_spaces: palette.allSpaces } });
   } catch (_) {}
   const found = [];
-  for (const hit of hits) {
+  for (const hit of result.results) {
     const p = pluginList.plugins.find((x) => x.id === hit.plugin);
     if (!p) continue;
     const sp = spaces.find((x) => x.id === hit.space);
     found.push({
       group: p.name,
       label: String(hit.title ?? ""),
-      sub: [hit.subtitle, palette.allSpaces ? sp?.name : null].filter(Boolean).join(" · "),
+      sub: [hit.kind, hit.subtitle || hit.snippet, palette.allSpaces ? sp?.name : null].filter(Boolean).join(" · "),
       tile: appTile(p, "xs"),
       run: async () => {
         if (!hit.open) return;
@@ -1917,6 +1926,7 @@ async function searchPlugins(q, seq) {
       },
     });
   }
+  if (result.indexing?.length) found.push({ group: "Search", label: "Indexing…", sub: "Some results may be missing for a moment", tile: icon("search"), run: null });
   return seq === palette.seq ? found : null;
 }
 

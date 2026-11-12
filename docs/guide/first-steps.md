@@ -31,6 +31,25 @@ Press **⌘K** (Ctrl+K on other keyboards), or choose **Search**, to find items
 across apps and run commands. Search can cover **This space** or **All
 spaces**. Use ↑ and ↓ to move, Enter to open and Esc to close.
 
+Search finds tasks, notes, bookmarks, voice captures, habits and reports.
+Results are ranked across apps; for apps with an index, all words must match
+and the last word matches as you type, so `desk lam` finds “Desk lamp”.
+“Indexing…” can appear briefly after an update or on a new device while
+results are still being rebuilt.
+
+## Links
+
+In a note, switch to **Edit** if its preview is open, then type `@` and
+part of an item's name, such as `@lamp`. Choose a result with a tap or the
+arrow keys and Enter. Preview shows a chip with the item's current title;
+tap it to open the item. A completed task shows as done. Deleted items
+show **In trash** or **Missing**.
+
+Open a note or task to see **Linked from**: items mentioning it and items
+connected by a link. In a note, **Link to…** connects an item without
+adding text. **Remove link** removes that connection; it leaves the items
+and any mentions in note text intact. Links stay within the current space.
+
 ## Companion
 
 The sparkle button opens the **Companion** panel beside any page:

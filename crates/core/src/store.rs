@@ -521,6 +521,42 @@ impl Store {
         Ok(purged)
     }
 
+    /// The newest position in this store's change log, 0 when it is empty.
+    /// Host-only: plugin queries can't read the log.
+    pub fn last_lseq(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT COALESCE(MAX(lseq), 0) FROM _pp_changes", [], |r| {
+                r.get(0)
+            })?)
+    }
+
+    /// Up to `limit` changes after `after_lseq`, oldest first, as
+    /// `(lseq, table, row id)`. A row edited several times appears several
+    /// times. Host-only.
+    pub fn changed_rows(
+        &self,
+        after_lseq: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT lseq, tbl, row_id FROM _pp_changes WHERE lseq > ?1 ORDER BY lseq LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_lseq, limit as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Up to `limit` ids of `table` greater than `after` ("" for the
+    /// start), in id order, including rows in trash. Host-only.
+    pub fn row_ids_after(&self, table: &str, after: &str, limit: usize) -> Result<Vec<String>> {
+        self.schema.table(table)?;
+        let mut stmt = self.conn.prepare(&format!("SELECT \"{ID_COLUMN}\" FROM \"{table}\" WHERE \"{ID_COLUMN}\" > ?1 ORDER BY \"{ID_COLUMN}\" LIMIT ?2"))?;
+        let rows = stmt.query_map(params![after, limit as i64], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn changes(&self, limit: usize) -> Result<Vec<ChangeRecord>> {
         self.change_records("ORDER BY lseq DESC LIMIT ?1", params![limit as i64])
     }

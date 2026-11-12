@@ -15,10 +15,16 @@ use terrarium_scheduler::{Finished, Outcome, Repeat, ScheduleInput, Scheduler};
 
 use crate::error::{Result, RuntimeError};
 use crate::host::{CallContext, Execution, HostState, PluginPre, Runtime, ScheduleChange};
+use crate::links::{Links, LINKS_STORE_ID};
 use crate::manifest::{Manifest, RunOn, Schedule};
 use crate::packages::{Packages, STORE_ID};
 use crate::pages::{Pages, PAGES_STORE_ID};
 use crate::spaces::{split_store_id, store_id, Spaces, DEFAULT_SPACE, SPACES_STORE_ID};
+
+/// Rows search.query indexes before answering, per plugin and space.
+pub const SEARCH_CATCH_UP_ROWS: usize = 2_000;
+/// Rows one background step indexes in total.
+pub const INDEX_STEP_ROWS: usize = 1_000;
 
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -61,12 +67,15 @@ pub struct PluginHost {
     packages: Packages,
     spaces: Spaces,
     pages: Pages,
+    links: Links,
     /// Spaces whose stores are open (always includes the default space).
     open_spaces: BTreeSet<String>,
     /// AI service and scheduler: `None` only while lent to a running call.
     ai: Option<Ai>,
     scheduler: Option<Scheduler>,
     assistant: crate::assistant::Assistant,
+    /// Search index: None only while lent to a host indexing call.
+    index: Option<crate::index::SearchIndex>,
 }
 
 impl PluginHost {
@@ -75,19 +84,23 @@ impl PluginHost {
         let packages = Packages::open(&cfg.data_dir, store_config(&cfg, STORE_ID))?;
         let spaces = Spaces::open(&cfg.data_dir, store_config(&cfg, SPACES_STORE_ID))?;
         let pages = Pages::open(&cfg.data_dir, store_config(&cfg, PAGES_STORE_ID))?;
+        let links = Links::open(&cfg.data_dir, store_config(&cfg, LINKS_STORE_ID))?;
         let ai = Ai::open(&cfg.data_dir, store_config(&cfg, terrarium_ai::STORE_ID))?;
         let scheduler = Scheduler::open(
             &cfg.data_dir,
             store_config(&cfg, terrarium_scheduler::STORE_ID),
             &cfg.timezone,
         )?;
+        let index = crate::index::SearchIndex::new(cfg.data_dir.join("index"));
         Ok(PluginHost {
+            index: Some(index),
             runtime: Runtime::new(cfg.execution)?,
             cfg,
             plugins: BTreeMap::new(),
             packages,
             spaces,
             pages,
+            links,
             open_spaces: [DEFAULT_SPACE.to_string()].into_iter().collect(),
             ai: Some(ai),
             scheduler: Some(scheduler),
@@ -111,6 +124,15 @@ impl PluginHost {
 
     pub fn pages_mut(&mut self) -> &mut Pages {
         &mut self.pages
+    }
+
+    /// Host-owned item relations (synced with the other devices).
+    pub fn links(&self) -> &Links {
+        &self.links
+    }
+
+    pub fn links_mut(&mut self) -> &mut Links {
+        &mut self.links
     }
 
     /// Spaces whose data is open now.
@@ -154,6 +176,7 @@ impl PluginHost {
                 for loaded in self.plugins.values_mut() {
                     loaded.stores.remove(&space);
                 }
+                self.index.as_mut().expect("index available").close(&space);
                 self.open_spaces.remove(&space);
                 changed = true;
             }
@@ -192,7 +215,18 @@ impl PluginHost {
 
     /// Stops running a plugin. Its data stays on disk.
     pub fn unload(&mut self, plugin: &str) -> bool {
-        self.plugins.remove(plugin).is_some()
+        let removed = self.plugins.remove(plugin).is_some();
+        for space in self.open_spaces.clone() {
+            if let Err(e) = self
+                .index
+                .as_mut()
+                .expect("index available")
+                .forget(&space, plugin)
+            {
+                eprintln!("index {space}/{plugin}: {e}");
+            }
+        }
+        removed
     }
 
     /// Loads (or reloads) the built plugin package at `dir`: its manifest,
@@ -254,6 +288,66 @@ impl PluginHost {
             self.sync_jobs(&space, &id);
         }
         Ok(&self.plugins[&id].manifest)
+    }
+
+    /// One bounded round over indexed plugins in every open space.
+    /// Returns true while work remains.
+    pub fn index_step(&mut self, budget: usize) -> bool {
+        let plugins: Vec<_> = self
+            .manifests()
+            .filter(|m| !m.index.is_empty())
+            .map(|m| m.id.clone())
+            .collect();
+        let pairs: Vec<_> = self
+            .open_spaces()
+            .flat_map(|space| {
+                plugins
+                    .iter()
+                    .map(move |id| (space.to_string(), id.clone()))
+            })
+            .collect();
+        let mut remaining = budget;
+        let mut more = false;
+        for (space, plugin) in pairs {
+            if remaining == 0 {
+                return true;
+            }
+            match self.index_catch_up(&space, &plugin, remaining) {
+                Ok(progress) => {
+                    remaining = remaining.saturating_sub(progress.rows);
+                    more |= !progress.done;
+                }
+                Err(e) => eprintln!("index {space}/{plugin}: {e}"),
+            }
+        }
+        more
+    }
+
+    /// Runs `f` with the search index lent out, so it can read plugins.
+    pub(crate) fn with_index<T>(
+        &mut self,
+        f: impl FnOnce(&mut crate::index::SearchIndex, &PluginHost) -> T,
+    ) -> T {
+        let mut index = self.index.take().expect("search index lent twice");
+        let out = f(&mut index, self);
+        self.index = Some(index);
+        out
+    }
+
+    /// Brings `plugin`'s part of `space`'s search index up to date,
+    /// handling at most about `budget` changed rows.
+    pub fn index_catch_up(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        budget: usize,
+    ) -> Result<crate::index::IndexProgress> {
+        self.with_index(|index, host| crate::index::catch_up(index, host, space, plugin, budget))
+    }
+
+    /// `(item, kind)` of every indexed row of `plugin` in `space`.
+    pub fn indexed_items(&mut self, space: &str, plugin: &str) -> Result<Vec<(String, String)>> {
+        self.with_index(|index, _| index.items(space, plugin))
     }
 
     /// The user's IANA timezone.
@@ -940,6 +1034,7 @@ impl terrarium_core::StoreSet for PluginHost {
             STORE_ID.to_string(),
             SPACES_STORE_ID.to_string(),
             PAGES_STORE_ID.to_string(),
+            LINKS_STORE_ID.to_string(),
             terrarium_ai::STORE_ID.to_string(),
             terrarium_scheduler::STORE_ID.to_string(),
         ];
@@ -954,6 +1049,7 @@ impl terrarium_core::StoreSet for PluginHost {
             STORE_ID => return Some(self.packages.store_mut()),
             SPACES_STORE_ID => return Some(self.spaces.store_mut()),
             PAGES_STORE_ID => return Some(self.pages.store_mut()),
+            LINKS_STORE_ID => return Some(self.links.store_mut()),
             terrarium_ai::STORE_ID => return self.ai.as_mut().map(Ai::store_mut),
             terrarium_scheduler::STORE_ID => {
                 return self.scheduler.as_mut().map(Scheduler::store_mut)

@@ -346,6 +346,7 @@ fn search_spans_plugins_and_spaces() {
     .unwrap();
 
     let here = query(&mut host, READ, "search.query", json!({"q": "milk"})).unwrap();
+    assert_eq!(here["truncated"], false);
     let results = here["results"].as_array().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["title"], "Buy milk");
@@ -368,6 +369,7 @@ fn search_spans_plugins_and_spaces() {
     )
     .unwrap();
     assert_eq!(limited["results"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["truncated"], true);
     let none = query(
         &mut host,
         READ,
@@ -430,6 +432,9 @@ fn manifests_reject_bad_descriptions() {
             .map(|e| e.to_string())
     };
     assert!(check(&|_| {}).is_none());
+    assert!(check(&|m| m["id"] = json!("ref"))
+        .unwrap()
+        .contains("reserved"));
     assert!(check(&|m| m["id"] = json!("search"))
         .unwrap()
         .contains("reserved"));

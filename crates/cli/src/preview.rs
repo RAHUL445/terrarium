@@ -61,6 +61,7 @@ pub fn run(dirs: Vec<PathBuf>, port: u16, data: PathBuf) -> Result<(), String> {
             }
         }
         pump_ai(&mut host);
+        host.index_step(terrarium_runtime::INDEX_STEP_ROWS);
         let Some(mut request) = next else {
             continue;
         };

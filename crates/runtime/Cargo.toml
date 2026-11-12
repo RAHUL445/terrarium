@@ -9,6 +9,7 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
+rusqlite.workspace = true
 terrarium-core = { path = "../core" }
 terrarium-ai = { path = "../ai" }
 terrarium-scheduler = { path = "../scheduler" }
@@ -68,4 +69,14 @@ required-features = ["plugin-integration"]
 [[test]]
 name = "security_payloads"
 path = "tests/security_payloads.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "search_index"
+path = "tests/search_index.rs"
+required-features = ["plugin-integration"]
+
+[[test]]
+name = "refs"
+path = "tests/refs.rs"
 required-features = ["plugin-integration"]

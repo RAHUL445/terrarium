@@ -24,7 +24,7 @@ as sandboxed WebAssembly plugins, and devices sync end-to-end encrypted.
 | Path | Contents |
 | --- | --- |
 | `crates/core` (`terrarium-core`) | Per-plugin SQLite storage, change log, hybrid logical clock, merge rules, delete policies |
-| `crates/runtime` (`terrarium-runtime`) | Wasmtime component host, manifest validation, limits, package install/update/rollback |
+| `crates/runtime` (`terrarium-runtime`) | Wasmtime component host, manifest validation, limits, ranked search, package install/update/rollback |
 | `crates/sync` (`terrarium-sync`) | Encrypted, signed change batches, pairing, peer HTTP and Google Drive transports, snapshots |
 | `crates/scheduler` (`terrarium-scheduler`) | Scheduled plugin operations, reminders, run history |
 | `crates/ai` (`terrarium-ai`) | Text generation through the user's OpenAI-compatible provider |
@@ -68,6 +68,26 @@ and bindings.
   constraints or enforced foreign keys, so offline edits never make sync fail.
 - Migrations are additive only; old changes from other devices must stay valid.
 
+## Search
+
+The host keeps one SQLite FTS5 index per space at `<data>/index/<space>.db`,
+where `<data>` is the default space's plugin database directory
+(`HostConfig.data_dir`). It follows each store's change log and reads rows
+through the plugin's declared index queries. Bounded steps in the app,
+`terrarium serve` and `terra preview`, plus catch-up before a search, keep it
+current. Only the host reads the index; plugin code cannot access it.
+
+The index is local only: it is not synced or backed up, and can be rebuilt
+from the stores. Ranked search across plugins moved into the host's small
+kernel so it can combine results without giving plugins each other's data.
+
+The indexer also extracts `terrarium:` Markdown links from indexed titles,
+keywords and bodies into a local `mentions(doc, to_ref)` table joined to
+indexed documents. `ref.backlinks` catches up indexed plugins and reads
+these mentions; it does not read stored relations. Mentions are replaced
+with each re-index and removed with their source documents. They are local
+derived data, rebuilt from plugin text and never synced or backed up.
+
 ## Sync
 
 Every write records a change `(space, plugin, table, row, column, value, hlc,
@@ -86,6 +106,14 @@ transports never see plaintext and never merge.
 Deletes are tombstones resolved by a per-table policy. The default, `trash`,
 keeps a concurrent edit and leaves the record in trash with a restore prompt;
 `delete-wins` and `edit-wins` are available for derived or special data.
+
+Host-owned stores participate in the same store set as plugin databases:
+`_packages` (installed packages), `_spaces`, `_pages`, `_links` (item
+relations), `_ai` and `_scheduler`. Sync and backups enumerate that set.
+`_links` is one device-wide store with a `space` column and schema version
+1; future migrations are additive. Relation deletion uses trash. Offline
+duplicate relations remain mergeable rows; listing keeps the smallest id
+per source/target/kind. Local search indexes and mentions are excluded.
 
 Pairing uses a QR code with a one-time secret; the space key is wrapped to the
 new device's X25519 key. A recovery phrase wraps the space key at creation.

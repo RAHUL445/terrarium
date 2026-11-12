@@ -149,7 +149,9 @@ impl Plugins {
         std::thread::spawn(move || loop {
             plugins.reconcile(&*shell);
             plugins.0.ready.store(true, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(800));
+            let more = plugins.with_host(|h| h.index_step(terrarium_runtime::INDEX_STEP_ROWS))
+                == Some(true);
+            std::thread::sleep(Duration::from_millis(if more { 100 } else { 800 }));
         });
     }
 

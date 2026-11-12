@@ -1265,3 +1265,245 @@ fn all_plugins_reject_hostile_inputs_and_remain_usable() {
         .call("notes", "create", &json!({"body":"Valid note"}))
         .is_ok());
 }
+
+#[test]
+fn every_index_query_reads_its_rows() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let mut ids = std::collections::BTreeMap::new();
+    for (plugin, op, args) in [
+        (
+            "todo",
+            "create",
+            json!({"title": "Index task", "notes": "Task body"}),
+        ),
+        (
+            "notes",
+            "create",
+            json!({"body": "# Index note\nNote body", "project": "Synthetic"}),
+        ),
+        (
+            "bookmarks",
+            "create",
+            json!({"title": "Index bookmark", "url": "https://example.com/index", "note": "Bookmark body"}),
+        ),
+        (
+            "voice",
+            "capture_text",
+            json!({"text": "Index capture\nCapture body"}),
+        ),
+    ] {
+        let id = host.call(plugin, op, &args).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        ids.insert(plugin.to_string(), id);
+    }
+    let entries: Vec<_> = host
+        .manifests()
+        .filter(|m| !m.index.is_empty())
+        .map(|m| (m.id.clone(), m.index.clone()))
+        .collect();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["bookmarks", "notes", "todo", "voice"]
+    );
+    for (plugin, entries) in entries {
+        let id = &ids[&plugin];
+        for entry in entries {
+            let query =
+                host.manifests().find(|m| m.id == plugin).unwrap().queries[&entry.query].clone();
+            assert_eq!(query.params, ["ids"]);
+            assert!(!query.cli);
+            let args = params(json!({"ids": [id]}));
+            let rows = host.query(&plugin, &entry.query, &args).unwrap();
+            assert_eq!(rows.len(), 1, "{plugin}");
+            assert_eq!(rows[0]["id"], *id);
+            assert!(
+                !rows[0]["title"].as_str().unwrap().trim().is_empty(),
+                "{plugin}"
+            );
+            let fallback = host
+                .query(&plugin, "search", &params(json!({"q": "Index"})))
+                .unwrap();
+            assert_eq!(rows[0]["title"], fallback[0]["title"], "{plugin}");
+            assert_eq!(rows[0]["subtitle"], fallback[0]["subtitle"], "{plugin}");
+            assert!(host
+                .query(&plugin, &entry.query, &params(json!({"ids": ["missing"]})))
+                .unwrap()
+                .is_empty());
+            host.call(&plugin, "delete", &json!({"id": id})).unwrap();
+            assert!(
+                host.query(&plugin, &entry.query, &args).unwrap().is_empty(),
+                "{plugin}"
+            );
+        }
+    }
+}
+
+#[test]
+fn habits_and_reports_are_searchable() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let id = host
+        .call("habits", "save", &json!({"title": "Read 20 minutes"}))
+        .unwrap()["id"]
+        .clone();
+    host.call("habits", "checkin", &json!({"id": id})).unwrap();
+    let day = today();
+    let report = host
+        .call("reports", "generate", &json!({"start": day, "end": day}))
+        .unwrap()["id"]
+        .clone();
+    let found =
+        terrarium_runtime::commands::search(&mut host, "read", &["personal".into()], None, 20);
+    assert!(found["errors"].as_array().unwrap().is_empty());
+    for (plugin, id) in [("habits", id), ("reports", report)] {
+        let hit = found["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hit| hit["plugin"] == plugin && hit["id"] == id)
+            .unwrap_or_else(|| panic!("missing {plugin} hit: {found}"));
+        assert_eq!(hit["open"]["item"], id);
+        assert_eq!(hit["open"]["page"], "main");
+        assert_eq!(
+            host.template(plugin, terrarium_runtime::ViewKind::Page, "main")
+                .unwrap()["entry"],
+            json!({"bind": "state.open"})
+        );
+    }
+}
+
+fn resolve_refs(host: &mut PluginHost, refs: &[String]) -> Value {
+    use terrarium_runtime::commands::{invoke, Caller, Kind, Scope};
+    invoke(
+        host,
+        Caller::Client(Scope::Read),
+        Kind::Query,
+        "ref.resolve",
+        None,
+        &json!({"refs":refs}),
+        true,
+    )
+    .unwrap()
+}
+#[test]
+fn every_plugin_resolves_its_items() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let mut refs = Vec::new();
+    for (plugin, op, table, kind, args) in [
+        (
+            "todo",
+            "create",
+            "tasks",
+            "Task",
+            json!({"title":"Resolve task"}),
+        ),
+        (
+            "notes",
+            "create",
+            "notes",
+            "Note",
+            json!({"title":"Resolve note","body":"Body"}),
+        ),
+        (
+            "bookmarks",
+            "create",
+            "bookmarks",
+            "Bookmark",
+            json!({"url":"https://example.com","title":"Resolve bookmark"}),
+        ),
+        (
+            "voice",
+            "capture_text",
+            "captures",
+            "Capture",
+            json!({"text":"Resolve capture\nSecond line"}),
+        ),
+        (
+            "habits",
+            "save",
+            "habits",
+            "Habit",
+            json!({"title":"Resolve habit"}),
+        ),
+        (
+            "reports",
+            "generate",
+            "reports",
+            "Report",
+            json!({"start":today(),"end":today()}),
+        ),
+    ] {
+        let made = host.call(plugin, op, &args).unwrap();
+        let id = made["id"].as_str().unwrap();
+        let manifest = host.manifests().find(|m| m.id == plugin).unwrap();
+        let def = &manifest.refs[0];
+        assert_eq!(def.table, table);
+        assert_eq!(def.kind, kind);
+        let query = &manifest.queries[&def.resolve];
+        assert_eq!(query.params, ["ids"]);
+        assert!(!query.cli);
+        let rows = host
+            .query(plugin, &def.resolve, &params(json!({"ids":[id]})))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].contains_key("body"));
+        refs.push(format!("{plugin}/{table}/{id}"));
+    }
+    let found = resolve_refs(&mut host, &refs);
+    assert_eq!(found.as_array().unwrap().len(), 6);
+    let kinds = ["Task", "Note", "Bookmark", "Capture", "Habit", "Report"];
+    for (i, hit) in found.as_array().unwrap().iter().enumerate() {
+        assert_eq!(hit["state"], "ok", "{hit}");
+        assert_eq!(hit["ref"], refs[i]);
+        assert_eq!(hit["kind"], kinds[i]);
+        assert!(!hit["title"].as_str().unwrap().trim().is_empty());
+    }
+    assert_eq!(found[3]["title"], "Resolve capture");
+    let task = refs[0].split('/').next_back().unwrap();
+    host.call("todo", "toggle", &json!({"id":task,"done":true}))
+        .unwrap();
+    host.call("todo", "clear_done", &json!({})).unwrap();
+    let cleared = resolve_refs(&mut host, &refs[..1]);
+    assert_eq!(cleared[0]["state"], "ok");
+    assert_eq!(cleared[0]["done"], true);
+    host.call("todo", "delete", &json!({"id":task})).unwrap();
+    assert_eq!(resolve_refs(&mut host, &refs[..1])[0]["state"], "trash");
+}
+#[test]
+fn a_task_note_link_resolves() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let task = host
+        .call("todo", "create", &json!({"title":"Task with note"}))
+        .unwrap();
+    host.call("todo", "toggle", &json!({"id":task["id"],"done":true}))
+        .unwrap();
+    let saved = host
+        .call(
+            "todo",
+            "save_note",
+            &json!({"id":task["id"],"text":"A useful outcome"}),
+        )
+        .unwrap();
+    let row = host
+        .query("todo", "task", &params(json!({"id":task["id"]})))
+        .unwrap();
+    assert_eq!(row[0]["note_id"], saved["note"]);
+    let found = resolve_refs(
+        &mut host,
+        &[format!(
+            "notes/notes/{}",
+            row[0]["note_id"].as_str().unwrap()
+        )],
+    );
+    assert_eq!(found[0]["state"], "ok");
+    assert_eq!(found[0]["kind"], "Note");
+    assert!(!found[0]["title"].as_str().unwrap().is_empty());
+}

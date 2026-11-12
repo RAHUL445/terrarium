@@ -61,6 +61,12 @@
     return input;
   }
 
+  // Adds `$ref` ("plugin/table/id") to a row when the node names its table.
+  function withRef(row, table, plugin) {
+    if (!row || !table || !plugin || row.id == null || !/^[a-z][a-z0-9_]*$/.test(table)) return row;
+    return { ...row, $ref: `${plugin}/${table}/${row.id}` };
+  }
+
   function truthy(v) {
     return !(v == null || v === false || v === 0 || v === "" || (Array.isArray(v) && v.length === 0));
   }
@@ -93,6 +99,193 @@
   let uid = 0;
   const nextId = (prefix) => `${prefix}-${++uid}`;
 
+  // Host-owned labels stay on DOM nodes, never in plugin template scope.
+  class RefChips {
+    constructor(view) {
+      this.view = view;
+      this.cache = new Map();
+      this.waiting = new Map();
+      this.inflight = new Map();
+      this.nodes = new Set();
+      this.timer = null;
+      this.generation = 0;
+    }
+
+    chip(ref, label) {
+      const node = el("button", "pp-ref");
+      node.type = "button";
+      const entry = { node, ref, label: String(label || ref) };
+      node.addEventListener("click", () => {
+        if (!this.view.disposed && entry.hit?.state === "ok") this.view.bridge.openRef?.(entry.hit);
+      });
+      this.nodes.add(entry);
+      this.draw(entry);
+      this.enqueue(entry);
+      return node;
+    }
+
+    enqueue(entry) {
+      if (this.cache.has(entry.ref)) return this.draw(entry, this.cache.get(entry.ref));
+      const pending = this.inflight.get(entry.ref);
+      if (pending) { pending.push(entry); return; }
+      if (!this.waiting.has(entry.ref)) this.waiting.set(entry.ref, []);
+      this.waiting.get(entry.ref).push(entry);
+      if (this.timer) return;
+      this.timer = true;
+      queueMicrotask(() => { this.timer = null; this.flush(); });
+    }
+
+    flush() {
+      if (this.view.disposed) return;
+      const waiting = this.waiting;
+      this.waiting = new Map();
+      const generation = this.generation;
+      const refs = [...waiting.keys()];
+      for (let i = 0; i < refs.length; i += 200) {
+        const batch = refs.slice(i, i + 200);
+        for (const ref of batch) this.inflight.set(ref, waiting.get(ref));
+        // Independent chunks may finish in any order.
+        (async () => {
+          let results = [];
+          try { results = await this.view.bridge.command?.("query", "ref.resolve", { refs: batch }) || []; } catch (_) {}
+          if (this.view.disposed || generation !== this.generation) return;
+          const hits = new Map(results.map(hit => [hit.ref, hit]));
+          for (const ref of batch) {
+            const hit = hits.get(ref) || { ref, state: "unknown" };
+            this.cache.set(ref, hit);
+            for (const entry of this.inflight.get(ref) || []) this.draw(entry, hit);
+            this.inflight.delete(ref);
+          }
+        })();
+      }
+    }
+
+    draw(entry, hit) {
+      const { node, label } = entry;
+      entry.hit = hit;
+      const ok = hit?.state === "ok";
+      const gone = hit?.state === "trash" || hit?.state === "missing";
+      node.className = `pp-ref${gone ? " pp-ref-gone" : ""}`;
+      node.disabled = !ok;
+      node.title = ok ? `${hit.kind}: ${hit.title}` : label;
+      node.setAttribute("aria-label", ok ? `Open ${hit.kind || "item"}: ${hit.title}` : label);
+      const title = el("span", `pp-ref-title${ok && hit.done ? " pp-done" : ""}`,
+        ok ? hit.title : hit?.state === "trash" ? "In trash" : hit?.state === "missing" ? "Missing" : label);
+      node.replaceChildren(icon(ok && Object.hasOwn(ICONS, hit.icon) ? hit.icon : "link"), title);
+    }
+
+    clear() {
+      this.cache.clear();
+      this.generation++;
+      this.inflight.clear();
+    }
+
+    refresh() {
+      for (const entry of this.nodes) {
+        if (this.view.root.contains(entry.node)) this.enqueue(entry);
+        else this.nodes.delete(entry);
+      }
+    }
+  }
+
+  // Shared host-owned search results. Only onChoose may cross into action scope.
+  function mentionList(view, { onChoose, isCurrent = () => true }) {
+    const node = el("div", "pp-mention");
+    node.hidden = true;
+    node.id = nextId("pp-mention");
+    node.setAttribute("role", "listbox");
+    node.setAttribute("aria-label", "Link to an item");
+    let hits = [], index = 0, sequence = 0, timer = null, blurTimer = null;
+    let control = null, dead = false, choosing = false;
+    const sync = () => {
+      if (!control) return;
+      control.setAttribute("aria-expanded", String(!node.hidden));
+      const selected = !node.hidden && hits.length ? `${node.id}-${index}` : null;
+      if (selected) control.setAttribute("aria-activedescendant", selected);
+      else control.removeAttribute("aria-activedescendant");
+    };
+    const close = () => {
+      sequence++;
+      view.cancel(timer); view.cancel(blurTimer);
+      timer = blurTimer = null;
+      hits = []; index = 0;
+      node.hidden = true; node.replaceChildren(); sync();
+    };
+    const chooseHit = async hit => {
+      if (dead || view.disposed || choosing || node.hidden || !hit) return;
+      if (!isCurrent()) return close();
+      const seq = sequence;
+      choosing = true;
+      view.cancel(blurTimer); blurTimer = null;
+      for (const item of node.children) if (item.type === "button") item.disabled = true;
+      control?.focus();
+      try {
+        const ok = await onChoose(hit);
+        if (!dead && !view.disposed && seq === sequence && ok !== false) close();
+      } finally {
+        choosing = false;
+        if (!dead && !view.disposed) for (const item of node.children) if (item.type === "button") item.disabled = false;
+      }
+    };
+    const draw = () => {
+      node.replaceChildren();
+      hits.forEach((hit, i) => {
+        const item = el("button", "pp-mention-item", hit.title || "Untitled");
+        item.type = "button"; item.id = `${node.id}-${i}`;
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", String(i === index));
+        item.append(el("span", "pp-muted", hit.kind || ""));
+        let mouseChosen = false;
+        item.addEventListener("mousedown", e => { e.preventDefault(); mouseChosen = true; return chooseHit(hit); });
+        item.addEventListener("click", () => {
+          if (mouseChosen) { mouseChosen = false; return; }
+          return chooseHit(hit);
+        });
+        node.append(item);
+      });
+      if (!hits.length) node.append(el("p", "pp-muted", "No matching items"));
+      node.hidden = false; sync();
+    };
+    const search = q => {
+      close();
+      if (!q || dead || view.disposed) return;
+      const seq = sequence;
+      timer = view.schedule(async () => {
+        timer = null;
+        let result;
+        try { result = await view.bridge.command?.("query", "search.query", { q, limit: 8 }); } catch (_) {}
+        if (dead || view.disposed || seq !== sequence) return;
+        if (!isCurrent()) return close();
+        hits = (result?.results || []).filter(hit => typeof hit.ref === "string" && /^[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}$/.test(hit.ref));
+        index = 0; draw();
+      }, 150);
+    };
+    const move = delta => {
+      if (node.hidden || !hits.length || choosing) return;
+      index = (index + delta + hits.length) % hits.length;
+      draw(); node.children[index]?.scrollIntoView?.({ block: "nearest" });
+    };
+    const choose = () => chooseHit(hits[index]);
+    // Both callers retain focus in their own input, including on touch keyboards.
+    const bind = input => {
+      control = input;
+      input.setAttribute("aria-controls", node.id); sync();
+      input.addEventListener("blur", () => {
+        if (choosing) return;
+        view.cancel(blurTimer); blurTimer = view.schedule(close, 150);
+      });
+      input.addEventListener("keydown", e => {
+        if (node.hidden || e.isComposing || !["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) return;
+        e.preventDefault(); e.stopImmediatePropagation();
+        if (e.key === "Escape") return close();
+        if (e.key === "Enter" || e.key === "Tab") return choose();
+        move(e.key === "ArrowDown" ? 1 : -1);
+      });
+    };
+    view.cleanups.push(() => { dead = true; close(); });
+    return { node, search, move, choose, close, isOpen: () => !node.hidden, bind };
+  }
+
   // One mounted template: its state, its lists, and its host bridge.
   class View {
     constructor(root, template, bridge, options = {}) {
@@ -103,6 +296,7 @@
       this.titleHidden = false;
       this.template = template;
       this.bridge = bridge; // { query(name, params), action(op, args), toast(msg, kind), today() }
+      this.refs = new RefChips(this);
       this.state = structuredClone(template.state || {});
       for (const [key, value] of Object.entries(options.snapshot?.state || {})) {
         if (Object.hasOwn(this.state, key)) this.state[key] = structuredClone(value);
@@ -155,6 +349,9 @@
     dispose() {
       if (this.disposed) return;
       this.disposed = true;
+      this.refs.clear();
+      this.refs.waiting.clear();
+      this.refs.nodes.clear();
       this.release(this);
       for (const id of this.timers.keys()) this.cancel(id);
       lifecycle.activeViews--; lifecycle.disposedTotal++;
@@ -218,7 +415,10 @@
 
     refresh() {
       if (this.disposed) return Promise.resolve();
-      return Promise.all(this.lists.map((list) => list()));
+      this.refs.clear();
+      return Promise.all(this.lists.map((list) => list())).then(() => {
+        if (!this.disposed) this.refs.refresh();
+      });
     }
 
     async flush({ unmount = false } = {}) {
@@ -244,7 +444,7 @@
       // Local state changes, e.g. {"set": {"state.selected": "{{row.id}}"}}.
       if (action.set) {
         for (const [path, value] of Object.entries(action.set)) this.setState(path, resolve(value, scope));
-        if (!action.op && !action.open) return true;
+        if (!action.op && !action.open && !action.link) return true;
       }
       // Copies text, e.g. {"copy": "{{row.copy_text}}", "success": "Copied"}.
       if (action.copy) {
@@ -256,6 +456,20 @@
       if (action.open) {
         const url = String(resolve(action.open, scope) || "");
         if (/^https?:\/\//i.test(url)) this.bridge.open(url);
+        if (!action.op) return true;
+      }
+      // Relates two items through the host, before any plugin operation.
+      if (action.link) {
+        const { from, to, kind } = resolve(action.link, scope);
+        try {
+          await this.bridge.command("action", "link.add", { source: String(from || ""), target: String(to || ""), kind: kind || "related" });
+        } catch (e) {
+          if (!this.disposed) this.bridge.toast(String(e), "error");
+          return false;
+        }
+        if (this.disposed) { this.bridge.changed(); return true; }
+        this.bridge.toast(resolve(action.success || "Linked", scope), "ok");
+        this.bridge.changed();
         if (!action.op) return true;
       }
       const args = resolve(action.args || {}, scope);
@@ -352,6 +566,138 @@
   }
 
   const COMPONENTS = {
+    /** An item from any plugin; incomplete refs draw nothing. */
+    ref(spec, scope) {
+      const ref = String(resolve(spec.ref, scope) ?? "");
+      if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}$/.test(ref)) return null;
+      return this.refs.chip(ref, resolve(spec.label, scope));
+    },
+    /** Search items and run an action with only the selected ref in value. */
+    "ref-picker"(spec, scope) {
+      const node = el("div", "pp-field pp-ref-picker");
+      const input = el("input", "pp-input");
+      input.id = nextId("pp-ref-picker"); input.type = "search";
+      input.placeholder = resolve(spec.placeholder || "Search items", scope);
+      input.setAttribute("role", "combobox");
+      input.setAttribute("aria-autocomplete", "list");
+      const label = el("label", "pp-label", resolve(spec.label || "Link to…", scope));
+      label.htmlFor = input.id;
+      let dead = false;
+      this.cleanups.push(() => { dead = true; });
+      const list = mentionList(this, { onChoose: async hit => {
+        input.disabled = true;
+        try {
+          const ok = await this.act(spec.action, { ...scope, value: { ref: hit.ref } });
+          if (dead || this.disposed) return false;
+          if (ok) { input.value = ""; list.close(); }
+          return ok;
+        } finally {
+          if (!dead && !this.disposed) { input.disabled = false; input.focus(); }
+        }
+      } });
+      list.bind(input);
+      input.addEventListener("input", () => {
+        const query = input.value.trim();
+        if (query.length >= 1) list.search(query);
+        else list.close();
+      });
+      node.append(label, input, list.node);
+      return node;
+    },
+
+    /** Mentions and relations for an item, drawn only from host-owned data. */
+    backlinks(spec, scope) {
+      const valid = ref => /^[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}$/.test(ref);
+      const currentRef = () => String(resolve(spec.ref, { ...scope, state: this.state }) ?? "");
+      if (!valid(currentRef())) return null;
+      const node = el("section", "pp-backlinks");
+      const heading = el("h3", "pp-section-title", resolve(spec.title || "Linked from", scope));
+      const body = el("div", "pp-backlinks-body");
+      node.append(heading, body);
+      let sequence = 0, dead = false;
+      this.cleanups.push(() => { dead = true; sequence++; });
+      const command = (kind, id, args) => Promise.resolve().then(() => this.bridge.command?.(kind, id, args));
+      const load = async () => {
+        if (this.disposed || dead) return;
+        const seq = ++sequence;
+        const current = () => !this.disposed && !dead && seq === sequence;
+        const ref = currentRef();
+        node.hidden = !valid(ref);
+        if (node.hidden) { body.replaceChildren(); node.setAttribute("aria-busy", "false"); return; }
+        node.setAttribute("aria-busy", "true");
+        const [mentions, relations] = await Promise.all([
+          command("query", "ref.backlinks", { ref }).catch(() => null),
+          command("query", "link.list", { ref }).catch(() => null),
+        ]);
+        if (!current()) return;
+        // Relations take precedence and get the display budget before mentions.
+        const entries = new Map();
+        for (const link of relations || []) {
+          if (valid(link.other) && !entries.has(link.other)) entries.set(link.other, { ref: link.other, relation: link });
+        }
+        for (const item of mentions?.mentions || []) {
+          if (valid(item) && !entries.has(item)) entries.set(item, { ref: item, relation: null });
+        }
+        const shown = [...entries.values()].slice(0, 500);
+        const more = entries.size - shown.length;
+        const hits = new Map();
+        for (let i = 0; i < shown.length; i += 200) {
+          const refs = shown.slice(i, i + 200).map(entry => entry.ref);
+          const results = await command("query", "ref.resolve", { refs }).catch(() => []);
+          if (!current()) return;
+          for (const hit of results || []) hits.set(hit.ref, hit);
+        }
+        const groups = new Map();
+        for (const entry of shown) {
+          const hit = hits.get(entry.ref);
+          if (!hit || hit.state === "unknown") continue;
+          const kind = hit.state === "ok" ? hit.kind || "Other" : "Other";
+          if (!groups.has(kind)) groups.set(kind, []);
+          groups.get(kind).push(entry);
+          // Reuse the grouping response for chips instead of resolving twice.
+          this.refs.cache.set(entry.ref, hit);
+        }
+        body.replaceChildren();
+        for (const kind of [...groups.keys()].sort()) {
+          body.append(el("p", "pp-group", kind));
+          const rows = el("div", "pp-backlinks-rows");
+          for (const entry of groups.get(kind)) {
+            const row = el("div", "pp-backlinks-row");
+            row.append(this.refs.chip(entry.ref));
+            if (entry.relation) {
+              const link = entry.relation;
+              const remove = el("button", "pp-button pp-ghost pp-icon-button");
+              remove.type = "button";
+              remove.setAttribute("aria-label", "Remove link");
+              remove.append(icon("close"));
+              remove.addEventListener("click", async () => {
+                if (this.disposed || dead || remove.disabled) return;
+                remove.disabled = true;
+                try {
+                  await command("action", "link.remove", { source: link.source, target: link.target, kind: link.kind });
+                  if (this.disposed || dead) return;
+                  this.bridge.changed();
+                  await load();
+                } catch (e) {
+                  if (!this.disposed && !dead) this.bridge.toast(String(e), "error");
+                } finally {
+                  if (!this.disposed && !dead) remove.disabled = false;
+                }
+              });
+              row.append(remove);
+            }
+            rows.append(row);
+          }
+          body.append(rows);
+        }
+        if (!groups.size) body.append(el("p", "pp-muted", resolve(spec.empty || "Nothing links here yet.", scope)));
+        if (more) body.append(el("p", "pp-muted", `${more} more not shown`));
+        node.setAttribute("aria-busy", "false");
+      };
+      this.lists.push(load);
+      return node;
+    },
+
     stack(spec, scope) {
       const node = el("div", "pp-stack");
       node.style.flexDirection = spec.direction === "row" ? "row" : "column";
@@ -781,6 +1127,31 @@
         area.setSelectionRange(...select);
         changed();
       };
+      let mention = null;
+      const findMention = () => {
+        const caret = area.selectionStart;
+        const match = area.value.slice(0, caret).match(/(^|\s)@([^\s@\[\]()]{1,40})$/);
+        return match ? { start: caret - match[2].length - 1, query: match[2] } : null;
+      };
+      const list = mentionList(this, {
+        isCurrent: () => {
+          const current = findMention();
+          return !!mention && !!current && current.start === mention.start && current.query === mention.query;
+        },
+        onChoose: hit => {
+          const label = String(hit.title || "Untitled").replace(/[\[\]\n\r]/g, " ").trim();
+          replace(mention.start, area.selectionStart, `[${label}](terrarium:${hit.ref}) `);
+          closeMention();
+        },
+      });
+      const picker = list.node;
+      const closeMention = () => { mention = null; list.close(); };
+      list.bind(area);
+      area.addEventListener("input", () => {
+        closeMention();
+        mention = findMention();
+        if (mention && !area.hidden) list.search(mention.query);
+      });
       const wrap = (mark) => {
         const { selectionStart: a, selectionEnd: b, value } = area;
         const inner = value.slice(a, b) || "text";
@@ -831,6 +1202,7 @@
       toggle.type = "button";
       toggle.setAttribute("aria-pressed", "false");
       const showPreview = (on) => {
+        if (on) closeMention();
         preview.hidden = !on;
         area.hidden = on;
         toggle.textContent = on ? "Edit" : "Preview";
@@ -840,6 +1212,7 @@
           preview.replaceChildren(
             markdown(area.value, {
               open: (url) => this.bridge.open(url),
+              ref: (r, label) => this.refs.chip(r, label),
               toggle: (line) => {
                 const lines = area.value.split("\n");
                 lines[line] = lines[line].replace(/\[( |x)\]/, (_, c) => (c === "x" ? "[ ]" : "[x]"));
@@ -868,7 +1241,7 @@
         const next = m[3] ? `${Number(m[3]) + 1}. ` : m[2].replace("[x]", "[ ]");
         replace(area.selectionStart, area.selectionEnd, `\n${m[1]}${next}`);
       });
-      node.append(label, bar, area, preview, foot);
+      node.append(label, bar, area, picker, preview, foot);
       return node;
     },
 
@@ -1107,7 +1480,7 @@
         if (spec.query) {
           const rows = await this.bridge.query(spec.query, resolve(spec.params || {}, this.scope())).catch(() => []);
           if (dead || version !== revision) return;
-          row = rows[0];
+          row = withRef(rows[0], spec.table, this.bridge.plugin);
           if (!row) return this.setState(spec.bind, "");
         }
         if (dead || key !== openKey || version !== revision) return;
@@ -1139,8 +1512,9 @@
           const rows = await this.bridge.query(spec.query, resolve(spec.params || {}, this.scope())).catch(() => []);
           if (dead) return;
           const typing = body.contains(document.activeElement) && document.activeElement.matches("input, textarea, select, [contenteditable]");
-          if (rows[0] && JSON.stringify(rows[0]) !== JSON.stringify(closeScope?.row) && !typing) {
-            const inner = this.scope({ row: rows[0] });
+          const row = withRef(rows[0], spec.table, this.bridge.plugin);
+          if (row && JSON.stringify(row) !== JSON.stringify(closeScope?.row) && !typing) {
+            const inner = this.scope({ row });
             closeScope = inner;
             const top = body.scrollTop;
             const fresh = el("div");
@@ -1182,7 +1556,7 @@
     },
 
     markdown(spec, scope) {
-      return markdown(resolve(spec.text, scope), { open: (url) => this.bridge.open(url) });
+      return markdown(resolve(spec.text, scope), { open: (url) => this.bridge.open(url), ref: (r, label) => this.refs.chip(r, label) });
     },
 
     /** Opens an http(s) URL in the system browser. */
@@ -1553,7 +1927,7 @@
             const started = Date.now();
             let count = 0;
             do {
-              const row = rows[index++];
+              const row = withRef(rows[index++], spec.table, this.bridge.plugin);
               if (!board && spec.group && row[spec.group] !== group) {
                 group = row[spec.group];
                 const tone = spec.group_tone ? row[spec.group_tone] : null;
@@ -1661,7 +2035,7 @@
     let code = null;
     const inline = (line) => {
       const out = document.createDocumentFragment();
-      const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s)]+)/g;
+      const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(terrarium:[a-z][a-z0-9-]*\/[a-z][a-z0-9_]*\/[A-Za-z0-9_-]{1,64}\)|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|https?:\/\/[^\s)]+)/g;
       let last = 0;
       for (const m of line.matchAll(re)) {
         if (m.index > last) out.append(line.slice(last, m.index));
@@ -1671,6 +2045,11 @@
         else if (token.startsWith("[") || token.startsWith("http")) {
           const link = token.match(/^\[([^\]]+)\]\((.*)\)$/);
           const href = link ? link[2] : token;
+          if (href.startsWith("terrarium:")) {
+            out.append(typeof hooks.ref === "function" ? hooks.ref(href.slice(10), link[1]) : link[1]);
+            last = m.index + token.length;
+            continue;
+          }
           const a = el("a", "pp-link", link ? link[1] : token);
           a.href = href;
           a.addEventListener("click", (e) => {

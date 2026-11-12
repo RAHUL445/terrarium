@@ -74,6 +74,12 @@ pub struct Manifest {
     /// first page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open: Option<OpenDef>,
+    /// Tables whose rows the host's search index holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index: Vec<IndexDef>,
+    /// How the host describes and links to rows by ref.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<RefDef>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -83,6 +89,8 @@ pub struct QuickAction {
     pub op: String,
     pub arg: String,
 }
+
+pub const MAX_INDEX_ENTRIES: usize = 8;
 
 /// Icon names the host can draw.
 pub const ICONS: &[&str] = &[
@@ -320,6 +328,32 @@ pub struct OpenDef {
     pub page: String,
 }
 
+/// A table the host's search index holds, read through one of the
+/// plugin's own queries. The query takes `ids` (a JSON array of row ids)
+/// and returns `id`, `title` and optionally `body`, `keywords` and
+/// `subtitle`. Rows it leaves out (trashed, hidden) are dropped from
+/// the index.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexDef {
+    pub table: String,
+    pub query: String,
+    /// Short label shown on hits, e.g. "Task".
+    pub kind: String,
+}
+
+/// How the host describes and links to rows of one table. `resolve`
+/// takes `ids` and returns `id`, `title`, optional `subtitle` and `done`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefDef {
+    pub table: String,
+    pub resolve: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ViewDef {
@@ -490,6 +524,71 @@ impl Manifest {
         };
         check_query("badge", &self.badge, &["today", "weekday"])?;
         check_query("search", &self.search, &["q"])?;
+        if self.index.len() > MAX_INDEX_ENTRIES {
+            return bad("index: at most 8 entries".into());
+        }
+        let mut indexed = std::collections::BTreeSet::new();
+        for entry in &self.index {
+            let IndexDef { table, query, kind } = entry;
+            if !self.storage.tables.iter().any(|t| &t.name == table) {
+                return bad(format!("index: `{table}` is not a declared table"));
+            }
+            if !indexed.insert(table) {
+                return bad(format!("index: `{table}` is listed twice"));
+            }
+            match self.queries.get(query) {
+                None => return bad(format!("index query `{query}` is not declared")),
+                Some(q) if q.params != ["ids"] => {
+                    return bad(format!("index query `{query}` must take exactly `ids`"));
+                }
+                Some(_) => {}
+            }
+            if kind.trim().is_empty()
+                || kind.chars().count() > 20
+                || kind.chars().any(char::is_control)
+            {
+                return bad("index kind must be 1-20 characters".into());
+            }
+        }
+        if self.refs.len() > 8 {
+            return bad("refs: at most 8 entries".into());
+        }
+        let mut referenced = std::collections::BTreeSet::new();
+        for entry in &self.refs {
+            let RefDef {
+                table,
+                resolve,
+                kind,
+                icon,
+            } = entry;
+            if !self.storage.tables.iter().any(|t| &t.name == table) {
+                return bad(format!("refs: `{table}` is not a declared table"));
+            }
+            if !referenced.insert(table) {
+                return bad(format!("refs: `{table}` is listed twice"));
+            }
+            match self.queries.get(resolve) {
+                None => return bad(format!("refs query `{resolve}` is not declared")),
+                Some(q) if q.params != ["ids"] => {
+                    return bad(format!("refs query `{resolve}` must take exactly `ids`"))
+                }
+                Some(_) => {}
+            }
+            if kind.trim().is_empty()
+                || kind.chars().count() > 20
+                || kind.chars().any(char::is_control)
+            {
+                return bad("refs kind must be 1-20 characters".into());
+            }
+            if let Some(icon) = icon {
+                if !ICONS.contains(&icon.as_str()) {
+                    return bad(format!(
+                        "unknown icon `{icon}` (known: {})",
+                        ICONS.join(", ")
+                    ));
+                }
+            }
+        }
         for action in &self.quick_actions {
             if !self.operations.contains_key(&action.op) {
                 return bad(format!(
@@ -552,5 +651,175 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn base() -> Value {
+        json!({
+            "id": "sample", "name": "Sample", "version": "1.0.0", "api": API_VERSION,
+            "storage": {"version": 1, "tables": [
+                {"name": "items", "columns": [{"name": "title", "type": "text"}]},
+                {"name": "steps", "columns": [{"name": "item_id", "type": "text"}]}
+            ]},
+            "queries": {
+                "index_items": {"sql": "SELECT id, title FROM items WHERE _deleted IS NULL AND id IN (SELECT value FROM json_each(?1))", "params": ["ids"]},
+                "all": {"sql": "SELECT id FROM items", "params": []}
+            }
+        })
+    }
+
+    fn parse(v: &Value) -> Result<Manifest> {
+        Manifest::parse(&serde_json::to_vec(v).unwrap())
+    }
+
+    fn error(v: &Value) -> String {
+        parse(v).unwrap_err().to_string()
+    }
+
+    fn entry() -> Value {
+        json!({"table": "items", "query": "index_items", "kind": "Item"})
+    }
+
+    #[test]
+    fn a_manifest_without_index_still_loads() {
+        let m = parse(&base()).unwrap();
+        assert!(m.index.is_empty());
+        assert!(serde_json::to_value(m).unwrap().get("index").is_none());
+    }
+
+    #[test]
+    fn a_valid_index_is_kept() {
+        let mut v = base();
+        v["index"] = json!([entry()]);
+        assert_eq!(
+            parse(&v).unwrap().index[0],
+            IndexDef {
+                table: "items".into(),
+                query: "index_items".into(),
+                kind: "Item".into()
+            }
+        );
+    }
+
+    #[test]
+    fn index_entries_are_checked() {
+        for (key, value, message) in [
+            (
+                "table",
+                json!("nope"),
+                "index: `nope` is not a declared table",
+            ),
+            (
+                "query",
+                json!("missing"),
+                "index query `missing` is not declared",
+            ),
+            (
+                "query",
+                json!("all"),
+                "index query `all` must take exactly `ids`",
+            ),
+            ("kind", json!(""), "index kind must be 1-20 characters"),
+            ("kind", json!("  "), "index kind must be 1-20 characters"),
+            (
+                "kind",
+                json!("x".repeat(21)),
+                "index kind must be 1-20 characters",
+            ),
+            (
+                "kind",
+                json!("Item\n"),
+                "index kind must be 1-20 characters",
+            ),
+            ("extra", json!(1), "unknown field `extra`"),
+        ] {
+            let mut v = base();
+            let mut e = entry();
+            e[key] = value;
+            v["index"] = json!([e]);
+            assert!(error(&v).contains(message), "{}", error(&v));
+        }
+        let mut v = base();
+        v["index"] = json!([entry(), entry()]);
+        assert!(error(&v).contains("index: `items` is listed twice"));
+        let mut v = base();
+        v["index"] = json!(vec![entry(); 9]);
+        assert!(error(&v).contains("index: at most 8 entries"));
+    }
+
+    fn ref_entry() -> Value {
+        json!({"table": "items", "resolve": "index_items", "kind": "Item", "icon": "check"})
+    }
+
+    #[test]
+    fn refs_are_optional() {
+        let m = parse(&base()).unwrap();
+        assert!(m.refs.is_empty());
+        assert!(serde_json::to_value(m).unwrap().get("refs").is_none());
+        let mut v = base();
+        v["refs"] = json!([ref_entry()]);
+        assert_eq!(
+            parse(&v).unwrap().refs[0],
+            RefDef {
+                table: "items".into(),
+                resolve: "index_items".into(),
+                kind: "Item".into(),
+                icon: Some("check".into())
+            }
+        );
+        v["refs"][0].as_object_mut().unwrap().remove("icon");
+        let m = parse(&v).unwrap();
+        assert_eq!(m.refs[0].icon, None);
+        assert!(serde_json::to_value(m).unwrap()["refs"][0]
+            .get("icon")
+            .is_none());
+    }
+
+    #[test]
+    fn refs_entries_are_checked() {
+        for (key, value, message) in [
+            (
+                "table",
+                json!("nope"),
+                "refs: `nope` is not a declared table",
+            ),
+            (
+                "resolve",
+                json!("missing"),
+                "refs query `missing` is not declared",
+            ),
+            (
+                "resolve",
+                json!("all"),
+                "refs query `all` must take exactly `ids`",
+            ),
+            ("kind", json!(""), "refs kind must be 1-20 characters"),
+            ("kind", json!("  "), "refs kind must be 1-20 characters"),
+            (
+                "kind",
+                json!("x".repeat(21)),
+                "refs kind must be 1-20 characters",
+            ),
+            ("kind", json!("Item\n"), "refs kind must be 1-20 characters"),
+            ("icon", json!("nope"), "unknown icon `nope` (known: "),
+            ("extra", json!(1), "unknown field `extra`"),
+        ] {
+            let mut v = base();
+            let mut entry = ref_entry();
+            entry[key] = value;
+            v["refs"] = json!([entry]);
+            assert!(error(&v).contains(message), "{}", error(&v));
+        }
+        let mut v = base();
+        v["refs"] = json!([ref_entry(), ref_entry()]);
+        assert!(error(&v).contains("refs: `items` is listed twice"));
+        let mut v = base();
+        v["refs"] = json!(vec![ref_entry(); 9]);
+        assert!(error(&v).contains("refs: at most 8 entries"));
     }
 }
