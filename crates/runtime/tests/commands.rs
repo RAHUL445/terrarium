@@ -96,6 +96,7 @@ fn described_todo(root: &Path) -> PathBuf {
     m["operations"]["toggle"]["bulk"] = json!(true);
     m["operations"]["delete"]["bulk"] = json!(true);
     m["open"] = json!({ "page": "main" });
+    m["history"] = json!(["tasks"]);
     std::fs::write(&path, serde_json::to_vec_pretty(&m).unwrap()).unwrap();
     to
 }
@@ -151,9 +152,18 @@ fn describe_lists_host_and_plugin_commands() {
         "page.list",
         "search.query",
         "plugin.list",
+        "item.history",
     ] {
         assert!(find(Kind::Query, id).is_some(), "{id}");
     }
+    assert_eq!(
+        find(Kind::Query, "item.history").unwrap().effect,
+        terrarium_runtime::Effect::Read
+    );
+    assert_eq!(
+        find(Kind::Action, "item.restore_version").unwrap().effect,
+        terrarium_runtime::Effect::Write
+    );
     let create = find(Kind::Action, "todo.create").unwrap();
     assert!(create.params.as_ref().unwrap()["title"].required);
     assert!(create.summary.starts_with("Create a task."));
@@ -1578,4 +1588,382 @@ fn blob_put_fails_over_quota() {
     .unwrap()
     .unwrap_err();
     assert!(err.contains("Attachments are full"));
+}
+
+fn history_args(id: &Value) -> Value {
+    json!({"plugin": "todo", "table": "tasks", "id": id})
+}
+
+#[test]
+fn history_lists_and_restores_versions() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let id = run(
+        &mut host,
+        CHANGE,
+        "todo.create",
+        json!({"title": "Pay rent"}),
+    )
+    .unwrap()["id"]
+        .clone();
+    // Keep a listed cutoff before the next edit: nearby edits can group together.
+    let first = query(&mut host, READ, "item.history", history_args(&id)).unwrap();
+    assert_eq!(first["this_device"], "test-device");
+    let version = first["versions"].as_array().unwrap().last().unwrap()["id"].clone();
+    run(
+        &mut host,
+        CHANGE,
+        "todo.update",
+        json!({"id": id, "title": "Pay rent today"}),
+    )
+    .unwrap();
+    let list = query(&mut host, READ, "item.history", history_args(&id)).unwrap();
+    assert!(!list["versions"].as_array().unwrap().is_empty());
+    let mut args = history_args(&id);
+    args["version"] = version.clone();
+    let old = query(&mut host, READ, "item.history", args.clone()).unwrap();
+    assert_eq!(old["values"]["title"], "Pay rent");
+    let restored = run(&mut host, CHANGE, "item.restore_version", args).unwrap();
+    assert_eq!(restored["restored"], version);
+    assert!(restored["columns"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("title")));
+    assert_eq!(task_titles(&mut host), ["Pay rent"]);
+    // The value we replaced remains readable after the normal synced restore.
+    let mut args = history_args(&id);
+    args["version"] = list["versions"][0]["id"].clone();
+    assert_eq!(
+        query(&mut host, READ, "item.history", args).unwrap()["values"]["title"],
+        "Pay rent today"
+    );
+}
+
+#[test]
+fn history_needs_a_declared_table() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    for (plugin, table) in [("todo", "steps"), ("unknown", "tasks"), ("_pages", "pages")] {
+        let args = json!({"plugin": plugin, "table": table, "id": "missing", "version": "bad"});
+        assert_eq!(
+            code(query(&mut host, READ, "item.history", args.clone())),
+            "not-found"
+        );
+        assert_eq!(
+            code(run(&mut host, CHANGE, "item.restore_version", args)),
+            "not-found"
+        );
+    }
+    let empty = query(
+        &mut host,
+        READ,
+        "item.history",
+        history_args(&json!("missing")),
+    )
+    .unwrap();
+    assert_eq!(empty["versions"], json!([]));
+}
+
+#[test]
+fn read_clients_cannot_restore() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let mut args = history_args(&json!("missing"));
+    args["version"] = json!("bad");
+    assert_eq!(
+        code(run(&mut host, READ, "item.restore_version", args)),
+        "forbidden"
+    );
+}
+
+#[test]
+fn limit_is_checked() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    for limit in [
+        json!(0),
+        json!(201),
+        json!(-1),
+        json!(1.5),
+        json!("5"),
+        Value::Null,
+    ] {
+        let mut args = history_args(&json!("missing"));
+        args["limit"] = limit;
+        assert_eq!(
+            code(query(&mut host, READ, "item.history", args.clone())),
+            "invalid"
+        );
+        assert_eq!(
+            code(query(&mut host, Caller::App, "item.history", args)),
+            "invalid"
+        );
+    }
+}
+
+#[test]
+fn history_rejects_fabricated_and_other_row_versions() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let id =
+        run(&mut host, CHANGE, "todo.create", json!({"title": "First"})).unwrap()["id"].clone();
+    let version = query(&mut host, READ, "item.history", history_args(&id)).unwrap()["versions"][0]
+        ["id"]
+        .clone();
+    let other =
+        run(&mut host, CHANGE, "todo.create", json!({"title": "Second"})).unwrap()["id"].clone();
+    for (target, cutoff, expected) in [
+        (id.clone(), json!("bad"), "invalid"),
+        (
+            id.clone(),
+            json!("ffffffffffffffff-ffffffff-future"),
+            "not-found",
+        ),
+        (other, version, "not-found"),
+        (json!(""), json!("bad"), "invalid"),
+    ] {
+        let mut args = history_args(&target);
+        args["version"] = cutoff;
+        assert_eq!(
+            code(query(&mut host, READ, "item.history", args.clone())),
+            expected
+        );
+        assert_eq!(
+            code(run(&mut host, CHANGE, "item.restore_version", args)),
+            expected
+        );
+    }
+    assert_eq!(task_titles(&mut host).len(), 2);
+}
+
+#[test]
+fn history_stays_in_the_selected_space() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let id = run(
+        &mut host,
+        CHANGE,
+        "todo.create",
+        json!({"title": "Personal"}),
+    )
+    .unwrap()["id"]
+        .clone();
+    let mut args = history_args(&id);
+    let version =
+        query(&mut host, READ, "item.history", args.clone()).unwrap()["versions"][0]["id"].clone();
+    let work = run(&mut host, CHANGE, "space.create", json!({"name": "Work"})).unwrap();
+    let work = work["id"].as_str().unwrap();
+    let empty = commands::invoke(
+        &mut host,
+        READ,
+        Kind::Query,
+        "item.history",
+        Some(work),
+        &args,
+        true,
+    )
+    .unwrap();
+    assert_eq!(empty["versions"], json!([]));
+    args["version"] = version;
+    for kind in [Kind::Query, Kind::Action] {
+        let command = if kind == Kind::Query {
+            "item.history"
+        } else {
+            "item.restore_version"
+        };
+        assert_eq!(
+            code(commands::invoke(
+                &mut host,
+                CHANGE,
+                kind,
+                command,
+                Some(work),
+                &args,
+                true
+            )),
+            "not-found"
+        );
+    }
+    assert_eq!(
+        code(commands::invoke(
+            &mut host,
+            READ,
+            Kind::Query,
+            "item.history",
+            Some("missing"),
+            &args,
+            true
+        )),
+        "unknown-space"
+    );
+    assert_eq!(task_titles(&mut host), ["Personal"]);
+}
+
+#[test]
+fn restoring_a_purged_item_has_a_clear_error() {
+    use terrarium_core::StoreSet;
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let id = run(&mut host, CHANGE, "todo.create", json!({"title": "Old"})).unwrap()["id"].clone();
+    let mut args = history_args(&id);
+    args["version"] =
+        query(&mut host, READ, "item.history", args.clone()).unwrap()["versions"][0]["id"].clone();
+    run(&mut host, Caller::App, "todo.delete", json!({"id": id})).unwrap();
+    let store = host.store_mut("todo").unwrap();
+    assert_eq!(store.purge(&[], 0).unwrap(), 1);
+    let err = run(&mut host, CHANGE, "item.restore_version", args).unwrap_err();
+    assert_eq!(err.code, "not-found");
+    assert_eq!(
+        err.message,
+        "This item can't be restored; it was removed for good."
+    );
+}
+
+#[test]
+fn history_reports_retention() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    assert_eq!(
+        code(run(
+            &mut host,
+            READ,
+            "space.set_history",
+            json!({"id": "personal", "days": 30})
+        )),
+        "forbidden"
+    );
+    let result = run(
+        &mut host,
+        CHANGE,
+        "space.set_history",
+        json!({"id": "personal", "days": 30}),
+    )
+    .unwrap();
+    assert_eq!(result, json!({"id": "personal", "history_days": 30}));
+    for days in [json!(7), json!(-1), json!(4294967326u64), json!("30")] {
+        assert!(run(
+            &mut host,
+            CHANGE,
+            "space.set_history",
+            json!({"id": "personal", "days": days})
+        )
+        .is_err());
+    }
+    let id =
+        run(&mut host, CHANGE, "todo.create", json!({"title": "Fresh"})).unwrap()["id"].clone();
+    let result = query(&mut host, READ, "item.history", history_args(&id)).unwrap();
+    assert_eq!(result["keeps_days"], 30);
+    assert_eq!(result["versions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn history_retention_hides_old_groups_and_refuses_expired_current_details() {
+    use terrarium_core::{Batch, Change, Hlc, Op, StoreSet};
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let at = |days: u64, row: &str| Hlc {
+        wall_ms: now - days * 86_400_000,
+        counter: 0,
+        device: terrarium_core::DeviceId(format!("old-{row}")),
+    };
+    let mut changes = Vec::new();
+    for (row, days) in [
+        ("expired", 40),
+        ("expired", 31),
+        ("mixed", 40),
+        ("mixed", 1),
+    ] {
+        changes.push(Change {
+            hlc: at(days, row),
+            user: "owner".into(),
+            table: "tasks".into(),
+            row: row.into(),
+            schema_version: 1,
+            op: Op::Set {
+                column: "title".into(),
+                value: json!("Historical"),
+                base: None,
+            },
+        });
+    }
+    // Create each item before its edits, without using the present-day clock.
+    for row in ["expired", "mixed"] {
+        changes.push(Change {
+            hlc: at(41, row),
+            user: "owner".into(),
+            table: "tasks".into(),
+            row: row.into(),
+            schema_version: 1,
+            op: Op::Create,
+        });
+    }
+    host.store_mut("todo")
+        .unwrap()
+        .import(&Batch {
+            plugin: "todo".into(),
+            sender: "old-device".into(),
+            sender_seen: Default::default(),
+            changes,
+        })
+        .unwrap();
+    run(
+        &mut host,
+        CHANGE,
+        "space.set_history",
+        json!({"id": "personal", "days": 30}),
+    )
+    .unwrap();
+    let future = json!({"plugin": "todo", "table": "tasks", "id": "expired",
+        "version": "ffffffffffffffff-00000000-old-expired"});
+    assert_eq!(
+        code(query(&mut host, READ, "item.history", future.clone())),
+        "not-found"
+    );
+    assert_eq!(
+        code(run(&mut host, CHANGE, "item.restore_version", future)),
+        "not-found"
+    );
+    for (row, latest_days) in [("expired", 31), ("mixed", 1)] {
+        let mut args = history_args(&json!(row));
+        args["limit"] = json!(1);
+        let result = query(&mut host, READ, "item.history", args.clone()).unwrap();
+        assert_eq!(result["versions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            result["versions"][0]["id"],
+            at(latest_days, row).to_string()
+        );
+        for days in [40, latest_days] {
+            args["version"] = json!(at(days, row).to_string());
+            if days > 30 {
+                assert_eq!(
+                    code(query(&mut host, READ, "item.history", args.clone())),
+                    "invalid"
+                );
+                assert_eq!(
+                    code(run(&mut host, CHANGE, "item.restore_version", args.clone())),
+                    "invalid"
+                );
+            } else {
+                assert_eq!(
+                    query(&mut host, READ, "item.history", args.clone()).unwrap()["values"]
+                        ["title"],
+                    "Historical"
+                );
+            }
+        }
+    }
+    // Visibility can be widened again: data was never erased.
+    run(
+        &mut host,
+        CHANGE,
+        "space.set_history",
+        json!({"id": "personal", "days": 0}),
+    )
+    .unwrap();
+    let args = json!({"plugin": "todo", "table": "tasks", "id": "expired", "version": at(40, "expired").to_string()});
+    assert!(query(&mut host, READ, "item.history", args).is_ok());
 }

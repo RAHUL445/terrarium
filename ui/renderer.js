@@ -608,6 +608,12 @@
         await this.bridge.openItem?.(String(resolve(action.navigate.item, scope) || ""));
         return true;
       }
+      // Opens the host's History dialog for an item in this plugin.
+      if (action.history) {
+        const spec = resolve(action.history, scope);
+        await this.bridge.history?.({ table: String(spec.table || ""), id: String(spec.id || ""), title: String(spec.title || "") });
+        return true;
+      }
       // Local state changes, e.g. {"set": {"state.selected": "{{row.id}}"}}.
       if (action.set) {
         for (const [path, value] of Object.entries(action.set)) this.setState(path, resolve(value, scope));

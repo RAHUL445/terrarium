@@ -1809,6 +1809,11 @@ impl PluginHost {
         out
     }
 
+    /// This host's device id, for identifying locally authored versions.
+    pub fn device(&self) -> &str {
+        &self.cfg.device.0
+    }
+
     /// The plugin's storage in the default space, for inspection.
     pub fn store(&self, plugin: &str) -> Result<&CoreStore> {
         self.get(plugin)?.store(DEFAULT_SPACE)

@@ -296,7 +296,10 @@ pub fn command(
             }
         } else if id.starts_with("space.") {
             let _ = app.emit("spaces-changed", ());
-        } else if id.starts_with("schedule.") || id == "plugin.run_bulk" {
+        } else if id.starts_with("schedule.")
+            || id == "plugin.run_bulk"
+            || id == "item.restore_version"
+        {
             let _ = app.emit("data-changed", ());
         }
     }

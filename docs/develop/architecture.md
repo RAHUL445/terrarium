@@ -95,6 +95,17 @@ manifest `view` declarations into ordinary `list`, `table`, `board` or
   constraints or enforced foreign keys, so offline edits never make sync fail.
 - Migrations are additive only; old changes from other devices must stay valid.
 
+## Item history
+
+Item history is rebuilt by replaying a row’s `_pp_changes`: last-writer-wins
+(LWW) sets, counter deltas and Loro text updates, using the current schema.
+Only standard tables explicitly listed in the plugin manifest’s `history`
+are exposed. Restoring writes normal store operations (including restoring
+from trash when needed); it neither rewrites old changes nor changes the
+sync format. The synced `_spaces.spaces.history_days` preference filters
+visibility and restoration, without removing log data. See the
+[version history design](../design/version-history.md).
+
 ## Search
 
 The host keeps one SQLite FTS5 index per space at `<data>/index/<space>.db`,

@@ -167,3 +167,74 @@ fn spaces_and_their_data_sync_to_another_device() {
     assert_eq!(titles(&phone, &work.id), vec!["Standup notes"]);
     assert!(titles(&phone, DEFAULT_SPACE).is_empty());
 }
+
+#[test]
+fn history_days_round_trip() {
+    use terrarium_core::{PluginSchema, Store, StoreConfig, SystemTime};
+    use terrarium_runtime::{Spaces, SPACES_STORE_ID};
+
+    let root = TempDir::new().unwrap();
+    let cfg = StoreConfig {
+        space: "personal".into(),
+        plugin: SPACES_STORE_ID.into(),
+        device: "test".into(),
+        user: "owner".into(),
+    };
+    let old: PluginSchema = serde_json::from_str(
+        r#"{
+        "version": 1, "tables": [{"name": "spaces", "columns": [
+            {"name": "name", "type": "text"},
+            {"name": "removed", "type": "boolean", "default": false},
+            {"name": "created_ms", "type": "integer"}
+        ]}]
+    }"#,
+    )
+    .unwrap();
+    let mut store = Store::open(
+        root.path().join("_spaces.db"),
+        cfg.clone(),
+        old,
+        Box::new(SystemTime),
+    )
+    .unwrap();
+    store
+        .write(|w| {
+            w.upsert(
+                "spaces",
+                "work",
+                &serde_json::from_value(json!({
+                    "name": "Work", "created_ms": 1
+                }))
+                .unwrap(),
+            )
+        })
+        .unwrap();
+    drop(store);
+    let mut spaces = Spaces::open(root.path(), cfg.clone()).unwrap();
+    assert!(spaces.list().unwrap().iter().all(|s| s.history_days == 0));
+    spaces.set_history_days("personal", 90).unwrap();
+    spaces.set_history_days("work", 30).unwrap();
+    assert!(spaces.set_history_days("personal", 7).is_err());
+    assert!(spaces.set_history_days("missing", 90).is_err());
+    drop(spaces);
+    let spaces = Spaces::open(root.path(), cfg.clone()).unwrap();
+    assert_eq!(spaces.list().unwrap()[0].history_days, 90);
+    assert_eq!(spaces.list().unwrap()[1].name, "Work");
+    assert_eq!(spaces.list().unwrap()[1].history_days, 30);
+    let peer_dir = TempDir::new().unwrap();
+    let mut peer = Spaces::open(
+        peer_dir.path(),
+        StoreConfig {
+            device: "peer".into(),
+            ..cfg
+        },
+    )
+    .unwrap();
+    let batch = spaces.store().export_since(0).unwrap().0;
+    assert!(batch
+        .changes
+        .iter()
+        .all(|c| c.schema_version == 1 || c.schema_version == 2));
+    peer.store_mut().import(&batch).unwrap();
+    assert_eq!(peer.list().unwrap(), spaces.list().unwrap());
+}

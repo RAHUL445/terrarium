@@ -8,6 +8,7 @@
 pub mod blob;
 pub mod change;
 pub mod error;
+mod history;
 pub mod hlc;
 mod read_policy;
 pub mod schema;
@@ -18,6 +19,7 @@ mod value;
 pub use blob::BlobId;
 pub use change::{Batch, Change, Op, VersionVector};
 pub use error::{Error, Result};
+pub use history::{HistoryOptions, RowAt, Version};
 pub use hlc::{Clock, DeviceId, Hlc, ManualTime, SystemTime, TimeSource};
 pub use schema::{
     ColumnDef, ColumnType, DeletePolicy, FileRef, MergeRule, PluginSchema, TableDef, TableKind,

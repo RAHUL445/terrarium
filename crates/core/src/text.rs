@@ -7,7 +7,7 @@ use loro::{ExportMode, LoroDoc, UpdateOptions};
 use crate::error::{Error, Result};
 use crate::hlc::DeviceId;
 
-const CONTAINER: &str = "text";
+pub(crate) const CONTAINER: &str = "text";
 
 fn corrupt(e: impl std::fmt::Display) -> Error {
     Error::Corrupt(format!("text CRDT: {e}"))

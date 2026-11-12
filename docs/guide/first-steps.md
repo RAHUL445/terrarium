@@ -113,6 +113,29 @@ use the same plugins and are on all your paired devices.
 - Switch spaces from the space name at the top of the sidebar.
 - Create one in **Settings → Spaces → Create space**.
 
+## See earlier versions
+
+In To-do or Notes, open an item and choose **History**. Pick an earlier
+version to see its values, then choose **Restore this version** and confirm
+with **Restore**. Restoring saves a new change and syncs to your paired
+devices. The values you replaced stay in history, so you can go back.
+Restoring an item from trash brings it back too.
+
+Edits from the same person on one device are grouped into one version when
+there is no more than two minutes between edits. A continuous editing
+session can therefore be one version even when it lasts longer. Versions
+say **This device** or **Another device**; the newest is marked **Current**.
+A restore can group with nearby edits rather than appear as a separate
+version.
+
+In **Settings → Spaces**, use **Keep history for** beside a space to choose
+**Forever**, **1 year**, **90 days** or **30 days**. This choice syncs between
+your devices. Older versions are hidden from History and can’t be restored;
+they are not erased and stay in the space’s sync data on your devices.
+Choosing a longer period can reveal them again. **Current** stays listed
+even when it is older than the chosen period, but its historical preview
+and restore are unavailable; open the item to see its current values.
+
 ## Deleting and undoing
 
 Deleting an item moves it to that app's trash; you can restore it from there.

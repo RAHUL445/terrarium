@@ -1239,3 +1239,17 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .auto-conditions, .auto-arguments { display: flex; flex-direction: column; gap: 10px; }
 .auto-condition > *, .auto-argument > .pp-input { flex: 1 1 140px; min-width: 0; max-width: 100%; }
 .auto-edit [hidden] { display: none; }
+
+/* Host-owned item history, layered above a plugin's sheet. */
+.history-dialog { width: calc(100vw - 32px); max-width: 640px; max-height: 80vh; box-sizing: border-box; padding: 20px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--ink); }
+.history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.history-heading h2 { font-size: 18px; margin: 0; overflow-wrap: anywhere; }
+.history-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+#history-versions, #history-detail { min-width: 0; }
+.history-version { display: flex; flex-direction: column; gap: 8px; width: 100%; text-align: left; padding: 12px; margin-bottom: 8px; overflow-wrap: anywhere; }
+.history-version[aria-current] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+.history-field { margin-bottom: 16px; }
+.history-value { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
+@media (max-width: 760px) {
+  .history-content { grid-template-columns: minmax(0, 1fr); }
+}

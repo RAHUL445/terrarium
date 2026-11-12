@@ -23,6 +23,9 @@ pub struct Manifest {
     #[serde(default)]
     pub description: String,
     pub storage: PluginSchema,
+    /// Tables whose rows have version history (`item.history`).
+    #[serde(default)]
+    pub history: Vec<String>,
     /// Operations the UI and other callers may invoke via `handle`.
     #[serde(default)]
     pub operations: BTreeMap<String, OperationDef>,
@@ -652,6 +655,18 @@ impl Manifest {
                 }
                 spec.validate(&format!("{what} payload `{field}`"))
                     .map_err(RuntimeError::Manifest)?;
+            }
+        }
+        let mut history = std::collections::BTreeSet::new();
+        for name in &self.history {
+            let Some(table) = self.storage.tables.iter().find(|t| t.name == *name) else {
+                return bad(format!("history: `{name}` is not a declared table"));
+            };
+            if table.kind == terrarium_core::TableKind::Append {
+                return bad(format!("history: `{name}` is append-only"));
+            }
+            if !history.insert(name) {
+                return bad(format!("history: `{name}` is repeated"));
             }
         }
         let limits = self.limits;
@@ -2204,5 +2219,47 @@ mod http_tests {
         assert!(parse(&v).is_ok());
         v["permissions"] = json!([]);
         assert!(parse(&v).is_err());
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!("../tests/fixtures/limits/manifest.json")).unwrap()
+    }
+
+    #[test]
+    fn manifests_without_history_still_load() {
+        let manifest =
+            Manifest::parse(include_bytes!("../tests/fixtures/limits/manifest.json")).unwrap();
+        assert!(manifest.history.is_empty());
+    }
+
+    #[test]
+    fn history_must_name_standard_tables() {
+        let mut m = fixture();
+        m["history"] = json!(["notes"]);
+        assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap()).is_ok());
+        for (tables, expected) in [
+            (json!(["missing"]), "is not a declared table"),
+            (json!(["notes", "notes"]), "is repeated"),
+        ] {
+            m["history"] = tables;
+            let err = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+        m["history"] = json!(["notes"]);
+        m["storage"]["tables"][0]["kind"] = json!("append");
+        let err = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap_err();
+        assert!(err.to_string().contains("is append-only"), "{err}");
+        m = fixture();
+        m["id"] = json!("item");
+        assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("reserved"));
     }
 }

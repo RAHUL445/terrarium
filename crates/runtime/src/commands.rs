@@ -29,7 +29,7 @@ use crate::spaces::DEFAULT_SPACE;
 /// Namespaces of host commands. Plugin ids can't use them.
 pub const HOST_NAMESPACES: &[&str] = &[
     "app", "plugin", "space", "page", "rule", "search", "schedule", "theme", "sync", "backup",
-    "ui", "ref", "link", "blob",
+    "ui", "ref", "link", "blob", "item",
 ];
 
 const SEARCH_LIMIT: usize = 200;
@@ -202,6 +202,158 @@ pub(crate) fn text<'a>(args: &'a Map<String, Value>, key: &str) -> Result<&'a st
         .ok_or_else(|| CommandError::invalid(format!("`{key}` must be text")))
 }
 
+fn history_target(
+    host: &PluginHost,
+    args: &Map<String, Value>,
+) -> Result<(String, String, String), CommandError> {
+    let plugin = text(args, "plugin")?;
+    let table = text(args, "table")?;
+    let id = text(args, "id")?;
+    let manifest = host
+        .manifests()
+        .find(|m| m.id == plugin)
+        .ok_or_else(|| CommandError::new("not-found", format!("no plugin `{plugin}`")))?;
+    if !manifest.history.iter().any(|t| t == table) {
+        return Err(CommandError::new(
+            "not-found",
+            format!("`{plugin}` has no history for `{table}`"),
+        ));
+    }
+    if id.trim().is_empty() {
+        return Err(CommandError::invalid("`id` must not be empty"));
+    }
+    Ok((plugin.into(), table.into(), id.into()))
+}
+
+fn history_error(error: terrarium_core::Error) -> CommandError {
+    match error {
+        terrarium_core::Error::Hlc(_) => CommandError::invalid("`version` is not a version id"),
+        terrarium_core::Error::NotFound { .. } => CommandError::new(
+            "not-found",
+            "This item can't be restored; it was removed for good.",
+        ),
+        error => RuntimeError::from(error).into(),
+    }
+}
+
+/// Accept actual row changes, including former group ends after regrouping.
+fn history_version(
+    store: &terrarium_core::Store,
+    table: &str,
+    id: &str,
+    version: &str,
+) -> Result<(), CommandError> {
+    if !store
+        .has_row_version(table, id, version)
+        .map_err(history_error)?
+    {
+        return Err(CommandError::new("not-found", "no such version"));
+    }
+    Ok(())
+}
+
+fn cutoff_ms(days: u32, now_ms: u64) -> Option<u64> {
+    (days > 0).then(|| now_ms.saturating_sub(u64::from(days) * 86_400_000))
+}
+
+fn too_old(version: &str, cutoff: Option<u64>) -> Result<bool, CommandError> {
+    let hlc: terrarium_core::Hlc = version.parse().map_err(history_error)?;
+    Ok(cutoff.is_some_and(|cutoff| hlc.wall_ms < cutoff))
+}
+
+fn check_history_age(version: &str, cutoff: Option<u64>) -> Result<(), CommandError> {
+    if too_old(version, cutoff)? {
+        return Err(CommandError::new(
+            "invalid",
+            "This version is older than this space keeps history for.",
+        ));
+    }
+    Ok(())
+}
+
+fn history_days(host: &PluginHost, space: &str) -> Result<u32, CommandError> {
+    Ok(host
+        .spaces()
+        .list()?
+        .iter()
+        .find(|s| s.id == space)
+        .map_or(0, |s| s.history_days))
+}
+
+fn item_history(
+    host: &mut PluginHost,
+    space: &str,
+    args: &Map<String, Value>,
+    _: bool,
+) -> Result<Value, CommandError> {
+    let (plugin, table, id) = history_target(host, args)?;
+    let limit = match args.get("limit") {
+        None => 50,
+        Some(v) => v
+            .as_u64()
+            .filter(|v| (1..=200).contains(v))
+            .ok_or_else(|| CommandError::invalid("`limit` must be 1..=200"))?
+            as usize,
+    };
+    let days = history_days(host, space)?;
+    let cutoff = cutoff_ms(days, now_ms());
+    let store = host.store_in(space, &plugin)?;
+    if args.contains_key("version") {
+        let version = text(args, "version")?;
+        history_version(store, &table, &id, version)?;
+        check_history_age(version, cutoff)?;
+        let row = store
+            .row_at(&table, &id, version)
+            .map_err(history_error)?
+            .ok_or_else(|| CommandError::new("not-found", "no such version"))?;
+        return Ok(json!(row));
+    }
+    let mut versions = store
+        .history(
+            &table,
+            &id,
+            &terrarium_core::HistoryOptions {
+                limit,
+                since_ms: cutoff,
+                ..Default::default()
+            },
+        )
+        .map_err(history_error)?;
+    // Only an entirely expired history can lose its newest group to the filter.
+    if versions.is_empty() && cutoff.is_some() {
+        versions = store
+            .history(
+                &table,
+                &id,
+                &terrarium_core::HistoryOptions {
+                    limit: 1,
+                    ..Default::default()
+                },
+            )
+            .map_err(history_error)?;
+    }
+    Ok(json!({"versions": versions, "this_device": host.device(), "keeps_days": days}))
+}
+
+fn item_restore_version(
+    host: &mut PluginHost,
+    space: &str,
+    args: &Map<String, Value>,
+    _: bool,
+) -> Result<Value, CommandError> {
+    let (plugin, table, id) = history_target(host, args)?;
+    let version = text(args, "version")?;
+    let cutoff = cutoff_ms(history_days(host, space)?, now_ms());
+    history_version(host.store_in(space, &plugin)?, &table, &id, version)?;
+    check_history_age(version, cutoff)?;
+    let store = terrarium_core::StoreSet::store_mut(host, &crate::spaces::store_id(space, &plugin))
+        .ok_or_else(|| CommandError::new("unknown-space", "no open store in this space"))?;
+    let columns = store
+        .restore_to(&table, &id, version)
+        .map_err(history_error)?;
+    Ok(json!({"restored": version, "columns": columns}))
+}
+
 fn app_only() -> CommandError {
     CommandError::new("unavailable", "Only the running app can do this.")
 }
@@ -282,6 +434,37 @@ fn change_spaces(
 }
 
 const HOST_COMMANDS: &[HostCommand] = &[
+    HostCommand {
+        id: "item.history",
+        kind: Kind::Query,
+        effect: Effect::Read,
+        space: true,
+        description: "Earlier versions of one item, newest first. With `version`, that version's values.",
+        confirm: None,
+        params: &[
+            ("plugin", ParamType::String, true, "Plugin id"),
+            ("table", ParamType::String, true, "Table, as declared in the plugin's `history`"),
+            ("id", ParamType::Id, true, "Item id"),
+            ("version", ParamType::String, false, "A version id from this command's list"),
+            ("limit", ParamType::Integer, false, "Most versions to return (default 50, at most 200)"),
+        ],
+        run: item_history,
+    },
+    HostCommand {
+        id: "item.restore_version",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: true,
+        description: "Bring an item back to an earlier version. The current values stay in its history.",
+        confirm: None,
+        params: &[
+            ("plugin", ParamType::String, true, "Plugin id"),
+            ("table", ParamType::String, true, "Table, as declared in the plugin's `history`"),
+            ("id", ParamType::Id, true, "Item id"),
+            ("version", ParamType::String, true, "A version id from this command's list"),
+        ],
+        run: item_restore_version,
+    },
     HostCommand {
         id: "app.describe",
         kind: Kind::Query,
@@ -384,6 +567,28 @@ const HOST_COMMANDS: &[HostCommand] = &[
         run: |host, _, args, _| {
             let (id, name) = (text(args, "id")?.to_string(), text(args, "name")?.to_string());
             change_spaces(host, |s| s.rename(&id, &name).map(|_| Value::Null))
+        },
+    },
+    HostCommand {
+        id: "space.set_history",
+        kind: Kind::Action,
+        effect: Effect::Write,
+        space: false,
+        description: "Set how many days of History are shown. Older versions stay in sync data.",
+        confirm: None,
+        params: &[
+            ("id", ParamType::Id, true, "Space id"),
+            ("days", ParamType::Integer, true, "0 (forever), 30, 90 or 365"),
+        ],
+        run: |host, _, args, _| {
+            let id = text(args, "id")?.to_string();
+            let days = args.get("days").and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| CommandError::invalid("`days` must be 0, 30, 90 or 365"))?;
+            change_spaces(host, |s| {
+                s.set_history_days(&id, days)?;
+                Ok(json!({"id": id, "history_days": days}))
+            })
         },
     },
     HostCommand {
@@ -1553,5 +1758,25 @@ mod tests {
         ] {
             assert!(serde_json::to_value(command).unwrap().get("bulk").is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    #[test]
+    fn retention_cutoffs_and_version_ages() {
+        let day = 86_400_000;
+        let now = 100 * day;
+        assert_eq!(cutoff_ms(0, now), None);
+        assert_eq!(cutoff_ms(30, 1), Some(0));
+        let cutoff = cutoff_ms(30, now);
+        let version = |days| format!("{:016x}-00000000-test", now - days * day);
+        assert!(too_old(&version(31), cutoff).unwrap());
+        assert!(!too_old(&version(29), cutoff).unwrap());
+        assert!(!too_old(&version(30), cutoff).unwrap());
+        assert!(!too_old(&version(31), None).unwrap());
+        assert_eq!(too_old("bad", cutoff).unwrap_err().code, "invalid");
     }
 }

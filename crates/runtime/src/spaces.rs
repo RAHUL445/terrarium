@@ -19,12 +19,13 @@ pub const DEFAULT_SPACE: &str = "personal";
 const MAX_NAME: usize = 40;
 
 const SCHEMA: &str = r#"{
-  "version": 1,
+  "version": 2,
   "tables": [
     { "name": "spaces", "columns": [
       { "name": "name", "type": "text" },
       { "name": "removed", "type": "boolean", "default": false },
-      { "name": "created_ms", "type": "integer" }
+      { "name": "created_ms", "type": "integer" },
+      { "name": "history_days", "type": "integer", "default": 0 }
     ]}
   ]
 }"#;
@@ -34,6 +35,7 @@ pub struct SpaceInfo {
     pub id: String,
     pub name: String,
     pub removed: bool,
+    pub history_days: u32,
 }
 
 /// The sync id of a plugin's store in a space. The default space keeps the
@@ -104,7 +106,7 @@ impl Spaces {
     /// Every space, the default one first, then by name; removed included.
     pub fn list(&self) -> Result<Vec<SpaceInfo>> {
         let rows = self.store.query(
-            "SELECT id, name, removed FROM spaces WHERE _deleted IS NULL ORDER BY name COLLATE NOCASE",
+            "SELECT id, name, removed, history_days FROM spaces WHERE _deleted IS NULL ORDER BY name COLLATE NOCASE",
             &[],
         )?;
         let mut out: Vec<SpaceInfo> = rows
@@ -117,6 +119,7 @@ impl Spaces {
                         .and_then(Value::as_str)
                         .unwrap_or("Space")
                         .to_string(),
+                    history_days: r.get("history_days").and_then(Value::as_u64).unwrap_or(0) as u32,
                     removed: r
                         .get("removed")
                         .is_some_and(|v| v.as_bool().unwrap_or(v.as_i64().unwrap_or(0) != 0)),
@@ -131,6 +134,7 @@ impl Spaces {
                 id: DEFAULT_SPACE.into(),
                 name: "Personal".into(),
                 removed: false,
+                history_days: 0,
             });
         out.insert(
             0,
@@ -175,12 +179,28 @@ impl Spaces {
             id,
             name,
             removed: false,
+            history_days: 0,
         })
     }
 
     pub fn rename(&mut self, id: &str, name: &str) -> Result<()> {
         let mut values = Map::new();
         values.insert("name".into(), json!(clean_name(name)?));
+        self.store.write(|w| w.upsert("spaces", id, &values))?;
+        Ok(())
+    }
+
+    /// Synced History visibility preference; no change-log data is erased.
+    pub fn set_history_days(&mut self, id: &str, days: u32) -> Result<()> {
+        if !matches!(days, 0 | 30 | 90 | 365) {
+            return Err(RuntimeError::Package(
+                "keep history for 0, 30, 90 or 365 days".into(),
+            ));
+        }
+        if !self.list()?.iter().any(|s| s.id == id) {
+            return Err(RuntimeError::Package(format!("no space `{id}`")));
+        }
+        let values = Map::from_iter([("history_days".into(), json!(days))]);
         self.store.write(|w| w.upsert("spaces", id, &values))?;
         Ok(())
     }

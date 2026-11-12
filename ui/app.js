@@ -384,10 +384,139 @@ function bridge(plugin) {
       const page = pluginList.plugins.find((p) => p.id === plugin)?.pages[0];
       if (page) return openPage(plugin, page.id, { item });
     },
+    history: (spec) => space === currentSpace ? openHistory(plugin, space, spec) : undefined,
     // Any successful action may change data shown elsewhere.
     changed: () => refreshPluginViews(),
   };
 }
+
+// ---- History ----
+function historyLabel(version, thisDevice, now = Date.now()) {
+  const date = new Date(version.at_ms), today = new Date(now);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const day = date.toDateString() === today.toDateString() ? "Today"
+    : date.toDateString() === yesterday.toDateString() ? "Yesterday" : date.toLocaleDateString();
+  const columns = (version.columns || []).map((name) => name.replace(/_/g, " "));
+  const changed = columns.slice(0, 4).join(", ") + (columns.length > 4 ? ` and ${columns.length - 4} more` : "");
+  return {
+    when: `${day} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}`,
+    who: version.device === thisDevice ? "This device" : "Another device",
+    what: version.created ? "Created" : version.trashed ? "Moved to trash"
+      : version.restored ? "Restored from trash" : `Changed ${changed}`,
+  };
+}
+
+let historyUi = null, historySession = null;
+function closeHistory() {
+  const session = historySession;
+  historySession = null;
+  if (historyUi?.dialog.open) historyUi.dialog.close();
+  if (session?.opener?.isConnected) session.opener.focus();
+}
+
+async function openHistory(plugin, space, { table, id, title }) {
+  if (space !== currentSpace) return;
+  if (!historyUi) {
+    const heading = el("h2", { id: "history-title" });
+    const retention = el("p", { class: "muted", id: "history-retention" });
+    const close = el("button", { type: "button", "aria-label": "Close", onclick: closeHistory }, "×");
+    const versions = el("div", { id: "history-versions", "aria-label": "Versions" });
+    const detail = el("div", { id: "history-detail", "aria-live": "polite" });
+    const dialog = el("dialog", { class: "history-dialog", "aria-labelledby": "history-title",
+      oncancel: (event) => { event.preventDefault(); closeHistory(); },
+      onclose: () => { if (!dialog.open) closeHistory(); },
+    }, el("div", { class: "history-heading" }, heading, close), retention,
+    el("div", { class: "history-content" }, versions, detail));
+    document.body.append(dialog);
+    historyUi = { dialog, heading, retention, close, versions, detail };
+  }
+  const ui = historyUi;
+  const session = { opener: historySession?.opener || document.activeElement };
+  historySession = session;
+  let selection = 0, keepsDays = 0;
+  const active = () => historySession === session && space === currentSpace && ui.dialog.open;
+  const query = (extra = {}) => call("command", { kind: "query", id: "item.history", space,
+    args: { plugin, table, id, ...extra } });
+  const error = (pane, e) => pane.replaceChildren(el("p", { role: "alert" }, String(e)));
+  ui.heading.textContent = `History · ${title || "Item"}`;
+  ui.retention.textContent = "";
+  ui.versions.replaceChildren();
+  ui.detail.replaceChildren();
+  if (!ui.dialog.open) ui.dialog.showModal();
+  ui.close.focus();
+
+  async function pick(version, index, buttons) {
+    const seq = ++selection;
+    for (const button of buttons) button.removeAttribute("aria-current");
+    buttons[index].setAttribute("aria-current", "true");
+    if (keepsDays > 0 && version.at_ms < Math.max(0, Date.now() - keepsDays * 86400000)) {
+      ui.detail.replaceChildren(el("p", { class: "muted" }, "This version is older than this space keeps history for. Its preview is unavailable. Open the item to see its current values."));
+      return;
+    }
+    ui.detail.replaceChildren(el("p", { role: "status" }, "Loading version…"));
+    try {
+      const result = await query({ version: version.id });
+      if (!active() || seq !== selection) return;
+      ui.detail.replaceChildren();
+      if (result.in_trash) ui.detail.append(el("p", { class: "muted" }, "In trash at this point"));
+      const changed = new Set(version.columns || []);
+      const entries = Object.entries(result.values).sort(([a], [b]) => Number(changed.has(b)) - Number(changed.has(a)));
+      for (const [name, value] of entries) {
+        const text = value == null || value === "" ? "—" : typeof value === "boolean" ? value ? "Yes" : "No" : String(value);
+        const content = el("div", { class: "history-value" }, text.length > 2000 ? `${text.slice(0, 2000)}…` : text);
+        const row = el("div", { class: "history-field" }, el("strong", {}, name.replace(/_/g, " ")), content);
+        if (text.length > 2000) {
+          const show = el("button", { type: "button", onclick: () => { content.textContent = text; show.hidden = true; } }, "Show all");
+          row.append(show);
+        }
+        ui.detail.append(row);
+      }
+      if (index > 0) {
+        const restore = el("button", { type: "button", class: "primary", onclick: async () => {
+          if (restore.disabled || !active() || seq !== selection) return;
+          restore.disabled = true;
+          try {
+            const confirmed = await window.terrariumConfirm("Restore this version? What’s there now stays in history, so you can go back.",
+              { title: "Restore version", confirm: "Restore", cancel: "Cancel" });
+            if (!confirmed || !active() || seq !== selection) return;
+            await call("command", { kind: "action", id: "item.restore_version", space,
+              args: { plugin, table, id, version: version.id } });
+            if (!active()) return;
+            toast("Restored");
+            refreshPluginViews();
+            await load();
+          } catch (e) { if (active()) toast(String(e), "error"); }
+          finally { restore.disabled = false; }
+        } }, "Restore this version");
+        ui.detail.append(restore);
+      }
+    } catch (e) { if (active() && seq === selection) error(ui.detail, e); }
+  }
+
+  async function load() {
+    ++selection;
+    ui.versions.replaceChildren(el("p", { role: "status" }, "Loading history…"));
+    ui.detail.replaceChildren();
+    try {
+      const result = await query({ limit: 100 });
+      if (!active()) return;
+      keepsDays = result.keeps_days || 0;
+      ui.retention.textContent = keepsDays > 0 ? `Showing the last ${keepsDays} days` : "";
+      const buttons = result.versions.map((version, index) => {
+        const label = historyLabel(version, result.this_device);
+        return el("button", { type: "button", class: "history-version", onclick: () => pick(version, index, buttons) },
+          el("span", {}, `${label.when} · ${label.who}${index === 0 ? " · Current" : ""}`),
+          el("span", { class: "muted" }, label.what));
+      });
+      ui.versions.replaceChildren(...buttons);
+      if (buttons.length) await pick(result.versions[0], 0, buttons);
+      else ui.versions.append(el("p", {}, "No history for this item yet."));
+    } catch (e) { if (active()) error(ui.versions, e); }
+  }
+  await load();
+}
+// ---- End history ----
 
 function refreshPluginViews() {
   if (views.page) views.page.refresh();
@@ -2320,6 +2449,13 @@ function renderSpaces() {
       row.append(el("span", { class: "muted" }, "Removed"),
         el("button", { type: "button", class: "pp-button", onclick: () => spaceAction("set_space_removed", { id: sp.id, removed: false }, `${sp.name} is back`) }, "Add back"));
     } else {
+      const retention = el("select", { class: "pp-input", onchange: (event) =>
+        spaceAction("command", { kind: "action", id: "space.set_history", args:
+          { id: sp.id, days: Number(event.target.value) } }, "History setting saved") },
+        ...[[0, "Forever"], [365, "1 year"], [90, "90 days"], [30, "30 days"]].map(([days, label]) =>
+          el("option", { value: String(days) }, label)));
+      retention.value = String(sp.history_days || 0);
+      row.append(el("label", {}, "Keep history for", retention));
       row.append(el("button", {
         type: "button", class: "pp-button",
         onclick: () => spaceAction("rename_space", { id: sp.id, name: input.value }, "Renamed"),
@@ -2363,6 +2499,7 @@ async function setSpace(id, { reload = true } = {}) {
   views.page = null; currentPage = null;
   $("widgets").replaceChildren(el("p", { class: "muted", role: "status" }, "Opening space…"));
   $("app-body").replaceChildren();
+  closeHistory();
   currentSpace = id;
   badges = {};
   renderAppNav();

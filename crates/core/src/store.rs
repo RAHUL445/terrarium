@@ -635,6 +635,110 @@ impl Store {
         Ok(out)
     }
 
+    /// Newest grouped versions first; empty when the row has no applied changes.
+    pub fn history(
+        &self,
+        table: &str,
+        row: &str,
+        opts: &crate::HistoryOptions,
+    ) -> Result<Vec<crate::Version>> {
+        let def = self.schema.table(table)?;
+        let changes = self.row_changes(table, row)?;
+        crate::history::history(def, &changes, opts)
+    }
+
+    /// Rebuild every schema column through an arbitrary valid HLC cutoff.
+    pub fn row_at(&self, table: &str, row: &str, version: &str) -> Result<Option<crate::RowAt>> {
+        let def = self.schema.table(table)?;
+        let cutoff: Hlc = version.parse()?;
+        let changes = self.row_changes(table, row)?;
+        crate::history::row_at(def, &changes, &cutoff)
+    }
+
+    /// Copy historical values using ordinary synced writes, reviving trash.
+    /// Historical deletion state is informative and never trashes a live row.
+    pub fn restore_to(&mut self, table: &str, row: &str, version: &str) -> Result<Vec<String>> {
+        let def = self.schema.table(table)?;
+        if def.kind == TableKind::Append {
+            return Err(Error::AppendOnly(table.into()));
+        }
+        let missing = || Error::NotFound {
+            table: table.into(),
+            row: row.into(),
+        };
+        let state = row_state(&self.conn, table, row)?;
+        if matches!(state, None | Some(RowState::Gone)) {
+            return Err(missing());
+        }
+        let target = self.row_at(table, row, version)?.ok_or_else(missing)?;
+        let mut updates = Map::new();
+        let mut increments = BTreeMap::new();
+        let mut columns = Vec::new();
+        for column in &def.columns {
+            let current = read_cell(&self.conn, table, row, &column.name)?;
+            let mut value = target.values[&column.name].clone();
+            let changed = if column.rule == MergeRule::Counter {
+                let delta = crate::history::arithmetic(&value, &current, true)?;
+                if delta.as_f64() == Some(0.0) {
+                    false
+                } else {
+                    increments.insert(column.name.clone(), delta);
+                    true
+                }
+            } else {
+                let current = if column.rule == MergeRule::Text {
+                    if value.is_null() {
+                        value = Value::String(String::new());
+                    }
+                    Value::String(current.as_str().unwrap_or("").into())
+                } else {
+                    current
+                };
+                if to_sql(&current) == to_sql(&value) {
+                    false
+                } else {
+                    updates.insert(column.name.clone(), value);
+                    true
+                }
+            };
+            if changed {
+                columns.push(column.name.clone());
+            }
+        }
+        self.write(|w| {
+            if state == Some(RowState::Trashed) {
+                w.restore(table, row)?;
+            }
+            if !updates.is_empty() {
+                w.update(table, row, &updates)?;
+            }
+            for (column, delta) in increments {
+                w.increment(table, row, &column, delta)?;
+            }
+            Ok(())
+        })?;
+        columns.sort();
+        Ok(columns)
+    }
+
+    /// Whether a cutoff belongs to this row's applied log, even after regrouping.
+    pub fn has_row_version(&self, table: &str, row: &str, version: &str) -> Result<bool> {
+        self.schema.table(table)?;
+        let cutoff: Hlc = version.parse()?;
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _pp_changes WHERE tbl = ?1 AND row_id = ?2 AND hlc = ?3)",
+            params![table, row, cutoff.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn row_changes(&self, table: &str, row: &str) -> Result<Vec<ChangeRecord>> {
+        self.change_records(
+            "WHERE tbl = ?1 AND row_id = ?2 ORDER BY hlc",
+            params![table, row],
+        )
+    }
+
     fn change_records(&self, tail: &str, args: impl rusqlite::Params) -> Result<Vec<ChangeRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT lseq, hlc, user_id, tbl, row_id, schema_version, op FROM _pp_changes {tail}"

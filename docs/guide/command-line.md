@@ -187,6 +187,35 @@ result object itself: export returns `path`, `plugins`, `rows`, `bytes`;
 import returns `plugin`, `importer`, `total`, `done`, `failed`, `skipped`,
 `message`, `failures` (each with `item`, `code`, `message`).
 
+## Item history
+
+The host’s `item` commands work only with tables whose plugin has enabled
+history. Run `terrarium commands item` to see their parameters. These
+examples use To-do’s `tasks` table; replace `<id>` with the item’s ID and
+`<version>` with an ID returned by the history query.
+
+```sh
+terrarium query item.history --plugin todo --table tasks --id <id>
+terrarium run item.restore_version --plugin todo --table tasks --id <id> --version <version>
+terrarium run space.set_history --id <space-id> --days 90
+```
+
+- `item.history` lists versions newest first (50 by default; `--limit` takes
+  1–200). Add `--version <version>` to read one version’s values. Use
+  `--space <space-id>` to select a space for either `item` command.
+- `item.restore_version` requires **Read and change** access. It saves the
+  earlier values as a new synced change and brings a trashed item back.
+- `space.set_history` also requires **Read and change** access. Its `--id`
+  selects the space; `--days` accepts `0` (Forever), `30`, `90` or `365`.
+  Use `terrarium space list` to find a space’s ID, or
+  `terrarium commands space.set_history` to see the parameters.
+
+The retention choice syncs to paired devices. Older versions are hidden,
+not erased, and cannot be previewed or restored through these commands.
+The newest version stays listed even if expired, but its historical values
+remain unavailable. A longer retention period can reveal older versions
+again. See [earlier versions](first-steps.md#see-earlier-versions).
+
 ## Use it from an AI agent (MCP)
 
 `terrarium mcp` offers the same commands as tools to any agent that speaks

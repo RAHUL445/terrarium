@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `history`, `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -79,6 +79,7 @@ More components and keys:
 | `audio-recorder` | Round mic button: `{label, hint, max_seconds, action}`. Shows the elapsed time and a level meter while recording; Cancel drops the take. `action` gets `{{value.audio}}` (base64), `{{value.mime}}`, `{{value.duration_ms}}` |
 | `label_hidden` | On fields and `search-field`: the label is read aloud but not shown |
 | `action.open` | `{"open": "{{row.url}}", "op": "visit", "args": {…}}`: opens an http(s) address in the system browser, then runs `op` if given |
+| `action.history` | `{"history": {"table": "tasks", "id": "{{row.id}}", "title": "{{row.title}}"}}`: opens the host History dialog for this plugin; the table must opt in through the manifest’s `history` field. See [item history](#item-history) |
 | `action.copy` | `{"copy": "{{row.copy_text}}", "success": "Copied"}`: puts the text on the clipboard |
 | `stat.note`, `stat.tone` | A line under the number, e.g. "▲ 3 vs last week"; `tone` `good` (green) or `bad` (red) |
 | `bar.layout: "columns"` | Vertical columns instead of horizontal bars (e.g. tasks per day). `bar` also takes `value_label` (a column shown instead of the number), `title` (a column used as tooltip and spoken label) and `empty` |
@@ -971,6 +972,7 @@ A widget template may declare how it fits on a page:
 Settings are data for bindings only: they reach your own queries and operations, never another plugin's. Keep widget IDs and setting names stable between releases; removed plugins keep their placements (shown as Unavailable) until they return.
 
 The built-in View widget lets people choose an app, one viewable query from that app, and a layout (`list`, `table`, `board`, or `calendar`). They can also configure sort order, grouping ("Columns from" for board) and date columns, and filtering can follow the page focus. The widget only reads through the query declared in that app's manifest; it never reaches another plugin's data.
+
 ## Declared events
 
 Declare events in the manifest before calling `terrarium_guest::events::emit`:
@@ -1122,3 +1124,48 @@ on that device. Plugins receive only an account reference, never tokens.
 Sign out removes the Terrarium account; revoke provider access separately.
 Old manifests default `oauth` to empty. Upgrade all devices before enabling
 a plugin declaring OAuth; older hosts reject the new manifest field.
+
+## Item history
+
+A manifest can opt standard storage tables into history with
+`"history": ["tasks"]`. The list defaults to empty; unknown tables,
+append-only tables and duplicates are rejected. Every declared column in
+these tables becomes readable to the user, CLI clients and agents through
+host commands, bypassing named queries. Opt in only tables whose entire
+contents are intended to be visible to those callers; there is no column
+allowlist. No other plugin’s data is handed to plugin code.
+
+Add a button inside the item sheet (where `row` is the item):
+
+```json
+{
+  "type": "button",
+  "label": "History",
+  "action": {
+    "history": { "table": "tasks", "id": "{{row.id}}", "title": "{{row.title}}" }
+  }
+}
+```
+
+The host supplies this plugin’s identity and the selected space; the action
+cannot choose another plugin. `title` is an optional display label.
+
+`item.history {plugin, table, id, version?, limit?}` reads versions newest
+first (default 50, range 1–200), returning `{versions, this_device, keeps_days}`.
+With a listed version id it returns `{version, values, in_trash}`.
+`item.restore_version {plugin, table, id, version}` writes historical values
+through the store and returns `{restored, columns}`. Both commands are scoped
+to the selected space; restore requires write access and runs no plugin code.
+Earlier listed ids remain usable after grouping changes, but cutoffs must
+belong to the item's applied changes. The space’s `history_days` preference
+filters the list and rejects expired detail/restore requests. The newest
+version stays listed even when expired, but its values and restore are then
+unavailable. Retention hides versions without deleting change-log data.
+
+A manifest declaring `history` requires a host with HIST-03 support. Upgrade
+all paired hosts before distributing these packages through the shared
+plugin set: older hosts reject this new manifest field. New hosts accept
+existing manifests without it. Upgrade every peer to HIST-05 before relying
+on the same retention behavior across devices.
+The host namespace `item` is reserved.
+
