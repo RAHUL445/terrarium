@@ -2,7 +2,7 @@
 
 Every feature in Terrarium is a plugin. The app ships with the
 [recommended plugins](../../README.md#recommended-plugins) (To-do, Notes,
-Habits, Bookmarks, Voice and Reports), and you can add others. Manage them in
+Habits, Bookmarks, Voice, Reports and Feeds), and you can add others. Manage them in
 **Settings → Plugins**, or **Apps → Manage** on a phone.
 
 ## What a plugin can do
@@ -33,6 +33,24 @@ Installing a newer version of a plugin you already have updates it. If the new
 version asks for anything new, you are asked again.
 
 Unsigned packages install only in development builds.
+
+## Browse the plugin registry
+
+Open **Settings → Plugins → Browse** on a computer. In this source preview,
+production discovery is disabled until the registry release gates are met.
+**No plugin list is set up** means you should use a `.terrapkg` file from
+**Installed** instead; there is no registry URL setting to fill in.
+
+When a catalog is configured, **Check now** refreshes its signed list.
+**Search plugins** filters that list locally. Choose **Install** or **Update**
+to download a package and open the normal publisher and permission review.
+A catalog signature does not approve the publisher or the plugin's access.
+An expired list cannot be used to install; check again for a fresh list.
+
+**Check for plugin updates automatically** controls catalog checks. The
+server sees your IP address and check times; packages download only when you
+choose to install. Android cannot browse or download registry packages in
+this build; install on your computer, sync, then review on the phone.
 
 ## Network access
 

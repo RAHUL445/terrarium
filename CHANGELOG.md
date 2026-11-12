@@ -8,17 +8,53 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- Built-in View widgets on pages, with settings for app, data, layout, sort,
-  grouping/date columns, and page-focus-aware filtering.
-- New `table` and `calendar` template components for declared query data.
-- Board and matrix card drag-and-drop (plus keyboard move) through declared
-  move operations.
+- Ranked global search across apps and spaces, with full-text indexes and
+  prefix matching for indexed apps.
+- Links between items, Markdown @mentions, current-title chips and grouped
+  **Linked from** lists for mentions and saved connections.
+- Built-in View widgets on pages: list, sortable table, calendar and board
+  layouts with app, data, sort, grouping, date and page-focus settings.
+  Templates can also show tables and calendars from declared queries.
+- Board and matrix card moves by drag-and-drop or keyboard, where the app
+  declares a move action.
+- Desktop quick capture with a global shortcut, `terrarium://open/...` deep
+  links to pages and items, and Android text/link sharing with a save picker.
+- Bulk selection with keyboard shortcuts and phone long-press, actions on up
+  to 500 items, partial-failure results and Undo where the app offers it.
+- Readable space export as a ZIP of JSON and app-provided Markdown or CSV,
+  plus checked CSV task and Markdown note imports in Settings and commands.
+- Encrypted file attachments with paste/drop in Markdown editors, local
+  previews, sync, storage quotas, orphan cleanup and attachment-aware backups.
+- Typed plugin events and approved automations between apps, with a chosen
+  execution device, local consent and run history.
+- Plugin HTTPS requests to approved websites, network activity, encrypted
+  bearer accounts and desktop browser sign-in with approval on each device.
+- Item History for opted-in tables, preview and restore as a new version,
+  and synced per-space history visibility periods.
+- Signed plugin catalog browsing and update review on desktop. Production
+  discovery remains disabled until the registry activation gates are met.
+- Simple declarative plugins without Wasm, and `terra new --declarative` to
+  scaffold them alongside the existing Rust plugin tools.
 
-- Deep links with `terrarium://open/...` now open a specific app page or item.
-- Quick capture on desktop: a global shortcut opens a small save window from
-  anywhere on the computer.
-- Android share sheet support for text and links, with a picker so you choose
-  where the shared text is saved.
+### Changed
+
+- Home cards pack into columns to avoid gaps below short cards. Settings
+  navigation fits medium windows, desktop actions say Click, and note
+  snippets hide attachment markup.
+- Backup status shows the latest backup and its folder, with clearer
+  permission errors and an app data fallback when Documents is unavailable.
+- `TERRA_PROFILE_DIR` isolates app files, backups and webview preferences for
+  separate test profiles.
+
+### Fixed
+
+- Each non-empty version restore starts a separate, labelled History entry,
+  preserving the version it replaced directly below it.
+- Bulk checkboxes and permission review text are clearer; attachment previews
+  handle missing MIME metadata more reliably.
+- Attachments work in browser preview. Desktop builds and plugin builds use
+  the reconciled feature set and the intended plugin build directory.
+- Peer sync connections close more reliably after rejected requests.
 
 ## [0.1.0-alpha.1] - 2026-11-10
 

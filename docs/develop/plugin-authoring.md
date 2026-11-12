@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `history`, `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `kind`, `index`, `history`, `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -1078,7 +1078,7 @@ locally unapproved account fails with `unavailable` and asks the user to sign
 in again. Synced credentials require “Use this account on this device” before
 use. Plugins never receive credentials or request headers, and cannot manage
 accounts through operations, CLI/MCP or template actions. Preview remains
-unauthenticated. OAuth browser sign-in is HTTP-04b work.
+unauthenticated. Desktop OAuth browser sign-in is available as described below.
 
 Authenticated redirects cannot change origin, even between bound hosts.
 OAuth refresh, when a host-provisioned account is present, consumes the same
@@ -1211,6 +1211,18 @@ Release builds ignore these registry overrides. Android cannot browse or fetch.
 
 ## Simple plugins without code
 
+Scaffold a Reading list package with no Rust toolchain or SDK dependency:
+
+```sh
+terra new ../reading-list --declarative
+terra build ../reading-list
+terra preview ../reading-list
+```
+
+`--declarative` cannot be combined with `--sdk`. The default `terra new`
+continues to scaffold a Rust/Wasm plugin.
+
+
 A plugin can declare `"kind": "declarative"` with
 `"api": "terrarium:declarative@0.1.0"`. It ships a manifest and JSON
 UI templates, with no Rust project or `dist/plugin.wasm`. Each operation
@@ -1264,3 +1276,28 @@ opens only an installed plugin's first page, using the original space.
 Upgrade policy: install the updated host before these templates. Older hosts
 ignore `followup` (the save still works without a toast action), and lack the
 new wording/default bindings. No manifest, WIT or database schema changed.
+
+## Related contracts
+
+Use the declarations supported by your target hosts. Upgrade every paired
+host before distributing packages with fields older hosts do not recognise.
+
+- [Search and references](../design/links-and-search.md): top-level `index`
+  and `refs`, indexed query shapes and host-owned links.
+- [Bulk and export/import](../design/cli-control.md#bulk-operations-as-built):
+  operation `bulk`/`bulk_op`, query-backed selection, and top-level `export`
+  and `import` declarations.
+- [Attachments](../design/attachments.md): `format: "file"` columns and
+  host-mediated blob values; plugins never receive file bytes.
+- [Events](../design/events-and-automations.md): typed `events`, committed
+  emission and consented rules.
+- [Network](../design/network-access.md): permissions, `hosts`, `oauth`,
+  deferred HTTPS and sealed accounts.
+- [History](../design/version-history.md): table opt-in and visibility limits.
+- [Declarative plugins](../design/declarative-plugins.md): `kind`, API and
+  typed `do` steps. Query `view` metadata drives built-in View widgets; see
+  [Viewable queries](#viewable-queries).
+- [Registry](../design/registry.md): signed discovery and package review.
+
+Home Screen widgets and JavaScript guest authoring are designs or experiments,
+not additional supported manifest contracts in this release.

@@ -5,7 +5,8 @@
 On a computer, switch to the space you want, then open **Settings → Spaces**
 and choose **Export this space**. The ZIP file goes to
 `Documents/Terrarium Exports`. When it finishes, **Show in folder** reveals it.
-Export is available on computers only.
+Export is available on computers only. With an isolated `TERRA_PROFILE_DIR`,
+exports go to that profile’s `exports` folder instead.
 
 **The file is not encrypted. Anyone with it can read its contents.** Keep it
 somewhere safe and delete it when you no longer need it. For encrypted files

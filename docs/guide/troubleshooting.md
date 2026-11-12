@@ -39,6 +39,34 @@ Transcription is off until it is set up on a Mac; see
 [voice transcription](ai-and-schedules.md#voice-transcription). Captures are
 kept and can be transcribed later.
 
+## Backups cannot use Documents
+
+Open **Settings → Backups** and read the folder shown below the backup list.
+If Documents access is denied, Terrarium says **Terrarium can't use the
+Documents backup folder** and stores backups in the app data folder's
+`backups` directory instead.
+
+On macOS, allow Documents access in **System Settings → Privacy & Security →
+Files and Folders**, then try **Back up now** again. If the fallback is also
+unavailable, check the app data folder's permissions. With `TERRA_PROFILE_DIR`,
+backups stay in that profile's `backups` folder; a profile permission error
+requires fixing that folder. See [test profiles](../develop/building-from-source.md).
+
+## An attachment or an old version is missing
+
+**Not on this device yet** means attachment bytes have not arrived. Sync
+again and check the storage quota in **Settings → Devices and sync**. See
+[Attachments](attachments.md) for limits and cleanup.
+
+History periods hide older versions without erasing them. Check **Settings →
+Spaces → Keep history for**. A listed **Current** entry can be too old for a
+historical preview; open the item normally. See [Version history](history.md).
+
+## Browse shows no plugin list
+
+Production registry discovery is not enabled in this source preview. Install
+from a package file under **Installed**. See [Plugins](plugins.md#browse-the-plugin-registry).
+
 ## Start over
 
 > **Warning:** this permanently deletes all Terrarium data on that device.

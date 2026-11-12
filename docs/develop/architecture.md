@@ -2,7 +2,7 @@
 
 Terrarium is a local-first plugin host. Every device runs the complete host and
 owns a full copy of its data; nothing requires the network. Features are added
-as sandboxed WebAssembly plugins, and devices sync end-to-end encrypted.
+as sandboxed Wasm or declarative plugins, and devices sync end-to-end encrypted.
 
 ```
             ┌──────────────── host (Rust) ─────────────────┐
@@ -55,6 +55,27 @@ Plugin implementations live in the separate
   are signed with Ed25519; installs and capability-expanding updates require
   user consent, and the previous version is kept for rollback.
 - The installed plugin set is part of space state and syncs between devices.
+
+### Manifest contracts and simple plugins
+
+The manifest declares `index` queries for local search, `refs` for host item
+resolution, operation `bulk`/`bulk_op`, readable `export` and mapped `import`
+formats, typed `events`, network permissions with `hosts` and `oauth`, and
+query `view` metadata for user-built layouts. The host validates these before
+loading a package. See [plugin authoring](plugin-authoring.md#related-contracts)
+for the declarations and linked feature designs.
+
+`kind: "declarative"` uses `terrarium:declarative@0.1.0` with typed `do` steps
+instead of a Wasm component. The host executes bounded store writes in one
+transaction, with normal sync, trash and command checks. Declarative v1 has
+no permissions, interop, jobs, schedules or reminders. Omitted `kind` remains
+Wasm. See the [contract](../design/declarative-plugins.md).
+
+Desktop registry browsing verifies signed catalogs and stages downloads for
+the same package trust and permission review as file installs. Catalog keys
+and publisher trust are separate. Production discovery stays disabled until
+[activation gates](../design/registry.md#27-publishing-and-activation-gates)
+close; Android has no registry operations.
 
 ## Events and automations
 

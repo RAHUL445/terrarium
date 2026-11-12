@@ -5,7 +5,7 @@
 <h1 align="center">Terrarium</h1>
 
 <p align="center">
-  An extensible, local-first app host for macOS and Android. Every feature is a sandboxed WebAssembly plugin.
+  An extensible, local-first app host for macOS and Android. Features arrive as sandboxed plugins.
 </p>
 
 <p align="center">
@@ -59,10 +59,19 @@ and some templates.
   go to trash by default.
 - **One UI for desktop and phone.** A shared web shell renders plugin
   templates, custom pages with a widget grid where plugins share one screen,
-  a search palette and themes.
+  ranked global search, item links and @mentions, and themes. View widgets
+  show app data as lists, tables, boards or calendars.
+- **Capture and organise.** Use a desktop quick-capture shortcut, deep links
+  and Android text sharing. Select many items for supported bulk actions.
+- **Files and recovery.** Add encrypted attachments, export readable space
+  archives, import tasks and notes, and restore earlier item versions.
+- **Plugin permissions.** Review website access, connected accounts and signed
+  packages. Desktop catalog browsing is built but production activation is
+  still gated. Simple plugins can use declarations without Wasm.
 - **Spaces.** Keep Personal, Work and other spaces apart while sharing one
   plugin list and pairing.
-- **Scheduler and AI.** Plugins can schedule jobs and reminders and generate
+- **Scheduler and AI.** Approved automations connect app events to actions on
+  your chosen device. Plugins can schedule jobs and reminders and generate
   text through any OpenAI-compatible provider you configure, local or remote.
 - **Command line and agents.** The `terrarium` command and its MCP server
   run the same commands as the UI, with per-client tokens, an audit log,
@@ -84,11 +93,12 @@ roll back or remove any plugin; see the [plugins guide](docs/guide/plugins.md).
 
 | Plugin | Features |
 | --- | --- |
-| **To-do** | Tasks with due dates, reminders, priorities, repeats and steps; list, board and matrix layouts |
-| **Notes** | Markdown notes in projects with checklists and autosave; edits on different devices merge |
+| **To-do** | Tasks, steps, repeats and reminders; board/matrix moves, bulk tags, CSV import/export and History |
+| **Notes** | Markdown notes with merging, mentions, links and attachments; bulk changes, Markdown import/export and History |
 | **Habits** | Scheduled habits with check-ins, streaks, reminders and sleep logs |
-| **Bookmarks** | Links with projects, tags and notes; pin the ones you use most |
+| **Bookmarks** | Links with projects and tags; bulk pin/trash, custom views and Android sharing |
 | **Voice** | Record or type quick captures, transcribed locally, then send them to To-do or Notes |
+| **Feeds** | Public HTTPS RSS/Atom subscriptions, read/unread controls and an unread widget; asks for website access |
 | **Reports** | AI-written reviews of your tasks, habits and notes, on demand or on a schedule |
 
 ## Repositories
@@ -162,6 +172,11 @@ All documentation is in [docs/](docs/README.md):
   [first steps](docs/guide/first-steps.md),
   [sync and devices](docs/guide/sync-and-devices.md),
   [plugins](docs/guide/plugins.md),
+  [views](docs/guide/views.md),
+  [attachments](docs/guide/attachments.md),
+  [version history](docs/guide/history.md),
+  [export and import](docs/guide/export-and-import.md),
+  [automations](docs/guide/automations.md),
   [AI, schedules and voice](docs/guide/ai-and-schedules.md),
   [appearance](docs/guide/appearance.md),
   [command line](docs/guide/command-line.md),

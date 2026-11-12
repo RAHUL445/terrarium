@@ -1,7 +1,8 @@
 # Design: signed plugin registry
 
-Status: design for ECO-02; no registry implementation or production endpoint
-is enabled by this document.
+Status: registry browsing and review are built for ECO-02. Production
+discovery remains disabled pending the activation gates below; design
+requirements are not evidence of production endpoint activation.
 
 Review: pending user review (approved to proceed)
 
@@ -558,3 +559,14 @@ before official activation. Payments, accounts, ratings, hosted services,
 threshold metadata and publisher-key migration remain out of scope.
 
 Review: pending user review (approved to proceed)
+
+## Implementation map
+
+Catalog validation and fetching live in
+[registry_index.rs](../../crates/runtime/src/registry_index.rs) and
+[registry_client.rs](../../crates/runtime/src/registry_client.rs). The
+[native service](../../apps/tauri/src-tauri/src/registry.rs) stages packages
+for the existing review, and [registry.js](../../ui/registry.js) implements
+Browse, local search, update badges and check preferences. Production
+configuration remains disabled; debug fixtures require an isolated profile.
+See [the user guide](../guide/plugins.md#browse-the-plugin-registry).

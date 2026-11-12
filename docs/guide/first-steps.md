@@ -24,6 +24,8 @@ To change a page, choose **Edit page**:
   the keyboard, arrows move a focused widget and Shift+arrows resize it.
 - **Duplicate** or **Delete page** from the same toolbar; **Done** saves.
 
+See [Views on pages](views.md) for table, calendar and board settings.
+
 **Quick add** on Home creates an item in an app without opening it.
 
 ## Apps
@@ -49,7 +51,8 @@ change the action. When available, the toast shows **Undo** for ten seconds.
 
 In Notes, you can add images by pasting or dropping them into the Markdown
 editor. Terrarium stores attachments in your space and inserts
-`terrarium:blob/...` references in the note text.
+`terrarium:blob/...` references in the note text. See [Attachments](attachments.md)
+for file limits, sync and cleanup.
 
 ## Search and commands
 
@@ -125,8 +128,8 @@ Edits from the same person on one device are grouped into one version when
 there is no more than two minutes between edits. A continuous editing
 session can therefore be one version even when it lasts longer. Versions
 say **This device** or **Another device**; the newest is marked **Current**.
-A restore can group with nearby edits rather than appear as a separate
-version.
+Each restore that changes anything starts a separate, labelled version.
+Later edits can join that version. See [Version history](history.md).
 
 In **Settings → Spaces**, use **Keep history for** beside a space to choose
 **Forever**, **1 year**, **90 days** or **30 days**. This choice syncs between

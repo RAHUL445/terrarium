@@ -74,8 +74,12 @@ your data. Write them down and keep them somewhere safe and offline.
 **Settings → Backups → Back up now** writes one encrypted `.terrabak` file with
 every plugin's data and the plugin list.
 
-- On a Mac, backups go to `~/Documents/Terrarium Backups/`. On a phone they
-  stay in the app's storage, and a phone must join a computer first.
+- On a Mac, backups normally go to `~/Documents/Terrarium Backups/`. If
+  Documents is unavailable, they go to the app data folder’s `backups`
+  directory. Settings shows the folder and any permission notice; see
+  [backup troubleshooting](troubleshooting.md#backups-cannot-use-documents).
+  A test profile uses `<TERRA_PROFILE_DIR>/backups`. On a phone backups
+  stay in app storage, and the phone must join a computer first.
 - Backups include attachments (encrypted blob data) as well as rows.
 - A backup can only be opened with the space's recovery phrase.
 - **Restore from a file** merges the backup in; newer changes are kept.
@@ -93,10 +97,13 @@ Exports are not encrypted and cannot be restored like backups.
 ## Attachment storage and cleanup
 
 In **Settings → Devices and sync**, the Attachments card shows usage and quota
-for the current space. You can:
+on this device. You can:
 
 - raise or lower the attachment quota,
-- run **Clean up now** to remove orphaned attachments past their grace period.
+- run **Clean up now** to remove attachments recorded as unused for at least
+  one day; automatic local cleanup waits 30 days.
 
 Cleanup does not promise secure deletion; it removes unreferenced blobs from
 Terrarium storage.
+
+See [Attachments](attachments.md) for adding files, limits and cleanup details.

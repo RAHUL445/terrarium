@@ -1,6 +1,8 @@
 # Design: attachments (blob store, transfer, quotas)
 
-Status: as built (ATT-02 through ATT-06).
+Status: built through ATT-06, with differences from the original decisions
+recorded below. The decision sections preserve the design, not a promise
+that every proposed platform flow or limit is implemented.
 
 Human review required: yes. This design changes crypto, sync transfer, backup format, and storage contracts across devices.
 
@@ -477,3 +479,23 @@ ATT-06 (cleanup/quota/backups):
 ## 8. Differences from task files
 
 - `docs/design/links-and-search.md` is referenced by the task brief but is not present in this worktree; this document follows the style of existing `docs/design/cli-control.md` instead.
+
+## Implementation differences
+
+The [user guide](../guide/attachments.md) describes the available controls.
+Compared with the decisions above:
+
+- The native UI offers desktop Save; Android file saving currently returns
+  unavailable. The proposed Android open/share flow is not shipped.
+- Quota settings and usage are host-local. The sync planner uses remaining
+  storage and a per-cycle file limit, not the proposed desktop/mobile daily
+  ingest counters. Do not document those daily limits as settings.
+- Automatic local cleanup uses 30 days after first recording a file as
+  unreferenced. Manual **Clean up now** uses a one-day minimum. Cleanup skips
+  closed spaces, keeps references in trash, and removes local blobs; it does
+  not implement the proposed all-peer acknowledgement remote deletion flow.
+
+Source: [blob services](../../crates/runtime/src/services.rs),
+[cleanup](../../crates/runtime/src/blobs_gc.rs),
+[sync planning](../../crates/sync/src/blobs.rs) and
+[native file saving](../../apps/tauri/src-tauri/src/blobs.rs).

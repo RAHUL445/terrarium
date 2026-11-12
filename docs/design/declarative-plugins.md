@@ -1,7 +1,8 @@
 # Declarative plugins without Wasm
 
-ECO-03a design for ECO-03b (runtime and packaging) and ECO-04 (scaffolding).
-This document specifies future behavior; it does not implement it.
+Status: built through ECO-03b (runtime and packaging) and ECO-04
+(`terra new --declarative`). This document records the contract and its
+acceptance requirements. See [plugin authoring](../develop/plugin-authoring.md#simple-plugins-without-code).
 
 Review: pending user review (approved to proceed)
 

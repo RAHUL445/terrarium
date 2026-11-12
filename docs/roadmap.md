@@ -4,6 +4,27 @@ Open work before Terrarium can be called stable or shipped as signed binaries.
 Publishing the source does not complete these items. Detailed designs live in
 [docs/security](security/).
 
+## Built in the unreleased source
+
+- Global indexed search, item links, Markdown mentions and backlinks.
+- Custom page views with tables, calendars and boards; declared card moves.
+- Desktop quick capture, page/item deep links and Android text/link sharing.
+- Bulk actions and optional undo; readable export and CSV/Markdown import.
+- Encrypted attachments, quota and local cleanup, including backup support.
+- Plugin events and approved automations on a chosen device.
+- Approved plugin HTTPS, encrypted accounts and desktop OAuth sign-in.
+- Item History, restore and per-space visibility periods. Erasure is separate.
+- Signed catalog browsing and update review, declarative plugins and
+  `terra new --declarative`. Production registry activation remains gated.
+- Desktop layout, wording, completion toasts, backup fallback and test profiles.
+
+See the [guides](README.md#user-guide) and [changelog](../CHANGELOG.md).
+Native Home Screen widgets remain a [proposal](design/home-widgets.md).
+JavaScript plugin authoring remains [research](design/js-guest-spike.md).
+Registry activation needs the [publishing gates](design/registry.md#27-publishing-and-activation-gates),
+including artifact provenance and Android policy review; it is not enabled
+by the implementation alone.
+
 ## Release gates and deferred work
 
 | ID | Priority / gate | Task and acceptance |
