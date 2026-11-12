@@ -1569,3 +1569,470 @@ fn plugin_event_rejection_rolls_back_writes_and_dry_runs_discard_events() {
         }
     }
 }
+
+fn http_host(data: &TempDir) -> PluginHost {
+    let mut host = host(data);
+    host.set_net(Some(terrarium_net::Net::new()));
+    host.load(&limits_dir()).unwrap();
+    host
+}
+fn http_error(host: &mut PluginHost, operation: &str, code: &str) {
+    let error = host.call("limits", operation, &json!({})).unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Plugin { code: ref c, .. } if c == code),
+        "{error}"
+    );
+    assert!(host.net_mut().unwrap().take().is_none());
+}
+#[test]
+fn fetch_is_queued_only_when_the_call_commits() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    for op in ["fetch_then_fail", "fetch_then_trap"] {
+        host.call("limits", op, &json!({})).unwrap_err();
+        assert!(host.net_mut().unwrap().take().is_none());
+    }
+    let id = host.call("limits", "fetch_ok", &json!({})).unwrap();
+    let job = host.net_mut().unwrap().take().unwrap();
+    assert_eq!(job.id, id.as_str().unwrap());
+    assert_eq!(job.space, "personal");
+    assert_eq!(job.plugin, "limits");
+    assert_eq!(job.on_done, "on_fetched");
+    assert_eq!(job.request.url, "https://example.com/");
+}
+#[test]
+fn fetch_without_permission_is_denied() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    let pkg = data.path().join("no-http");
+    copy_package(&limits_dir(), &pkg);
+    let path = pkg.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["permissions"] = json!([]);
+    manifest.as_object_mut().unwrap().remove("hosts");
+    std::fs::write(path, manifest.to_string()).unwrap();
+    host.load(&pkg).unwrap();
+    assert_eq!(
+        host.call("limits", "http_available", &json!({})).unwrap(),
+        false
+    );
+    http_error(&mut host, "fetch_ok", "denied");
+}
+#[test]
+fn fetch_to_unlisted_host_is_denied() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    http_error(&mut host, "fetch_other_host", "denied");
+    http_error(&mut host, "fetch_bad_callback", "invalid");
+}
+#[test]
+fn dry_run_queues_nothing() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.call_traced("personal", "limits", "fetch_ok", &json!({}), true)
+        .unwrap();
+    assert!(host.net_mut().unwrap().take().is_none());
+}
+#[test]
+fn outer_failure_cancels_nested_http_without_cancelling_older_jobs() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    let old = host.call("limits", "fetch_ok", &json!({})).unwrap();
+    let pkg = data.path().join("child");
+    copy_package(&limits_dir(), &pkg);
+    let path = pkg.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["id"] = json!("child");
+    std::fs::write(path, manifest.to_string()).unwrap();
+    host.load(&pkg).unwrap();
+    // BTreeMap provider selection picks child (limits is moved out during its call).
+    let error = host
+        .call("limits", "nested_fetch_then_fail", &json!({}))
+        .unwrap_err();
+    assert!(
+        matches!(error, RuntimeError::Plugin { ref code, ref message }
+        if code == "invalid" && message == "outer failed"),
+        "{error}"
+    );
+    let net = host.net_mut().unwrap();
+    let job = net.take().unwrap();
+    assert_eq!(job.id, old.as_str().unwrap());
+    net.finish(&job.id);
+    assert!(net.take().is_none());
+}
+#[test]
+fn http_unavailable_without_worker_and_unload_drops_queued_jobs() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    assert_eq!(
+        host.call("limits", "http_available", &json!({})).unwrap(),
+        true
+    );
+    host.call("limits", "fetch_ok", &json!({})).unwrap();
+    host.unload("limits");
+    assert!(host.net_mut().unwrap().take().is_none());
+    host.load(&limits_dir()).unwrap();
+    host.set_net(None);
+    assert_eq!(
+        host.call("limits", "http_available", &json!({})).unwrap(),
+        false
+    );
+    let error = host.call("limits", "fetch_ok", &json!({})).unwrap_err();
+    assert!(matches!(error,RuntimeError::Plugin {ref code,..} if code == "unavailable"));
+}
+#[test]
+fn invalid_http_input_is_rejected_without_echoing_private_data() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    for request in [
+        json!({"method":"GET","url":"https://example.com/?PRIVATE", "extra":"PRIVATE"}),
+        json!({"method":"POST","url":"https://example.com/","headers":{"Authorization":"PRIVATE"}}),
+        json!({"method":"GET","url":"http://example.com/?PRIVATE"}),
+    ] {
+        let error = host
+            .call("limits", "fetch_raw", &json!({"request":request}))
+            .unwrap_err();
+        assert!(matches!(error,RuntimeError::Plugin {ref code,..} if code == "invalid"));
+        assert!(!error.to_string().contains("PRIVATE"));
+        assert!(host.net_mut().unwrap().take().is_none());
+    }
+}
+
+#[test]
+fn unused_http_import_is_omitted_from_release_components() {
+    fn imports(dir: &Path) -> Vec<String> {
+        let bytes = std::fs::read(dir.join("dist/plugin.wasm")).unwrap();
+        let wit_component::DecodedWasm::Component(resolve, world) =
+            wit_component::decode(&bytes).unwrap()
+        else {
+            panic!("expected component");
+        };
+        resolve.worlds[world]
+            .imports
+            .keys()
+            .map(|key| resolve.name_world_key(key))
+            .collect()
+    }
+    assert!(!imports(&todo_dir())
+        .iter()
+        .any(|name| name == "terrarium:plugin/http@0.1.0"));
+    assert!(imports(&limits_dir())
+        .iter()
+        .any(|name| name == "terrarium:plugin/http@0.1.0"));
+}
+
+#[test]
+fn commit_failure_cancels_http_reservations() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    let old = host.call("limits", "fetch_ok", &json!({})).unwrap();
+    // Force the plugin transaction to end before Runtime's COMMIT, while the
+    // fixture catches the storage error and successfully submits an HTTP job.
+    // This is fault-injection DDL on synthetic data, never a production write.
+    let conn = rusqlite::Connection::open(data.path().join("plugins/limits.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER synthetic_rollback BEFORE INSERT ON notes BEGIN SELECT RAISE(ROLLBACK, 'synthetic rollback'); END;").unwrap();
+    let error = host
+        .call("limits", "fetch_commit_failure", &json!({}))
+        .unwrap_err();
+    assert!(matches!(error, RuntimeError::Core(_)), "{error}");
+    assert!(
+        error.to_string().contains("no transaction is active"),
+        "{error}"
+    );
+    let net = host.net_mut().unwrap();
+    let job = net.take().unwrap();
+    assert_eq!(job.id, old.as_str().unwrap());
+    net.finish(&job.id);
+    assert!(net.take().is_none());
+}
+
+fn http_response() -> terrarium_net::Response {
+    terrarium_net::Response {
+        status: 200,
+        headers: Default::default(),
+        body: "synthetic".into(),
+        bytes_in: 9,
+    }
+}
+#[test]
+fn http_reply_reaches_callback_with_context() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    let context = json!({"nested":[1,null,"synthetic"],"enqueue":false});
+    let id = host
+        .call(
+            "limits",
+            "fetch_raw",
+            &json!({"request":{"method":"GET","url":"https://example.com/","context":context}}),
+        )
+        .unwrap();
+    let (job, auth) = host.take_http_job().unwrap();
+    assert!(auth.is_none());
+    assert!(host.deliver_http(job, Ok(http_response())).is_none());
+    let rows = host.query("limits", "all", &Map::new()).unwrap();
+    let payload: Value = serde_json::from_str(rows[0]["note"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["context"], context);
+    assert_eq!(payload["request"], id);
+    assert_eq!(payload["body"], "synthetic");
+}
+#[test]
+fn scheduled_run_waits_for_http_reply() {
+    use terrarium_runtime::scheduler::{Repeat, RunOn, ScheduleInput};
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    let id=host.scheduler_mut().set("personal","limits","http",&ScheduleInput {
+        name:"Web fixture".into(),repeat:Repeat::Minutes{minutes:5},tz:None,run_on:RunOn::Any,
+        operation:"fetch_raw".into(),args:json!({"request":{"method":"GET","url":"https://example.com/","context":{"enqueue":true}}}),enabled:true,
+    },"plugin").unwrap();
+    let now = host.scheduler().get(&id).unwrap().created_ms + 300_001;
+    assert!(host.run_due(now, true).is_empty());
+    let run = host.scheduler().runs(&id, 1)[0].clone();
+    assert_eq!(run.status, "waiting");
+    let (job, _) = host.take_http_job().unwrap();
+    host.ai_mut()
+        .set_config(terrarium_runtime::ai::AiConfig {
+            preset: "ollama".into(),
+            base_url: "http://localhost:11434/v1".into(),
+            model: "synthetic".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    host.ai_mut()
+        .submit(
+            "personal",
+            "limits",
+            "on_fetched",
+            serde_json::from_value(json!({"prompt":"synthetic"})).unwrap(),
+            Some(run.id.clone()),
+        )
+        .unwrap();
+    let (ai_job, _, _) = host.take_ai_job().unwrap();
+    assert!(
+        host.deliver_http(job, Ok(http_response())).is_none(),
+        "callback queued another request"
+    );
+    let (job, _) = host.take_http_job().unwrap();
+    assert!(
+        host.deliver_http(job, Ok(http_response())).is_none(),
+        "AI is still running"
+    );
+    let done = host
+        .deliver_ai(
+            ai_job,
+            Ok(terrarium_runtime::ai::Completion {
+                text: "synthetic".into(),
+                model: "synthetic".into(),
+                input_tokens: 1,
+                output_tokens: 1,
+            }),
+        )
+        .unwrap();
+    assert_eq!(done.run.status, "done");
+}
+#[test]
+fn reloading_retires_an_in_flight_http_callback() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.call("limits", "fetch_ok", &json!({})).unwrap();
+    let (job, _) = host.take_http_job().unwrap();
+    host.load(&limits_dir()).unwrap();
+    assert!(!host.http_job_current(&job));
+    assert!(host.deliver_http(job, Ok(http_response())).is_none());
+    assert!(host.query("limits", "all", &Map::new()).unwrap().is_empty());
+}
+#[test]
+fn escaped_http_callback_is_bounded() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.call("limits", "fetch_ok", &json!({})).unwrap();
+    let (job, _) = host.take_http_job().unwrap();
+    let mut response = http_response();
+    response.body = "\u{0}".repeat(1024 * 1024);
+    host.deliver_http(job, Ok(response));
+    let rows = host.query("limits", "all", &Map::new()).unwrap();
+    let payload: Value = serde_json::from_str(rows[0]["note"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["error"]["code"], "too-large");
+    assert!(payload.get("body").is_none());
+}
+
+#[test]
+fn vault_unbound_host_is_delivered_as_denied() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.set_ai_sealer(terrarium_runtime::ai::Sealer::new("space", &[7; 32]));
+    host.vault_service(
+        "vault_put_bearer",
+        &json!({"plugin":"limits","name":"work","hosts":["example.com"],"token":"test-token-1234"}),
+    )
+    .unwrap();
+    // Load the same compiled component with a second manifest-authorized host.
+    let package = data.path().join("two-hosts");
+    std::fs::create_dir_all(package.join("dist")).unwrap();
+    std::fs::copy(
+        limits_dir().join("dist/plugin.wasm"),
+        package.join("dist/plugin.wasm"),
+    )
+    .unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(limits_dir().join("manifest.json")).unwrap())
+            .unwrap();
+    manifest["hosts"] = json!(["example.com", "api.example.org"]);
+    std::fs::write(package.join("manifest.json"), manifest.to_string()).unwrap();
+    host.load(&package).unwrap();
+    // Bind the account to the new loaded package generation.
+    host.vault_service(
+        "vault_put_bearer",
+        &json!({"plugin":"limits","name":"work","hosts":["example.com"],"token":"test-token-1234"}),
+    )
+    .unwrap();
+    host.call("limits","fetch_raw", &json!({"request":{"method":"GET","url":"https://api.example.org/","auth":{"account":"work"}}})).unwrap();
+    let (job, auth) = host.take_http_job().unwrap();
+    assert!(auth.is_none());
+    let result = terrarium_runtime::net::fetch::run(&job, None);
+    host.deliver_http(job, result);
+    let rows = host.query("limits", "all", &Map::new()).unwrap();
+    let payload: Value = serde_json::from_str(rows[0]["note"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["error"]["code"], "denied");
+    assert_eq!(
+        payload["error"]["message"],
+        "This account is not allowed for api.example.org"
+    );
+    assert!(!payload.to_string().contains("test-token-1234"));
+}
+
+#[test]
+fn vault_services_are_not_cli_or_plugin_services_and_removal_retires_jobs() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.set_ai_sealer(terrarium_runtime::ai::Sealer::new("space", &[7; 32]));
+    let args =
+        json!({"plugin":"limits","name":"work","hosts":["example.com"],"token":"test-token-1234"});
+    for cmd in [
+        "vault_accounts",
+        "vault_put_bearer",
+        "vault_remove",
+        "vault_approve",
+    ] {
+        assert!(terrarium_runtime::services::invoke(&mut host, cmd, &args, true).is_none());
+        assert!(terrarium_runtime::commands::describe(
+            &host,
+            terrarium_runtime::commands::Caller::Client(terrarium_runtime::commands::Scope::Change)
+        )
+        .iter()
+        .all(|c| c.id != cmd));
+    }
+    host.vault_service("vault_put_bearer", &args).unwrap();
+    host.call(
+        "limits",
+        "fetch_raw",
+        &json!({"request":{"method":"GET","url":"https://example.com/","auth":{"account":"work"}}}),
+    )
+    .unwrap();
+    let (job, lease) = host.take_http_job().unwrap();
+    let lease = lease.unwrap();
+    assert!(host.update_http_account(&job, &lease, None).is_ok());
+    host.remove_plugin_accounts("limits").unwrap();
+    assert!(!host.http_job_current(&job));
+    assert!(host.update_http_account(&job, &lease, None).is_err());
+    host.deliver_http(job, Ok(http_response()));
+    assert!(host.query("limits", "all", &Map::new()).unwrap().is_empty());
+    assert_eq!(
+        host.vault_service("vault_accounts", &args).unwrap(),
+        json!([])
+    );
+}
+
+#[test]
+fn oauth_completion_checks_provider_package_and_account_generation() {
+    let data = TempDir::new().unwrap();
+    let mut host = http_host(&data);
+    host.set_ai_sealer(terrarium_runtime::ai::Sealer::new("space", &[7; 32]));
+    let package = data.path().join("oauth");
+    std::fs::create_dir_all(package.join("dist")).unwrap();
+    std::fs::copy(
+        limits_dir().join("dist/plugin.wasm"),
+        package.join("dist/plugin.wasm"),
+    )
+    .unwrap();
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(limits_dir().join("manifest.json")).unwrap())
+            .unwrap();
+    manifest["oauth"] = json!({"work":{"auth_url":"https://example.com/authorize","token_url":"https://example.com/token","scopes":["items.read"],"api_hosts":["example.com"]}});
+    std::fs::write(package.join("manifest.json"), manifest.to_string()).unwrap();
+    host.load(&package).unwrap();
+    let preparation = host
+        .prepare_oauth("personal", "limits", "work", "work")
+        .unwrap();
+    let tokens = terrarium_net::vault::TokenSet {
+        access: "synthetic-access".into(),
+        refresh: "synthetic-refresh".into(),
+        expires_ms: 9_999_999_999_999,
+        token_url: preparation.provider.token_url.clone(),
+        client_id: "synthetic-client".into(),
+        client_secret: None,
+        provider: Some(preparation.provider.clone()),
+    };
+    assert!(host.oauth_current(
+        "personal",
+        "limits",
+        "work",
+        (&preparation.signer, None),
+        &preparation.provider
+    ));
+    let result = host
+        .finish_oauth(
+            "personal",
+            "limits",
+            "work",
+            (&preparation.signer, None),
+            tokens.clone(),
+        )
+        .unwrap();
+    assert_eq!(result[0]["kind"], "oauth");
+    assert_eq!(result[0]["active"], true);
+    assert!(!result.to_string().contains("synthetic"));
+    assert!(!host.oauth_current(
+        "personal",
+        "limits",
+        "work",
+        (&preparation.signer, None),
+        &preparation.provider
+    ));
+    drop(preparation.client);
+    let current = host
+        .prepare_oauth("personal", "limits", "work", "work")
+        .unwrap();
+    host.vault_service(
+        "vault_remove",
+        &json!({"plugin":"limits","space":"personal","name":"work"}),
+    )
+    .unwrap();
+    assert!(host
+        .finish_oauth(
+            "personal",
+            "limits",
+            "work",
+            (&current.signer, current.generation.as_deref()),
+            tokens.clone()
+        )
+        .is_err());
+    manifest["oauth"]["work"]["scopes"] = json!(["items.write"]);
+    std::fs::write(package.join("manifest.json"), manifest.to_string()).unwrap();
+    host.load(&package).unwrap();
+    assert!(!host.oauth_current(
+        "personal",
+        "limits",
+        "work",
+        (&preparation.signer, None),
+        &preparation.provider
+    ));
+    assert!(host
+        .finish_oauth(
+            "personal",
+            "limits",
+            "work",
+            (&preparation.signer, None),
+            tokens
+        )
+        .is_err());
+}

@@ -943,6 +943,78 @@ function compareVersions(a, b) {
   return 0;
 }
 
+function accountCard(plugin, patterns, oauth = {}) {
+  const space = currentSpace;
+  const list = el("ul", { class: "plain" });
+  const error = el("p", { class: "muted", role: "status" });
+  const name = el("input", { placeholder: "Account name", required: true, maxlength: "60", pattern: "[A-Za-z0-9_.-]+", "aria-label": "Account name" });
+  const token = el("input", { type: "password", required: true, autocomplete: "new-password", "aria-label": "API key" });
+  const exact = patterns.filter((h) => !h.includes("*"));
+  const host = exact.length ? el("select", { "aria-label": "Account host" }, ...exact.map((h) => el("option", { value: h }, h)), ...(patterns.some(h => h.includes("*")) ? [el("option", { value: "" }, "Another website")] : []))
+    : el("input", { placeholder: "api.website.com", required: true, "aria-label": "Exact account host" });
+  const customHost = el("input", { placeholder: "Exact website, such as api.website.com", "aria-label": "Another account host" });
+  customHost.hidden = !exact.length || !patterns.some(h => h.includes("*"));
+  const invoke = (action, extra = {}) => call("service", { name: action, args: { plugin, space, ...extra } });
+  const render = (accounts) => {
+    list.replaceChildren(...(accounts.length ? accounts.map((a) => {
+      const row = el("li", {}, `${a.name} · ${a.hosts.join(", ")}${a.provider_host ? ` · Sign-in server: ${a.provider_host}` : ""} · ${a.readable ? "Saved" : "Sign in again on this device"}`);
+      if (a.readable && !a.active) row.append(el("button", { type: "button", class: "pp-button", onclick: async () => {
+        try { error.textContent = ""; render(await invoke("vault_approve", { name: a.name, generation: a.generation })); }
+        catch (e) { error.textContent = String(e); }
+      } }, "Use this account on this device"));
+      row.append(el("button", { type: "button", class: "pp-button", onclick: async () => {
+        if (!await window.terrariumConfirm("Remove this account from Terrarium. Revoke access at the provider to invalidate existing tokens.")) return;
+        try { error.textContent = ""; render(await invoke("vault_remove", { name: a.name })); }
+        catch (e) { error.textContent = String(e); }
+      } }, a.kind === "oauth" ? "Sign out" : "Remove"));
+      return row;
+    }) : [el("li", {}, "No accounts yet.")]));
+  };
+  const save = el("button", { type: "submit", class: "pp-button" }, "Save API key");
+  const form = el("form", { onsubmit: async (e) => {
+    e.preventDefault();
+    save.disabled = true;
+    error.textContent = "";
+    // Keep the secret out of the DOM as soon as the request is constructed.
+    const pending = invoke("vault_put_bearer", { name: name.value, hosts: [host.value || customHost.value], token: token.value });
+    token.value = "";
+    try { render(await pending); name.value = ""; }
+    catch (e) { error.textContent = String(e); }
+    finally { save.disabled = false; }
+  } }, el("label", {}, "Account name", name), el("label", {}, "Website", host), customHost, el("label", {}, "API key", token), save);
+  const card = el("section", { class: "card" }, el("h4", {}, "Accounts"), list,
+    el("details", {}, el("summary", {}, "Add API key"), form), error);
+  for (const [kind, provider] of Object.entries(oauth)) {
+    if (/Android|iPhone|iPad/.test(navigator.userAgent)) {
+      card.append(el("p", { class: "muted" }, "Sign in on your computer, then sync and approve this account on this device."));
+      break;
+    }
+    const authHost = new URL(provider.auth_url).hostname;
+    const account = el("input", { required: true, maxlength: "60", pattern: "[A-Za-z0-9_.-]+", "aria-label": "Sign-in account name" });
+    const clientId = el("input", { type: "password", required: true, autocomplete: "off", "aria-label": "Client ID" });
+    const secret = el("input", { type: "password", autocomplete: "new-password", "aria-label": "Client secret (optional)" });
+    const status = el("p", { role: "status" });
+    const submit = el("button", { type: "submit", class: "pp-button" }, `Sign in with ${authHost}`);
+    const cancel = el("button", { type: "button", class: "pp-button", onclick: async () => {
+      try { await call("vault_cancel"); } catch { status.textContent = "Could not cancel sign-in."; }
+    } }, "Cancel");
+    cancel.hidden = true;
+    card.append(el("form", { onsubmit: async (e) => {
+      e.preventDefault(); submit.disabled = true; cancel.hidden = false;
+      status.textContent = "Waiting for the browser…";
+      const pending = call("vault_sign_in", { request: { plugin, space, account: account.value, kind, client_id: clientId.value, client_secret: secret.value || null } });
+      clientId.value = ""; secret.value = "";
+      try { render(await pending); status.textContent = "Signed in."; account.value = ""; }
+      catch { status.textContent = "Sign-in did not complete. Try again."; }
+      finally { submit.disabled = false; cancel.hidden = true; }
+    } }, el("h4", {}, `Sign in to ${authHost}`),
+      el("p", { class: "muted" }, `Sign-in server: ${authHost}. Token server: ${new URL(provider.token_url).hostname}. API websites: ${provider.api_hosts.join(", ")}. Permissions: ${provider.scopes.join(", ") || "None"}.`),
+      el("label", {}, "Account name", account), el("label", {}, "Client ID", clientId), el("label", {}, "Client secret (optional)", secret), submit, cancel, status));
+  }
+  invoke("vault_accounts").then(render).catch((e) => { error.textContent = String(e); });
+  return card;
+}
+
 function renderInstalled() {
   const list = $("installed-list");
   if (!pluginList.plugins.length) {
@@ -964,6 +1036,22 @@ function renderInstalled() {
           pluginAction("set_plugin_removed", { id: p.id, removed: true }, `${p.name} removed`);
         },
       }, "Remove"));
+      const hosts = p.capabilities.filter((c) => c.id.startsWith("http:")).map((c) => c.id.slice(5));
+      if (hosts.length) {
+        const activity = el("ul", { class: "plain" });
+        actions.append(el("button", { type: "button", class: "pp-button", onclick: async () => {
+          try {
+            const entries = await call("service", { name: "net_audit", args: { plugin: p.id } });
+            activity.replaceChildren(...(entries.length ? entries.slice().reverse().map((a) => el("li", {}, `${new Date(a.at_ms).toLocaleString()} · ${a.host} · ${a.code || a.status || "Pending"} · ${a.bytes_in} B received, ${a.bytes_out} B sent`)) : [el("li", {}, "No network activity yet.")]));
+          } catch (e) { pluginsError(String(e)); }
+        } }, "Network activity"));
+        actions.append(el("button", { type: "button", class: "pp-button", onclick: async () => {
+          try { await call("service", { name: "net_audit_clear", args: { plugin: p.id } }); activity.replaceChildren(); }
+          catch (e) { pluginsError(String(e)); }
+        } }, "Clear network activity"));
+        actions.append(activity);
+        actions.append(accountCard(p.id, hosts, p.oauth));
+      }
       return el("li", { class: "pp-list-item plugin-row" },
         el("div", { class: "widget-head" },
           el("strong", {}, `${p.name} `, el("span", { class: "muted" }, p.version)),
@@ -972,6 +1060,7 @@ function renderInstalled() {
         p.capabilities.length
           ? el("p", { class: "muted" }, "Can: ", p.capabilities.map((c) => c.label).join("; "))
           : "",
+        hosts.length ? el("p", { class: "muted" }, `Network: ${hosts.join(", ")}`) : "",
         p.source && p.origin === "installed" ? el("p", { class: "muted" }, `From ${p.source}`) : "",
         actions);
     }));
@@ -1046,6 +1135,13 @@ function showReview(r) {
   $("review-caps").replaceChildren(...(r.capabilities.length
     ? r.capabilities.map((c) => el("li", {}, c.label, added.has(c.id) && r.current_version ? el("strong", {}, " (new)") : ""))
     : [el("li", {}, "Keep its own data only.")]));
+  const network = r.capabilities.some((c) => c.id.startsWith("http:"));
+  const anyWebsite = r.capabilities.some((c) => c.id === "http:*");
+  $("review-network").hidden = !network;
+  $("review-network-any").hidden = !anyWebsite;
+  $("review-network-confirm").hidden = !anyWebsite;
+  $("review-network-box").checked = false;
+  $("review-install").textContent = network ? (r.current_version ? "Allow and update" : "Allow and install") : "Install";
   const needsTrust = r.trust !== "trusted";
   $("review-trust-confirm").hidden = !needsTrust;
   $("review-trust-text").textContent = r.trust === "unknown"
@@ -1102,9 +1198,13 @@ $("review-install").addEventListener("click", async () => {
     pluginsError("Tick the box to allow the new permissions.");
     return;
   }
+  if (!$("review-network-confirm").hidden && !$("review-network-box").checked) {
+    pluginsError("Tick the box to allow access to any website.");
+    return;
+  }
   const r = review;
   hideReview();
-  await pluginAction("confirm_install", { token: r.token, trust: needsTrust, approveCapabilities: $("review-caps-box").checked }, `${r.name} ${r.version} installed`);
+  await pluginAction("confirm_install", { token: r.token, trust: needsTrust, approveCapabilities: $("review-caps-box").checked, approveAnyWebsite: $("review-network-box").checked }, `${r.name} ${r.version} installed`);
   $("install-file").value = "";
   $("install-location").value = "";
   loadSigners();

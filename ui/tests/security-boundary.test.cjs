@@ -53,3 +53,30 @@ test('the quick capture window can only list plugins and run actions', () => {
     'allow-quick-capture-done',
   ]);
 });
+
+test('HTTP review resets broad-host consent and displays the privacy disclosure', () => {
+  const vm = require('node:vm');
+  const source = fs.readFileSync(path.join(root, 'ui/app.js'), 'utf8');
+  const render = source.slice(source.indexOf('function showReview(r)'), source.indexOf('function hideReview()'));
+  const elements = new Map();
+  const get = id => {
+    if (!elements.has(id)) elements.set(id, { checked: false, replaceChildren(...children) { this.children = children; }, scrollIntoView() {} });
+    return elements.get(id);
+  };
+  const context = { $: get, el: (tag, attrs, ...children) => ({ tag, attrs, children }), review: null };
+  vm.runInNewContext(render, context);
+  const data = { name: 'Synthetic', version: '2.0.0', current_version: '1.0.0', description: '', trust: 'trusted', signer: 'synthetic', signer_name: 'Fixture', added: [], capabilities: [{ id: 'http:*', label: 'Reach any website' }] };
+  context.showReview(data);
+  assert.equal(get('review-network').hidden, false);
+  assert.equal(get('review-network-confirm').hidden, false);
+  assert.equal(get('review-network-box').checked, false);
+  assert.equal(get('review-install').textContent, 'Allow and update');
+  get('review-network-box').checked = true;
+  context.showReview(data);
+  assert.equal(get('review-network-box').checked, false, 'consent cannot carry across reviews');
+  context.showReview({ ...data, current_version: null, capabilities: [{ id: 'http:example.com', label: 'Reach example.com' }] });
+  assert.equal(get('review-network').hidden, false);
+  assert.equal(get('review-network-any').hidden, true);
+  assert.equal(get('review-network-confirm').hidden, true);
+  assert.equal(get('review-install').textContent, 'Allow and install');
+});

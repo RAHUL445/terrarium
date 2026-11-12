@@ -400,6 +400,7 @@ pub async fn confirm_install(
     token: String,
     trust: bool,
     approve_capabilities: bool,
+    approve_any_website: bool,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<Pending>();
@@ -420,6 +421,8 @@ pub async fn confirm_install(
             !staged.added.is_empty(),
             approve_capabilities,
         )?;
+        terrarium_runtime::validate_http_consent(staged.package.manifest(), approve_any_website)
+            .map_err(err)?;
         let plugins = app.state::<Plugins>();
         let id = staged.package.manifest().id.clone();
         let current = plugins.current_for_rollback(&id);
@@ -499,6 +502,9 @@ pub async fn set_plugin_removed(app: AppHandle, id: String, removed: bool) -> Re
             .and_then(|l| Some((l.version, l.digest?)));
         plugins
             .with_host(|host| {
+                if removed {
+                    host.remove_plugin_accounts(&id)?;
+                }
                 host.packages_mut()
                     .set_removed(
                         &id,

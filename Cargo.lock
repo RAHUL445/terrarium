@@ -5959,6 +5959,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "terrarium-net"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "terrarium-ai",
+ "terrarium-core",
+ "tiny_http",
+ "ureq",
+ "url",
+ "uuid",
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
 name = "terrarium-runtime"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -5974,6 +5994,7 @@ dependencies = [
  "terrarium-ai",
  "terrarium-blobs",
  "terrarium-core",
+ "terrarium-net",
  "terrarium-scheduler",
  "terrarium-sync",
  "thiserror 2.0.21",

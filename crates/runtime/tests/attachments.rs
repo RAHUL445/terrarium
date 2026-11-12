@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use serde_json::{json, Value};
 use tempfile::TempDir;
-use terrarium_core::FileRef;
+use terrarium_core::{FileRef, StoreSet};
 use terrarium_runtime::blobs::BlobKey;
 use terrarium_runtime::{build_plugin, HostConfig, PluginHost};
 
@@ -101,7 +101,7 @@ fn referenced_blobs_include_trashed_rows_and_markdown() {
     .to_json_string()
     .unwrap();
     let trashed_markdown = format!("old ![x](terrarium:blob/{trashed})");
-    host.store("todo")
+    host.store_mut("todo")
         .unwrap()
         .write(|w| {
             w.insert(
@@ -156,12 +156,12 @@ fn gc_keeps_blobs_referenced_again() {
     let id = host.blob_store().lock().unwrap().put(b"returning").unwrap();
     let note = format!("terrarium:blob/{id}");
     let row = host
-        .store("todo")
+        .store_mut("todo")
         .unwrap()
         .write(|w| w.insert("tasks", &values(json!({"title":"A","notes":note}))))
         .unwrap();
 
-    host.store("todo")
+    host.store_mut("todo")
         .unwrap()
         .write(|w| w.update("tasks", &row, &values(json!({"notes":"none"}))))
         .unwrap();
@@ -170,7 +170,7 @@ fn gc_keeps_blobs_referenced_again() {
     assert!(host.blob_store().lock().unwrap().has(&id));
 
     let restored = format!("back terrarium:blob/{id}");
-    host.store("todo")
+    host.store_mut("todo")
         .unwrap()
         .write(|w| w.update("tasks", &row, &values(json!({"notes":restored}))))
         .unwrap();

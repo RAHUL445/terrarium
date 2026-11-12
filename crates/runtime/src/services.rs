@@ -173,6 +173,17 @@ pub fn invoke(
         | "rule_approve"
         | "rules_save_settings"
         | "rules_start" => rule_service(host, cmd, args),
+        "net_audit" | "net_audit_clear" => (|| {
+            let plugin = arg_str(args, "plugin")?;
+            let net = host
+                .net_mut()
+                .ok_or("Network activity is unavailable on this device.")?;
+            serde_json::to_value(
+                net.activity(plugin, cmd == "net_audit_clear")
+                    .map_err(|e| e.message)?,
+            )
+            .map_err(|_| "Could not read network activity.".into())
+        })(),
         "ai_settings" => Ok(ai_state(host)),
         "assistant_submit" => host.assistant_submit(args),
         "assistant_context" => (|| host.assistant_context(arg_str(args, "space")?))(),

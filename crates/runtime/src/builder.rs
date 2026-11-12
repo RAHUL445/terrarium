@@ -20,11 +20,14 @@ pub fn build_plugin(dir: &Path) -> Result<PathBuf> {
     let cargo_toml = dir.join("Cargo.toml");
     let crate_name = package_name(&cargo_toml)?.replace('-', "_");
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("target"));
     let output = Command::new(cargo)
         .args(["build", "--release", "--target", TARGET, "--manifest-path"])
         .arg(&cargo_toml)
         .arg("--target-dir")
-        .arg(dir.join("target"))
+        .arg(&target_dir)
         .output()
         .map_err(|e| RuntimeError::Build(format!("could not run cargo: {e}")))?;
     if !output.status.success() {
@@ -32,9 +35,6 @@ pub fn build_plugin(dir: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ));
     }
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| dir.join("target"));
     let module_path = target_dir
         .join(TARGET)
         .join("release")

@@ -14,6 +14,8 @@ pub const API_VERSION: &str = "terrarium:plugin@0.1.0";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub oauth: BTreeMap<String, terrarium_net::oauth::OAuthDef>,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -59,6 +61,9 @@ pub struct Manifest {
     /// which the user consents to at install: `speech`.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Public HTTPS host patterns allowed for deferred HTTP requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
     /// Icon in the host's set (see [`ICONS`]); a letter tile otherwise.
     #[serde(default)]
     pub icon: Option<String>,
@@ -195,7 +200,7 @@ pub const ICONS: &[&str] = &[
 ];
 
 /// Permissions a manifest may ask for.
-pub const PERMISSIONS: &[&str] = &["speech", "ai"];
+pub const PERMISSIONS: &[&str] = &["speech", "ai", "http"];
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -557,7 +562,7 @@ impl Manifest {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Manifest> {
-        let manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| {
+        let mut manifest: Manifest = serde_json::from_slice(bytes).map_err(|e| {
             let mut message = e.to_string();
             if message.contains("unknown variant `file`") {
                 message.push_str(
@@ -567,6 +572,17 @@ impl Manifest {
             RuntimeError::Manifest(message)
         })?;
         manifest.validate()?;
+        if !manifest.hosts.is_empty() {
+            manifest.hosts = terrarium_net::HostRules::new(&manifest.hosts)
+                .map_err(|e| RuntimeError::Manifest(e.message))?
+                .patterns()
+                .to_vec();
+        }
+        for def in manifest.oauth.values_mut() {
+            *def = def
+                .canonical(&manifest.hosts)
+                .map_err(|e| RuntimeError::Manifest(e.message))?;
+        }
         Ok(manifest)
     }
 
@@ -592,6 +608,21 @@ impl Manifest {
                 "api `{}` is not supported; expected `{API_VERSION}`",
                 self.api
             ));
+        }
+        if self.oauth.len() > 4 {
+            return bad("At most four sign-in providers are allowed.".into());
+        }
+        for (kind, def) in &self.oauth {
+            if kind.is_empty()
+                || kind.len() > 60
+                || !kind
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            {
+                return bad("Invalid account kind.".into());
+            }
+            def.canonical(&self.hosts)
+                .map_err(|e| RuntimeError::Manifest(e.message))?;
         }
         self.storage.validate()?;
         if self.events.len() > 32 {
@@ -687,6 +718,12 @@ impl Manifest {
                 "unknown permission `{p}` (known: {})",
                 PERMISSIONS.join(", ")
             ));
+        }
+        if self.permissions.iter().any(|p| p == "http") {
+            terrarium_net::HostRules::new(&self.hosts)
+                .map_err(|e| RuntimeError::Manifest(e.message))?;
+        } else if !self.hosts.is_empty() {
+            return bad("hosts requires the http permission".into());
         }
         if let Some(icon) = &self.icon {
             if !ICONS.contains(&icon.as_str()) {
@@ -2074,5 +2111,98 @@ mod event_tests {
         changed = new.clone();
         changed.events.get_mut("pinged").unwrap().description = "Renamed".into();
         assert!(crate::added_capabilities(Some(&new), &changed).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use serde_json::json;
+    fn base() -> serde_json::Value {
+        json!({"id":"synthetic", "name":"Synthetic", "version":"0.1.0", "api":API_VERSION, "storage":{"version":1,"tables":[]}})
+    }
+    fn parse(v: &serde_json::Value) -> Result<Manifest> {
+        Manifest::parse(&serde_json::to_vec(v).unwrap())
+    }
+    #[test]
+    fn old_manifest_without_hosts_loads() {
+        let m = parse(&base()).unwrap();
+        assert!(m.hosts.is_empty());
+        assert!(m.oauth.is_empty());
+        assert!(serde_json::to_value(m).unwrap().get("hosts").is_none());
+    }
+    #[test]
+    fn oauth_urls_must_be_https_and_listed_hosts() {
+        let mut v = base();
+        v["permissions"] = json!(["http"]);
+        v["hosts"] = json!(["login.example.com", "tokens.example.com", "api.example.com"]);
+        let def = json!({"auth_url":"https://LOGIN.example.com/authorize", "token_url":"https://tokens.example.com/token", "scopes":["items.read"], "api_hosts":["api.example.com"]});
+        v["oauth"] = json!({"work":def});
+        let old = parse(&v).unwrap();
+        assert_eq!(
+            old.oauth["work"].auth_url,
+            "https://login.example.com/authorize"
+        );
+        for (field, bad) in [
+            ("auth_url", json!("http://login.example.com/auth")),
+            ("auth_url", json!("https://other.example.com/auth")),
+            (
+                "token_url",
+                json!("https://tokens.example.com/token?secret=x"),
+            ),
+            ("auth_url", json!("https://@login.example.com/auth")),
+            ("auth_url", json!("https://login.example.com:444/auth")),
+            ("api_hosts", json!([])),
+            ("api_hosts", json!(["*.example.com"])),
+            ("scopes", json!(["read write"])),
+            ("extra_params", json!({})),
+            ("client_secret", json!("synthetic")),
+        ] {
+            let mut badv = v.clone();
+            badv["oauth"]["work"][field] = bad;
+            assert!(parse(&badv).is_err(), "{field}");
+        }
+        let mut wildcard = v.clone();
+        wildcard["hosts"] = json!(["*"]);
+        assert!(parse(&wildcard).is_err());
+        for field in ["auth_url", "token_url", "scopes", "api_hosts"] {
+            let mut changed = v.clone();
+            changed["oauth"]["work"][field] = match field {
+                "auth_url" => json!("https://login.example.com/another"),
+                "token_url" => json!("https://tokens.example.com/another"),
+                "scopes" => json!(["items.write"]),
+                _ => json!(["login.example.com"]),
+            };
+            let added = crate::package::added_capabilities(Some(&old), &parse(&changed).unwrap());
+            assert!(added.iter().any(|c| c.id.starts_with("oauth:work:")));
+        }
+        v["oauth"] = json!({"a":def,"b":def,"c":def,"d":def,"e":def});
+        assert!(parse(&v).is_err());
+    }
+    #[test]
+    fn http_permission_requires_hosts() {
+        let mut v = base();
+        v["permissions"] = json!(["http"]);
+        assert!(parse(&v).is_err());
+        v["hosts"] = json!(["EXAMPLE.COM", "*.BÜCHER.org"]);
+        assert_eq!(
+            parse(&v).unwrap().hosts,
+            ["example.com", "*.xn--bcher-kva.org"]
+        );
+        for hosts in [
+            json!([]),
+            json!(["example.com", "EXAMPLE.com"]),
+            json!(["127.0.0.1"]),
+            json!(["foo.local"]),
+            json!(["example.com:443"]),
+            json!(vec!["example.com"; 21]),
+        ] {
+            v["hosts"] = hosts;
+            assert!(parse(&v).is_err());
+        }
+        v["hosts"] = json!(["*"]);
+        assert!(parse(&v).is_ok());
+        v["permissions"] = json!([]);
+        assert!(parse(&v).is_err());
     }
 }

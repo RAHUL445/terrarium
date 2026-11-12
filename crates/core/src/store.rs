@@ -557,6 +557,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Device-local generation of one row, including delete/restore and peer replay.
+    /// Host consent can bind this cursor without exposing change-log contents.
+    pub fn row_revision(&self, table: &str, row: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(lseq), 0) FROM _pp_changes WHERE tbl = ?1 AND row_id = ?2",
+            params![table, row],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn changes(&self, limit: usize) -> Result<Vec<ChangeRecord>> {
         self.change_records("ORDER BY lseq DESC LIMIT ?1", params![limit as i64])
     }

@@ -77,7 +77,19 @@
           "required": true
         }
       }
-    }
+    },
+    "fetch_ok": {},
+    "fetch_then_fail": {},
+    "fetch_then_trap": {},
+    "fetch_other_host": {},
+    "fetch_bad_callback": {},
+    "on_fetched": {
+      "cli": false
+    },
+    "http_available": {},
+    "fetch_raw": {},
+    "nested_fetch_then_fail": {},
+    "fetch_commit_failure": {}
   },
   "queries": {
     "all": {
@@ -92,7 +104,8 @@
   },
   "uses": [
     "tasks",
-    "event_sink"
+    "event_sink",
+    "net-fixture"
   ],
   "events": {
     "pinged": {
@@ -102,6 +115,19 @@
           "required": true
         }
       }
+    }
+  },
+  "permissions": [
+    "http"
+  ],
+  "hosts": [
+    "example.com"
+  ],
+  "provides": {
+    "net-fixture": {
+      "operations": [
+        "fetch_ok"
+      ]
     }
   }
 }

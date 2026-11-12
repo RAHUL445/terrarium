@@ -10,6 +10,7 @@
 pub mod control;
 pub mod jobs;
 pub mod lock;
+pub mod net_audit;
 pub mod plugins;
 pub mod private;
 

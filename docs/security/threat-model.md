@@ -67,6 +67,45 @@ Assume malicious plugins, tampered archives, compromised peers, and malformed IP
 - Blob images only render trusted raster types (PNG/JPEG/GIF/WebP). SVG
   attachments are treated as files, not inline images.
 
+### Network
+
+HTTP-02 through HTTP-05 implement the [network access design](../design/network-access.md).
+The following controls apply to plugin HTTP, accounts and feed rendering.
+
+- Malicious plugins may exfiltrate any data they can read to approved
+  websites. Per-host install/update consent, an explicit “Reach any website”
+  approval for arbitrary feeds, and device-local package approval disclose
+  and bound that authority; they do not inspect outgoing data for privacy.
+- The host mediates HTTPS requests after operation commit. Public-address
+  filtering blocks LAN, loopback, link-local and CGNAT/Tailscale peers,
+  including IPv6 and embedded-address escapes. Checked DNS addresses are
+  pinned through connection, TLS verifies the original hostname, redirects
+  are revalidated, and proxies/cookies are disabled. This prevents DNS
+  rebinding and redirect escapes within the stated routing trust boundary.
+- Bounded queues, concurrency, persisted attempt/byte budgets, header/body
+  caps, disabled compression and deadlines covering DNS through network
+  completion limit resource abuse, response bombs and slowloris. In-memory jobs are
+  lost on process death; remote effects cannot be rolled back or safely
+  replayed automatically. Headless serve sends no plugin HTTP requests;
+  Android runs requests only while the app is open/foreground.
+- Host-only sealed accounts are bound to space, plugin, exact recipient
+  hosts and approved provider configuration. Plugins cannot read credentials
+  or borrow another plugin's account. Local activation prevents peer-injected
+  account/grant metadata from silently authorizing use on an honest device;
+  authenticated cross-origin redirects cannot replay tokens elsewhere.
+  A compromised peer holding the space root can decrypt shared credentials.
+  A hostile approved API can echo tokens in its response. Neither is
+  prevented by sealing or the WASM boundary. Complete key rotation and
+  compromised-device revocation remain SEC-02 work.
+- Desktop OAuth uses the system browser, loopback-only callback, PKCE,
+  state and bounded one-use exchange. Consent names the provider to expose
+  phishing risk; manifest signing does not establish provider trust.
+- Device-local bounded audit records contain host, method, result, byte
+  counts and timing, never URL paths/queries, headers, bodies or tokens.
+  Internet feed data remains untrusted: declarative templates, safe markdown,
+  inert unsafe links and no automatic remote images must prevent content
+  from becoming script, privileged IPC or an unmediated network channel.
+
 ## Known gaps
 
 Complete compromised-device revocation is not active
@@ -87,7 +126,37 @@ are logical deletion, not physical erasure of tombstones or encrypted batches.
 Durable outboxes, distributed leadership, safe retries and claim-ledger
 compaction remain deferred.
 
-General retention controls, hard quotas, fuzzing and production-signed artifacts remain
-open; see the [roadmap](../roadmap.md). An agent whose client cannot ask its
-user can pass `confirmed: true` on its own; a **Read only** token is the way
+Credentials remain sealed under the current space key until complete SEC-02
+rotation/revocation. Network attempt/byte budgets do not supply a hard disk
+quota (SEC-04). Retention controls and complete diagnostic-log review remain
+SEC-03 work. Fuzzing and production-signed artifacts also remain open; see the
+[roadmap](../roadmap.md). An agent whose client cannot ask its user can pass `confirmed: true` on its own; a **Read only** token is the way
 to rule that out, and deleted items stay in the trash.
+
+## Plugin account credentials
+
+HTTP accounts live in the synced host-only `_vault` store. Plugins, the command
+registry, CLI/MCP and declarative template actions cannot list, write, approve or
+read credentials. Only the local main-window Settings service manages accounts.
+The encrypted envelope binds the space, plugin, account, exact API hosts, token
+kind and OAuth endpoint/client configuration; AAD binds a versioned tuple of
+space/plugin/account. Metadata edits fail closed. Local activation binds the
+sealed row digest and device-local row revision to the approved loaded package
+identity (installed cache paths include package digest and signer). Peer-created,
+changed or replayed credentials need explicit approval on this device. Only
+fixed “Saved” hints are exposed. Preview has no credential-management services.
+
+Refresh runs outside the host lock. The existing per-space/plugin worker slot
+serializes refreshes for an account. Generation and activation are checked before
+sending and storing; deletion/replacement cannot be undone by a late refresh.
+401 replay is restricted to one GET/HEAD retry, sharing the deadline and private
+attempt/byte budgets. Account removal retires callbacks and propagates deletion;
+it does not revoke a provider token or erase change logs/backups. A trusted API
+can echo a received token in its response, which remains provider-controlled data.
+
+A locally available old sealing root is used to migrate readable credentials to
+a new root. Unreadable ciphertext is retained and requires sign-in again. Full
+space-key rotation and compromised-device revocation remain SEC-02 work; paired
+peers with the space root can decrypt shared credentials directly. Desktop
+OAuth browser sign-in and provider-manifest consent are implemented, with
+PKCE, state, loopback-only one-use callbacks and bounded token exchange.

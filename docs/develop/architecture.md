@@ -8,6 +8,7 @@ as sandboxed WebAssembly plugins, and devices sync end-to-end encrypted.
             ┌──────────────── host (Rust) ─────────────────┐
             │ plugin runtime · storage + change log · sync │
             │ permissions · scheduler · AI · UI renderer   │
+            │ network service · sealed account vault      │
             │ packages (install / update / rollback)       │
             └──────────────┬──────────────────────┬────────┘
                            │                      │
@@ -27,6 +28,7 @@ as sandboxed WebAssembly plugins, and devices sync end-to-end encrypted.
 | `crates/runtime` (`terrarium-runtime`) | Wasmtime component host, manifest validation, limits, ranked search, package install/update/rollback |
 | `crates/sync` (`terrarium-sync`) | Encrypted, signed change batches, pairing, peer HTTP and Google Drive transports, snapshots |
 | `crates/scheduler` (`terrarium-scheduler`) | Scheduled plugin operations, reminders, run history |
+| `crates/net` (`terrarium-net`) | Deferred plugin HTTPS, public-address policy, quotas, activity audit, sealed accounts and desktop OAuth |
 | `crates/ai` (`terrarium-ai`) | Text generation through the user's OpenAI-compatible provider |
 | `crates/cli` (`terra`) | Developer CLI: `new`, `build`, `check`, `dev`, `pack`, `verify`, `keygen`, `preview` |
 | `crates/guest` (`terrarium-guest`) | Rust SDK for writing plugins |
@@ -41,7 +43,10 @@ Plugin implementations live in the separate
 ## Plugins
 
 - Plugins are Wasm **components** linked only against the `terrarium:*` WIT
-  interfaces: no WASI, no ambient file or network access.
+  interfaces: no WASI or ambient file/network access. Network requests use
+  the host `http` interface with declared permission, approved hosts and
+  bounded public HTTPS transport after operation commit. The host owns
+  credentials; plugins only name accounts. See [Network](plugin-authoring.md#network).
 - Each operation runs in a fresh instance with fuel, a wall-clock deadline, a
   memory limit and a host-call quota, inside one storage transaction that
   commits only on success.

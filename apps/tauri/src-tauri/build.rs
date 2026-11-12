@@ -71,6 +71,8 @@ fn main() {
             "join_space",
             "sync_now",
             "recovery_phrase",
+            "vault_sign_in",
+            "vault_cancel",
             "connect_drive",
             "disconnect_drive",
             "take_links",

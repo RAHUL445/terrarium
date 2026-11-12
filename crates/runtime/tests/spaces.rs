@@ -132,8 +132,13 @@ fn spaces_and_their_data_sync_to_another_device() {
     for id in &ids {
         batches.push(laptop.store_mut(id).unwrap().export_since(0).unwrap().0);
     }
-    // The space list first, then the phone opens the space and takes its data.
-    for batch in batches.iter().filter(|b| b.plugin.starts_with('_')) {
+    // Global host stores (including the space list) first. The phone then
+    // opens per-space stores, including the host-only vault, before importing
+    // all their data. No batch is omitted.
+    for batch in batches
+        .iter()
+        .filter(|b| b.plugin.starts_with('_') && !b.plugin.contains('@'))
+    {
         phone
             .store_mut(&batch.plugin)
             .unwrap()
@@ -141,7 +146,10 @@ fn spaces_and_their_data_sync_to_another_device() {
             .unwrap();
     }
     assert!(phone.sync_spaces().unwrap());
-    for batch in batches.iter().filter(|b| !b.plugin.starts_with('_')) {
+    for batch in batches
+        .iter()
+        .filter(|b| !b.plugin.starts_with('_') || b.plugin.contains('@'))
+    {
         phone
             .store_mut(&batch.plugin)
             .unwrap()

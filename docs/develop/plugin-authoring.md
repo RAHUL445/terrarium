@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `open`, `refs`, `export`, `import` |
+| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -135,7 +135,253 @@ Each operation gets a fresh instance with fuel, time and memory limits (manifest
 Device features beyond your own storage are listed in `permissions` and shown to the user before install:
 
 - `speech`: local speech-to-text. Without it, `speech.available()` returns false and `speech.transcribe` fails with `denied`.
+- `http`: bounded HTTPS through the host, restricted to locally approved `hosts`; optional host-managed accounts and OAuth. See [Network](#network) for requests, callbacks, errors and limits.
 - `ai`: text generation with the provider the user set up in Settings → AI. The plugin never sees the provider, key or network. `ai::submit(&json!({"system": …, "prompt": …, "context": …}), "on_done")` queues a request and returns its id; it runs after your operation commits (and is dropped if it rolls back). The host then calls your operation `on_done` with `{request, ok, text, model, error: {code, message, temporary}, context}`. `ai::available()` says whether a request would be accepted now; `submit` fails with `unavailable` and the reason otherwise.
+
+## Network
+
+Declare `"http"` in `permissions` and the destinations in top-level `hosts`.
+Both `hosts` and `oauth` default to empty for old manifests. Unknown manifest,
+OAuth definition, request and auth fields are rejected.
+
+```json
+{
+  "permissions": ["http"],
+  "hosts": ["api.example.com", "login.example.com", "tokens.example.com"],
+  "oauth": {
+    "work": {
+      "auth_url": "https://login.example.com/authorize",
+      "token_url": "https://tokens.example.com/token",
+      "scopes": ["items.read"],
+      "api_hosts": ["api.example.com"]
+    }
+  },
+  "operations": {
+    "refresh": {"description": "Fetch items.", "effect": "write", "params": {}},
+    "on_fetched": {"description": "Store fetched items.", "effect": "write", "params": {}, "cli": false}
+  }
+}
+```
+
+This is a manifest fragment; example domains are synthetic. `hosts` requires
+1–20 entries with HTTP permission and must be empty/absent without it. Exact
+names match only themselves; `*.example.org` matches one or more subdomains,
+never the apex. A standalone `"*"` means any public HTTPS website and requires
+an extra install checkbox. Adding hosts or changing OAuth configuration asks
+for consent again on each device. Plugins can send data they can read to
+allowed websites; permission is not an outgoing-data privacy filter.
+
+Hosts are normalized to lowercase IDNA ASCII; canonical duplicates fail.
+DNS names need at least two labels (each ≤63 bytes, total ≤253 bytes), without
+trailing dots. No IP literals, ports, schemes, paths, userinfo, empty labels
+or embedded wildcards. Special-use suffixes `localhost`, `local`, `internal`,
+`home.arpa`, `test`, `invalid`, `example`, `onion` are rejected. Wildcards have
+no public-suffix narrowing: `*.com` is broad authority. Requests require
+HTTPS on port 443 (explicit `:443` is allowed), no fragment, userinfo,
+backslash or control character. DNS must resolve only to permitted public
+addresses; LAN, loopback, link-local, CGNAT/Tailscale and special-purpose
+ranges are blocked. See the exact [address policy](../design/network-access.md#25-limits-and-ssrf-questions-68).
+
+### Fetch and callback
+
+The WIT `http` interface in `terrarium:plugin@0.1.0` imports
+`available: func() -> bool` and
+`fetch: func(request: json, on-done: string) -> result<string, plugin-error>`.
+The Rust SDK takes a `&serde_json::Value` and returns the opaque request id:
+
+```rust
+use serde_json::json;
+use terrarium_guest::{http, Args, Result};
+
+fn refresh() -> Result<String> {
+    http::fetch(&json!({
+        "method": "GET",
+        "url": "https://api.example.com/items",
+        "headers": {"Accept": "application/json"},
+        "auth": {"account": "work"},
+        "context": {"feed": "example-feed"}
+    }), "on_fetched")
+}
+
+// Dispatch "on_fetched" here from Plugin::handle.
+fn on_fetched(args: Args) -> Result<serde_json::Value> {
+    if args.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        // Record error.message for the user; decide whether a later retry is safe.
+        return Ok(json!({}));
+    }
+    // Check status before parsing body; update your own store through storage::update.
+    // Use context.feed to locate the row and tolerate its removal since submission.
+    Ok(json!({}))
+}
+```
+
+`method` and `url` are required strings. Methods are exactly uppercase GET,
+HEAD, POST, PUT, PATCH, DELETE. `headers` defaults to an empty string map
+(explicit null fails); `body` and `auth` default to absent and may be null;
+`context` defaults to JSON null and is returned unchanged. Body is UTF-8 text,
+forbidden on GET/HEAD. Binary/base64 transfer is unsupported. `auth`, if set,
+is exactly `{"account":"work"}`. Account names are 1–60 ASCII letters,
+digits, `-`, `_` or `.`. `on-done` must name a declared operation; mark it
+`cli: false` so outside callers cannot forge replies.
+
+Requests run after your operation commits. Rollback, traps, commit failure
+and dry runs cancel submissions, including nested calls. Workers perform I/O
+outside the host lock. A synchronous `{code, message}` error means no callback.
+Accepted requests deliver one of these payloads to `on_fetched`:
+
+```json
+{"request":"opaque-job-id","ok":true,"status":200,"headers":{"content-type":"application/json","etag":"example-etag"},"body":"[]","context":{"feed":"example-feed"}}
+```
+
+```json
+{"request":"opaque-job-id","ok":false,"error":{"code":"timeout","message":"The website did not answer in time.","temporary":true},"context":{"feed":"example-feed"}}
+```
+
+Success always includes status, headers and body. All final HTTP statuses,
+including 401/404/500, are `ok: true`; failure includes none of these fields.
+Bodies decode strictly as UTF-8 regardless of declared charset; HEAD and
+204/304 have `body: ""`. The host does not parse HTML or JSON. Only lowercase
+`content-type`, `etag`, `last-modified`, `cache-control`, `expires`,
+`retry-after`, `date`, `content-language` are returned. Repeated values join
+with `, ` in wire order. No final URL, Location, Set-Cookie or request headers
+are exposed.
+
+Make callbacks safe to repeat: use stable provider item ids and deduplicate
+writes. Delivery is attempted once per in-memory job, without durable
+exactly-once guarantees. Restart loses queued/in-flight work with no callback
+or automatic replay, even if a remote write already happened. Scheduled runs
+wait for all HTTP/AI work, including callback submissions; callback failure
+rolls back local writes, never remote effects. Use provider idempotency keys
+for writes and make scheduled operations safe to repeat across devices.
+
+### Headers, redirects and limits
+
+Allowed request headers: Accept, Accept-Language, Content-Type,
+If-None-Match, If-Modified-Since, Idempotency-Key and `X-*`, except
+`X-Forwarded-*`, `X-Real-IP`, `X-Api-Key`, `X-Auth-*`. Names must be HTTP tokens;
+values reject control characters. Case-insensitive duplicates fail. All other
+headers are rejected, including Authorization, Cookie, Host and framing
+headers. The host sets User-Agent `Terrarium` and Accept-Encoding `identity`;
+non-identity response compression fails. No cookies, proxies or cross-job
+connection pools are used.
+
+Only GET/HEAD follow 301/302/303/307/308, preserving method, at most five hops
+within the original deadline. Mutating methods return 3xx without replay.
+Missing Location returns 3xx; malformed/forbidden targets or a sixth redirect
+fail `redirect-blocked`. Each hop repeats URL/host/DNS checks. Authenticated
+cross-origin redirects fail; unauthenticated cross-origin requests forward
+only Accept. Bodies are never forwarded across origins.
+
+Limits are fixed by the host, not manifest overrides (KiB = 1,024 bytes):
+
+| Resource | Limit |
+| --- | --- |
+| Request JSON / URL / UTF-8 body / serialized context | 384 KiB / 8 KiB / 256 KiB / 64 KiB |
+| Request headers | 32 entries, 16 KiB total names and values; each name/value ≤4 KiB |
+| Response headers on wire, including hidden fields | 32 KiB |
+| Response body / complete serialized callback | 2 MiB / 4 MiB (escaped body and context included) |
+| Connect / read-write inactivity / whole network job | 10 s / ≤10 s / 30 s including DNS, TLS, redirects, refresh and retry |
+| Maximum queued age | 5 minutes |
+| Per device, space and plugin | 1 in flight, 20 queued |
+| Across a device | 4 in flight, 50 queued; fair dispatch across plugins |
+| Per device, space and plugin attempts | 60 per rolling hour |
+| Per device, space and plugin transferred body bytes | 50 MiB per UTC day, sent plus received |
+| DNS answer set / resolver pool | 16 addresses per hop / 4 workers and 4 pending lookups |
+| Device-local activity history | 500 entries and 1 MiB, oldest removed |
+
+Redirects, failures, OAuth exchanges and retries consume attempts/bytes.
+Reservations prevent overbooking; persisted counters survive restart and fail
+closed on storage errors. Crash reservations remain charged conservatively.
+Network quotas are not general storage/disk quotas.
+
+### Errors
+
+`temporary` is a suggestion for a later attempt, never proof that a remote
+mutation did not happen. Only callback errors carry this boolean; WIT errors
+carry code and a fixed safe message. There are no automatic network retries
+except the OAuth GET/HEAD retry below.
+
+| Code | temporary | Meaning |
+| --- | --- | --- |
+| `invalid` | false | Malformed request, URL, method, header, auth, callback or context (including context over 64 KiB) |
+| `denied` | false | Missing permission/approval, unlisted host, absent account or wrong account host |
+| `unavailable` | false | Worker, local state or credentials unavailable/unapproved/unreadable |
+| `queue-full` | true | Queue or worker reservation capacity exhausted |
+| `rate-limited` | true | Rolling-hour attempt budget exhausted |
+| `quota` | true | Daily body-byte budget exhausted |
+| `too-large` | false | Request, body, header or serialized callback exceeds its cap |
+| `blocked` | false | DNS answer set exceeds 16 or includes a prohibited address |
+| `redirect-blocked` | false | Redirect target, origin policy or hop limit fails |
+| `timeout` | true | Queue age or deadline exceeded |
+| `unreachable` | true | DNS/connect/TLS/read transport failure |
+| `invalid-response` | false | Invalid UTF-8, content encoding or protocol |
+| `unauthorized` | false | OAuth refresh denied; no API replay |
+| `cancelled` | false | Live work cancelled where the callback is still valid |
+
+Update, unload and removal suppress stale callbacks. Already sent requests
+cannot be recalled. Do not log URLs, context, request/response data or secrets.
+
+### Accounts and OAuth
+
+Users add bearer accounts in Settings → Plugins → Accounts. Plugins refer to
+an account by name using `auth: {"account":"work"}`; they cannot create,
+list, approve or read secrets. The host injects Authorization: Bearer only
+for that account's exact API hosts in the current space/plugin. Account hosts
+are 1–20 exact public DNS names within manifest authority; wildcards cannot
+expand an account. Synced accounts require explicit local activation with
+**Use this account on this device**, including after peer credential changes.
+Unreadable accounts require sign-in again. Preview has no account access.
+
+An optional `oauth` map supports up to 4 providers. Provider keys follow the
+same 1–60 character syntax as account names. Each definition requires
+`auth_url`, `token_url`, `scopes` and `api_hosts`. Endpoint URLs are HTTPS/443,
+≤8 KiB, with no userinfo, query or fragment; their hosts must be exact literal
+manifest entries, not authorized just by a wildcard. `api_hosts` has 1–20
+exact names within manifest authority. `scopes` has ≤20 nonempty strings of
+≤256 bytes each, with no whitespace/control characters. No manifest secrets,
+discovery, scripts or extra OAuth parameters. Provider consent binds canonical
+endpoints, sorted scopes and API hosts; changes require approval again.
+
+The user supplies client id and optional secret in Settings. Desktop sign-in
+uses the system browser, authorization code flow with S256 PKCE (32-byte
+verifier), random state (≥128 bits), one-use loopback callback on
+`127.0.0.1` with a random port, and a five-minute sign-in deadline. Callback
+headers/query are bounded to 8 KiB and token replies to 64 KiB; token endpoints
+never follow redirects. Tokens/client material are sealed and synced under
+the current space key. Bearer values are nonempty, ≤8 KiB without whitespace
+or control characters; sealed envelopes are ≤64 KiB; at most 20 accounts per
+plugin and 200 per space. Paired devices with the space key can decrypt them;
+an approved provider can echo a token in a reply. Neither is prevented by the
+plugin sandbox. Full rotation/revocation remains SEC-02 work.
+
+OAuth refresh starts within 60 s of expiry, outside the host lock and serialized
+per account. A 401 permits at most one refresh and API retry, only for GET/HEAD;
+mutating requests return the original 401. Proactive refresh may precede any
+method. All share the original 30 s deadline and budgets. Removing/replacing
+an account prevents late refresh from restoring it. Sign out deletes the
+synced account and cancels related work; revoke at the provider to invalidate
+tokens already issued. Backups/change logs may retain old encrypted values.
+
+### Devices and upgrades
+
+`http::available()` checks permission, local approval, worker and queue/quota
+capacity; it does not promise a URL, DNS or account will work. Desktop and
+Android requests run only while the app is open; Android runs only in the
+foreground. Suspended queued work expires after five minutes; process death
+loses it. Desktop is still the default schedule device; `run_on: "any"`
+permits foreground phone execution without cross-device deduplication.
+
+`terra preview` supports unauthenticated HTTP with the same policy, isolated
+activity/counters and developer approval of explicitly supplied packages.
+It has no production credentials or OAuth. `terrarium serve` has no HTTP
+worker: available is false and fetch returns `unavailable`.
+
+This additive interface keeps API `terrarium:plugin@0.1.0`. Old manifests and
+components still work on the new host. Older hosts may reject new manifest
+fields/permissions or fail to link HTTP imports: available cannot rescue a
+link failure. Upgrade every paired device before enabling network plugins;
+keep unsupported packages inactive and do not roll back the host while they
+remain enabled.
 
 ## Schedules
 
@@ -150,7 +396,7 @@ schedule::set("friday", &json!({
 }))?;
 ```
 
-Changes apply when the operation commits. A due run calls the operation on whichever device is open, with `args.$run` = `{id, schedule, slot_ms, date, time, tz, previous_ms, attempt, manual}`. Make a run with the same id harmless to repeat (two devices may both run a slot while offline). Return error code `retry` for a temporary failure (tried again after 15 min, then 1 h) or `skip`; any other error fails the run and rolls back. To keep your changes and still end the run as failed, return `{"$run": {"status": "failed", "message": "…"}}`. A run that submits an AI request ends when the reply has been delivered. To tell the user a run produced something, return `{"$run": {"notify": "Weekly report is ready."}}` (from the operation, or from the AI `on-done` operation); it is shown as a notification when "Notify me when a run has something ready" is on. `list`, `runs`, `run_now`, `retry` and `remove` cover the rest.
+Changes apply when the operation commits. A due run calls the operation on whichever device is open, with `args.$run` = `{id, schedule, slot_ms, date, time, tz, previous_ms, attempt, manual}`. Make a run with the same id harmless to repeat (two devices may both run a slot while offline). Return error code `retry` for a temporary failure (tried again after 15 min, then 1 h) or `skip`; any other error fails the run and rolls back. To keep your changes and still end the run as failed, return `{"$run": {"status": "failed", "message": "…"}}`. A run that submits AI or HTTP requests ends after all replies and any callback-submitted work have been delivered. To tell the user a run produced something, return `{"$run": {"notify": "Weekly report is ready."}}` (from the operation, or from the AI `on-done` operation); it is shown as a notification when "Notify me when a run has something ready" is on. `list`, `runs`, `run_now`, `retry` and `remove` cover the rest.
 
 The user also sees what `uses`, `provides`, `jobs`, `reminders` and raised `limits` allow. An update that adds any of these asks for consent again.
 
@@ -777,3 +1023,102 @@ package requires review again; renaming does not. Upgrade all devices before
 installing event-enabled packages, as described above; older peers park the
 unknown `_rules` store without interpreting it. Rule execution is added
 separately from this configuration contract.
+
+### Deferred HTTP requests
+
+Declare `"permissions": ["http"]` with `"hosts": ["api.example.com"]` (1–20
+patterns), then call `terrarium_guest::http::fetch(&request, "on_fetched")`.
+Mark the declared callback operation `cli: false`. Requests contain required
+uppercase `method` and HTTPS `url`, plus optional `headers`, text `body`,
+`auth: {"account":"name"}` and JSON `context`. GET/HEAD reject bodies; methods
+are GET, HEAD, POST, PUT, PATCH and DELETE. Unknown fields are errors.
+
+Exact hosts match only themselves; `*.example.org` matches subdomains but not
+the apex. A standalone `*` requests every public HTTPS website. Hostnames are
+IDNA-normalized and lowercase; IPs, local/special-use names, ports in patterns,
+paths and schemes are forbidden. URLs reject userinfo, fragments and ports
+other than 443. Header names are limited to Accept, Accept-Language,
+Content-Type, If-None-Match, If-Modified-Since, Idempotency-Key and safe X-*
+headers; credentials belong to host-managed accounts. See
+[network access](../design/network-access.md) for exact policy and limits.
+
+`fetch` returns an opaque request id after validation and queue reservation.
+Failed/trapped operations, commit failures and dry runs cancel their requests,
+including nested interop requests. Network execution and reply delivery are
+enforced by the host HTTP worker. Desktop and Android run requests only while
+the app is open (Android must be in the foreground). Preview supports
+unauthenticated requests with the same policy and isolated counters/audit;
+`terrarium serve` has no worker and reports unavailable.
+`available()` is false and `fetch` returns `unavailable` when no worker queue
+is installed (including headless serve). In-memory requests are lost on restart;
+remote writes must use provider-supported idempotency keys when appropriate.
+The host follows at most five GET/HEAD redirects, all to approved public
+HTTPS hosts; writes return 3xx without replay. Replies are strict UTF-8 text,
+limited to 2 MiB and 32 KiB of response headers; escaped callbacks are capped
+at 4 MiB. The whole network job has a 30-second deadline, with 10-second
+connect/read/write inactivity limits. Only documented response headers are
+returned; cookies, compression, proxies and cross-job connection reuse are off.
+
+Device-local quotas reserve capacity before sending: 60 attempts per rolling
+hour and 50 MiB of sent/received body bytes per UTC day, per space/plugin.
+Rollback releases unspent reservations; a crash keeps them charged. Counters
+and the bounded host-only audit are private files, never synced. Settings →
+Plugins shows hosts and network activity, and can clear a plugin's audit.
+Installing/updating a host permission needs local consent; `*` also needs an
+explicit “I allow access to any website” checkbox.
+
+Users manage bearer accounts in Settings → Plugins → Accounts. A request's
+`auth.account` names an account in the current space and plugin. The host
+injects its bearer header only for the account's exact selected API hosts,
+which must still fit the current manifest. Wildcards never expand account
+recipients. An absent/unbound account fails with `denied`; an unreadable or
+locally unapproved account fails with `unavailable` and asks the user to sign
+in again. Synced credentials require “Use this account on this device” before
+use. Plugins never receive credentials or request headers, and cannot manage
+accounts through operations, CLI/MCP or template actions. Preview remains
+unauthenticated. OAuth browser sign-in is HTTP-04b work.
+
+Authenticated redirects cannot change origin, even between bound hosts.
+OAuth refresh, when a host-provisioned account is present, consumes the same
+attempt/byte budget and deadline; only GET/HEAD can refresh and retry once
+after a 401. Mutating requests expose their original 401 without replay.
+Removing an account cancels related work and deletes its synced row. Removed
+account names cannot be reused because the store uses terminal delete-wins
+tombstones; choose a new name. Provider revocation remains the user's action.
+
+Replies preserve context and have `{request, ok, status?, headers?, body?,
+error?, context}`; failures use `{code, message, temporary}`. Never put secrets
+in logs or errors.
+
+API remains `terrarium:plugin@0.1.0`. Old manifests default `hosts` to empty.
+Old components load on the new linker; unused HTTP imports are removed by
+release builds. Older hosts reject new fields/permissions or fail to link HTTP
+imports: `available()` cannot handle a link failure. Upgrade **every device**
+consuming the synced plugin set before enabling HTTP packages; keep unsupported
+packages inactive and do not downgrade while they remain enabled.
+
+OAuth providers may be declared with optional `oauth` (at most four account
+kinds). Each definition has only `auth_url`, `token_url`, `scopes` and
+`api_hosts`, for example:
+
+```json
+{"oauth":{"work":{"auth_url":"https://login.example.com/authorize","token_url":"https://tokens.example.com/token","scopes":["items.read"],"api_hosts":["api.example.com"]}}}
+```
+
+Both provider URLs require HTTPS on port 443, without userinfo, query or
+fragment, and their exact hosts must be literal entries in `hosts`.
+`api_hosts` contains 1–20 exact public DNS hosts covered by `hosts`; it is
+also the explicit list of token recipients shown in Settings. There are at
+most 20 nonempty scopes, each at most 256 bytes without whitespace.
+Endpoint, scope or API-host changes require renewed package consent.
+
+On a computer, Settings → Plugins → Accounts opens the system browser with
+state and S256 PKCE. Register a native client with the provider, using the
+loopback redirect `http://127.0.0.1:<random port>/callback`; enter your client
+ID and optional secret in Settings. Tokens, client material and provider
+configuration are sealed together. Sign-in can be cancelled and expires
+after five minutes. Phones must sync, then explicitly approve the account
+on that device. Plugins receive only an account reference, never tokens.
+Sign out removes the Terrarium account; revoke provider access separately.
+Old manifests default `oauth` to empty. Upgrade all devices before enabling
+a plugin declaring OAuth; older hosts reject the new manifest field.

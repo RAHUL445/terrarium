@@ -848,7 +848,7 @@ pub fn recovery_phrase(sync: State<'_, Sync>) -> Result<String, String> {
     Ok(member.key.recovery_phrase())
 }
 
-fn open_browser(url: &str) -> Result<(), String> {
+pub(crate) fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "windows")]

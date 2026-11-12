@@ -300,6 +300,24 @@ impl Scheduler {
         })
     }
 
+    /// Memory-only host work cannot be replayed after process death. Only
+    /// recover this device's runs; another device may still be executing.
+    pub fn interrupt_device(&mut self, device: &str, now: u64) -> Result<(), String> {
+        let rows=self.store.query("SELECT id FROM runs WHERE device = ?1 AND status IN ('running', 'waiting') AND _deleted IS NULL", &[json!(device)]).map_err(store_err)?;
+        for row in rows {
+            if let Some(id) = row.get("id").and_then(Value::as_str) {
+                self.finish(
+                    id,
+                    Outcome::Failed(
+                        "Interrupted when the app closed; review before retrying.".into(),
+                    ),
+                    now,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn store(&self) -> &CoreStore {
         &self.store
     }
@@ -1005,6 +1023,32 @@ mod tests {
             info.repeat.next(now, start, TZ).unwrap(),
             Some(start + 6 * HOUR)
         );
+    }
+
+    #[test]
+    fn interrupted_device_work_fails_without_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = open(dir.path(), "a");
+        let id = s
+            .set(
+                "personal",
+                "fixture",
+                "network",
+                &hourly("Network"),
+                "plugin",
+            )
+            .unwrap();
+        let now = created(&s, &id) + HOUR + 1;
+        let plan = s.due(now, true, |_| true).remove(0);
+        let run = s.begin(&plan, "a", now).unwrap().unwrap().run;
+        s.finish(&run, Outcome::Waiting, now).unwrap();
+        drop(s);
+        let mut s = open(dir.path(), "a");
+        s.interrupt_device("other-device", now).unwrap();
+        assert_eq!(s.run(&run).unwrap().status, "waiting");
+        s.interrupt_device("a", now).unwrap();
+        assert_eq!(s.run(&run).unwrap().status, "failed");
+        assert!(s.due(now, true, |_| true).is_empty());
     }
 
     #[test]

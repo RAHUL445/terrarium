@@ -44,8 +44,8 @@ pub use manifest::{
 };
 pub use package::{
     added_capabilities, capabilities, default_signing_key_path, generate_signing_key,
-    key_fingerprint, read_signing_key, signing_public_key, Capability, Package, Signature,
-    MAX_PACKAGE_BYTES, PACKAGE_EXT,
+    key_fingerprint, read_signing_key, signing_public_key, validate_http_consent, Capability,
+    Package, Signature, MAX_PACKAGE_BYTES, PACKAGE_EXT,
 };
 pub use packages::{Installed, PackageSource, Packages, BUNDLED_DIGEST};
 pub use pages::{
@@ -53,14 +53,15 @@ pub use pages::{
     HOST_WIDGETS, MAX_PLACEMENTS, PAGES_STORE_ID,
 };
 pub use registry::{
-    fingerprint, ChangeSummary, HostConfig, PluginHost, ViewKind, INDEX_STEP_ROWS,
-    SEARCH_CATCH_UP_ROWS,
+    fingerprint, ChangeSummary, HostConfig, OAuthPreparation, PluginHost, ViewKind,
+    INDEX_STEP_ROWS, SEARCH_CATCH_UP_ROWS,
 };
 pub use spaces::{split_store_id, store_id, SpaceInfo, Spaces, DEFAULT_SPACE, SPACES_STORE_ID};
 pub use speech::SpeechConfig;
 /// The AI service and scheduler crates, for hosts.
 pub use terrarium_ai as ai;
 pub use terrarium_blobs as blobs;
+pub use terrarium_net as net;
 pub use terrarium_scheduler as scheduler;
 pub use theme::{contrast, Theme, THEME_EXT, THEME_FONTS, THEME_TOKENS};
 

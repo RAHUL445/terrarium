@@ -366,6 +366,20 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
     }
     for permission in &manifest.permissions {
         match permission.as_str() {
+            "http" => {
+                if let Ok(rules) = terrarium_net::HostRules::new(&manifest.hosts) {
+                    for host in rules.patterns() {
+                        let label = if host == "*" {
+                            "Reach any website".into()
+                        } else if let Some(suffix) = host.strip_prefix("*.") {
+                            format!("Reach any subdomain of {suffix}")
+                        } else {
+                            format!("Reach {host}")
+                        };
+                        add(format!("http:{host}"), label);
+                    }
+                }
+            }
             "speech" => add(
                 "speech".into(),
                 "Transcribe audio with local speech-to-text".into(),
@@ -375,6 +389,18 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
                 "Send text you choose to your AI provider (Settings → AI)".into(),
             ),
             other => add(other.to_string(), other.to_string()),
+        }
+    }
+    for (kind, def) in &manifest.oauth {
+        if let Ok(def) = def.canonical(&manifest.hosts) {
+            add(
+                format!("oauth:{kind}:{}", def.digest()),
+                format!(
+                    "Sign in to {} for {}",
+                    terrarium_net::request_host(&def.auth_url).unwrap_or_default(),
+                    manifest.name
+                ),
+            );
         }
     }
     let base = Limits::default();
@@ -397,6 +423,14 @@ pub fn capabilities(manifest: &Manifest) -> Vec<Capability> {
     }
     out.sort();
     out
+}
+
+/// The broadest grant always requires its own explicit backend confirmation.
+pub fn validate_http_consent(manifest: &Manifest, approve_any_website: bool) -> Result<()> {
+    if manifest.hosts.iter().any(|h| h == "*") && !approve_any_website {
+        return Err(bad("Confirm access to any website before installing."));
+    }
+    Ok(())
 }
 
 /// Capabilities in `new` that `old` did not have.
@@ -546,5 +580,39 @@ mod security_tests {
             .unwrap_err()
             .to_string()
             .contains("escapes"));
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    #[test]
+    fn adding_a_host_is_an_added_capability() {
+        let mut manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "id":"fixture","name":"Fixture","version":"1.0.0","api":"terrarium:plugin@0.1.0",
+            "storage":{"version":1,"tables":[]},"permissions":["http"],"hosts":["EXAMPLE.COM"]
+        }))
+        .unwrap();
+        assert_eq!(
+            capabilities(&manifest),
+            vec![Capability {
+                id: "http:example.com".into(),
+                label: "Reach example.com".into()
+            }]
+        );
+        let old = manifest.clone();
+        manifest.hosts.push("*.example.org".into());
+        assert_eq!(
+            added_capabilities(Some(&old), &manifest),
+            vec![Capability {
+                id: "http:*.example.org".into(),
+                label: "Reach any subdomain of example.org".into()
+            }]
+        );
+        assert!(validate_http_consent(&manifest, false).is_ok());
+        manifest.hosts = vec!["*".into()];
+        assert!(validate_http_consent(&manifest, false).is_err());
+        assert!(validate_http_consent(&manifest, true).is_ok());
+        assert_eq!(added_capabilities(Some(&old), &manifest)[0].id, "http:*");
     }
 }

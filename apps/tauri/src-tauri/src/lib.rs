@@ -10,12 +10,14 @@ mod export;
 mod headless;
 mod install;
 mod links;
+mod net;
 mod plugins;
 mod quick;
 mod secrets;
 mod shell;
 mod sync;
 mod themes;
+mod vault;
 
 #[cfg(desktop)]
 pub use headless::run as run_headless;
@@ -405,6 +407,10 @@ pub fn run() {
     let launched = Instant::now();
     tauri::Builder::default()
         .plugin(tauri_plugin_deep_link::init())
+        .on_window_event(|_window, _event| {
+            #[cfg(mobile)]
+            net::lifecycle(_event);
+        })
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
@@ -438,6 +444,7 @@ pub fn run() {
             let shell = shell::AppShell::arc(app.handle());
             app.manage(plugins.clone());
             app.manage(install::Pending::default());
+            app.manage(vault::Pending::default());
             let stage = Instant::now();
             app.manage(sync::Sync::open(&data_dir, SPACE, host_cfg.device.clone())?);
             startup_span("sync-open", stage);
@@ -445,6 +452,7 @@ pub fn run() {
             sync::Sync::start(app.handle().clone());
             terrarium_host::jobs::start(plugins, shell, data_dir.join("jobs-state.json"), true);
             ai::start(app.handle().clone());
+            net::start(app.handle().clone());
             app.manage(control::Control::open(&app_data));
             control::start(app.handle());
             quick::start(app.handle(), &app_data)?;
@@ -525,6 +533,8 @@ pub fn run() {
             sync::join_space,
             sync::sync_now,
             sync::recovery_phrase,
+            vault::vault_sign_in,
+            vault::vault_cancel,
             sync::connect_drive,
             sync::disconnect_drive,
             links::take_links,

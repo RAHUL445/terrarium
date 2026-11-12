@@ -50,6 +50,9 @@ pub(crate) struct HostState {
     speech: bool,
     /// Whether the manifest asked for the `ai` permission.
     ai: bool,
+    http: bool,
+    hosts: Vec<String>,
+    http_jobs: Vec<String>,
     /// The plugin's declared operations (targets for AI replies and schedules).
     operations: Vec<String>,
     /// AI requests queued by this call, dropped again if it rolls back.
@@ -75,6 +78,8 @@ pub(crate) struct CallContext<'a> {
     pub uses: &'a [String],
     pub speech: bool,
     pub ai: bool,
+    pub http: bool,
+    pub hosts: Vec<String>,
     pub operations: Vec<String>,
     pub events: BTreeMap<String, EventDef>,
     pub depth: u8,
@@ -231,6 +236,7 @@ impl Runtime {
         if let Err(e) = core.begin() {
             return (core, peers, Err(e.into()));
         }
+        let http_checkpoint = peers.net.as_ref().map(terrarium_net::Net::checkpoint);
         let limits = ctx.limits;
         let state = HostState {
             store: core,
@@ -250,6 +256,9 @@ impl Runtime {
             uses: ctx.uses.to_vec(),
             speech: ctx.speech,
             ai: ctx.ai,
+            http: ctx.http,
+            hosts: ctx.hosts,
+            http_jobs: Vec::new(),
             operations: ctx.operations,
             ai_jobs: Vec::new(),
             schedule_changes: Vec::new(),
@@ -298,7 +307,7 @@ impl Runtime {
             }
         })();
 
-        finish_call(store.into_data(), result, mark)
+        finish_call(store.into_data(), result, mark, http_checkpoint)
     }
 }
 
@@ -307,6 +316,7 @@ fn finish_call(
     data: HostState,
     result: Result<Value>,
     mark: i64,
+    http_checkpoint: Option<u64>,
 ) -> (CoreStore, Peers, Result<Value>) {
     let (mut core, mut peers) = (data.store, data.peers);
     if result.is_ok() {
@@ -340,9 +350,19 @@ fn finish_call(
                 .map(|event| (data.plugin_id.clone(), event)),
         );
         peers.apply_schedule_changes(&data.plugin_id, data.schedule_changes);
-    } else if let Some(ai) = peers.ai.as_mut() {
-        for id in &data.ai_jobs {
-            ai.cancel(id);
+    } else {
+        if let Some(ai) = peers.ai.as_mut() {
+            for id in &data.ai_jobs {
+                ai.cancel(id);
+            }
+        }
+        if let Some(net) = peers.net.as_mut() {
+            for id in &data.http_jobs {
+                net.cancel(id);
+            }
+            if let Some(mark) = http_checkpoint {
+                net.cancel_since(mark);
+            }
         }
     }
     (core, peers, result)
@@ -668,6 +688,63 @@ fn unavailable(message: impl Into<String>) -> PluginError {
     }
 }
 
+impl wit::http::Host for HostState {
+    fn available(&mut self) -> bool {
+        self.count_call().is_ok()
+            && self.http
+            && self
+                .peers
+                .net
+                .as_ref()
+                .is_some_and(|net| net.available(&self.peers.space, &self.plugin_id))
+    }
+    fn fetch(
+        &mut self,
+        request: String,
+        on_done: String,
+    ) -> std::result::Result<String, PluginError> {
+        self.count_call()?;
+        let result = (|| {
+            if !self.http {
+                return Err(denied("http"));
+            }
+            if !self.operations.contains(&on_done) {
+                return Err(invalid("The callback must be a declared operation.".into()));
+            }
+            let map = |e: terrarium_net::NetError| PluginError {
+                code: e.code,
+                message: e.message,
+            };
+            let request = terrarium_net::Request::parse(&request).map_err(map)?;
+            let allowed = terrarium_net::HostRules::new(&self.hosts).map_err(map)?;
+            let net = self
+                .peers
+                .net
+                .as_mut()
+                .ok_or_else(|| unavailable("Web requests are not available in this app."))?;
+            let id = net
+                .submit(
+                    &self.peers.space,
+                    &self.plugin_id,
+                    &on_done,
+                    request,
+                    self.peers.run.clone(),
+                    &allowed,
+                )
+                .map_err(map)?;
+            self.http_jobs.push(id.clone());
+            Ok(id)
+        })();
+        if let Err(error) = &result {
+            if let Some(net) = self.peers.net.as_mut() {
+                net.record_rejection(&self.peers.space, &self.plugin_id, &error.code)
+                    .map_err(|e| unavailable(e.message))?;
+            }
+        }
+        result
+    }
+}
+
 impl wit::ai::Host for HostState {
     fn available(&mut self) -> bool {
         self.ai && self.peers.ai.as_ref().is_some_and(|ai| ai.status().ready)
@@ -946,6 +1023,9 @@ mod payload_tests {
             uses: Vec::new(),
             speech: false,
             ai: false,
+            http: false,
+            hosts: Vec::new(),
+            http_jobs: Vec::new(),
             operations: Vec::new(),
             ai_jobs: Vec::new(),
             schedule_changes: Vec::new(),
@@ -997,7 +1077,7 @@ mod payload_tests {
             .push(("committed-child".into(), state.emitted[0].clone()));
         // No active transaction: SQLite rejects the actual COMMIT. Exercise the
         // same finalization path as Runtime::call, without a synthetic result.
-        let (_, peers, result) = finish_call(state, Ok(Value::Null), 0);
+        let (_, peers, result) = finish_call(state, Ok(Value::Null), 0, None);
         assert!(matches!(result, Err(RuntimeError::Core(_))));
         assert_eq!(peers.events.len(), 1);
         assert_eq!(peers.events[0].0, "committed-child");

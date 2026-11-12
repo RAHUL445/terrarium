@@ -73,13 +73,20 @@ pub struct PluginHost {
     spaces: Spaces,
     pages: Pages,
     links: Links,
+    vaults: BTreeMap<String, terrarium_net::vault::Vault>,
+    vault_sealer: Option<Sealer>,
     /// Spaces whose stores are open (always includes the default space).
     open_spaces: BTreeSet<String>,
-    /// AI service and scheduler: `None` only while lent to a running call.
+    /// AI service: `None` only while lent to a running call.
     ai: Option<Ai>,
+    /// Installed by an HTTP worker; also lent exclusively during calls.
+    net: Option<terrarium_net::Net>,
     scheduler: Option<Scheduler>,
     blobs: Arc<Mutex<BlobStore>>,
     assistant: crate::assistant::Assistant,
+    async_outcomes: BTreeMap<String, Outcome>,
+    active_ai: BTreeMap<String, String>,
+    active_http_accounts: BTreeMap<String, terrarium_net::vault::AccountLease>,
     /// Search index: None only while lent to a host indexing call.
     index: Option<crate::index::SearchIndex>,
     events: EventLog,
@@ -106,17 +113,26 @@ impl PluginHost {
         let events = EventLog::open(&cfg.data_dir, store_config(&cfg, EVENTS_STORE_ID))?;
         let rules = Rules::open(&cfg.data_dir, store_config(&cfg, RULES_STORE_ID))?;
         let pages = Pages::open(&cfg.data_dir, store_config(&cfg, PAGES_STORE_ID))?;
+        let vault = terrarium_net::vault::Vault::open(
+            &cfg.data_dir,
+            store_config(&cfg, terrarium_net::vault::VAULT_STORE_ID),
+            DEFAULT_SPACE,
+        )
+        .map_err(|e| RuntimeError::Manifest(e.message))?;
         let links = Links::open(&cfg.data_dir, store_config(&cfg, LINKS_STORE_ID))?;
         let ai = Ai::open(&cfg.data_dir, store_config(&cfg, terrarium_ai::STORE_ID))?;
         let blobs = BlobStore::open(&blob_dir_for_space(&cfg, DEFAULT_SPACE))
             .map_err(|e| RuntimeError::Wasm(format!("blob store open failed: {e}")))?;
-        let scheduler = Scheduler::open(
+        let mut scheduler = Scheduler::open(
             &cfg.data_dir,
             store_config(&cfg, terrarium_scheduler::STORE_ID),
             &cfg.timezone,
         )?;
         let index = crate::index::SearchIndex::new(cfg.data_dir.join("index"));
         let automation = crate::automation::Local::open(&cfg.data_dir)?;
+        scheduler
+            .interrupt_device(&cfg.device.0, now_ms())
+            .map_err(RuntimeError::Manifest)?;
         Ok(PluginHost {
             index: Some(index),
             runtime: Runtime::new(cfg.execution)?,
@@ -126,8 +142,11 @@ impl PluginHost {
             spaces,
             pages,
             links,
+            vaults: [(DEFAULT_SPACE.to_string(), vault)].into_iter().collect(),
+            vault_sealer: None,
             open_spaces: [DEFAULT_SPACE.to_string()].into_iter().collect(),
             ai: Some(ai),
+            net: None,
             scheduler: Some(scheduler),
             blobs: Arc::new(Mutex::new(blobs)),
             assistant: crate::assistant::Assistant::default(),
@@ -136,6 +155,9 @@ impl PluginHost {
             automation_context: false,
             automation_problem: None,
             rules,
+            async_outcomes: BTreeMap::new(),
+            active_ai: BTreeMap::new(),
+            active_http_accounts: BTreeMap::new(),
         })
     }
 
@@ -520,6 +542,18 @@ impl PluginHost {
     /// Opens and closes spaces to match the space list. Returns whether
     /// anything changed. Closed spaces keep their data on disk.
     pub fn sync_spaces(&mut self) -> Result<bool> {
+        // Peer uninstall is authoritative even if this device has no loaded package.
+        let removed: Vec<_> = self
+            .packages
+            .installed()?
+            .into_iter()
+            .filter(|p| p.removed)
+            .map(|p| p.id)
+            .collect();
+        for plugin in removed {
+            self.remove_plugin_accounts(&plugin)
+                .map_err(RuntimeError::Manifest)?;
+        }
         let want: BTreeSet<String> = self.spaces.active()?.into_iter().collect();
         let mut changed = false;
         for space in self.open_spaces.clone() {
@@ -528,6 +562,10 @@ impl PluginHost {
                     loaded.stores.remove(&space);
                 }
                 self.index.as_mut().expect("index available").close(&space);
+                self.vaults.remove(&space);
+                if let Some(net) = self.net_mut() {
+                    net.clear_space(&space);
+                }
                 self.open_spaces.remove(&space);
                 changed = true;
             }
@@ -536,6 +574,19 @@ impl PluginHost {
             if self.open_spaces.contains(&space) {
                 continue;
             }
+            let mut vault = terrarium_net::vault::Vault::open(
+                &self.space_dir(&space),
+                store_config(
+                    &self.cfg,
+                    &store_id(&space, terrarium_net::vault::VAULT_STORE_ID),
+                ),
+                &space,
+            )
+            .map_err(|e| RuntimeError::Manifest(e.message))?;
+            if let Some(sealer) = &self.vault_sealer {
+                vault.set_sealer(sealer.clone());
+            }
+            self.vaults.insert(space.clone(), vault);
             let mut opened = Vec::new();
             for (id, loaded) in &self.plugins {
                 opened.push((id.clone(), self.open_store(&space, &loaded.manifest)?));
@@ -566,6 +617,9 @@ impl PluginHost {
 
     /// Stops running a plugin. Its data stays on disk.
     pub fn unload(&mut self, plugin: &str) -> bool {
+        if let Some(net) = self.net_mut() {
+            net.clear(Some(plugin));
+        }
         let removed = self.plugins.remove(plugin).is_some();
         for space in self.open_spaces.clone() {
             if let Err(e) = self
@@ -607,7 +661,7 @@ impl PluginHost {
         }
 
         // Release the previous connections before migrating the same files.
-        self.plugins.remove(&manifest.id);
+        self.unload(&manifest.id);
         let mut stores = BTreeMap::new();
         for space in &self.open_spaces {
             stores.insert(space.clone(), Some(self.open_store(space, &manifest)?));
@@ -842,6 +896,7 @@ impl PluginHost {
             speech: self.cfg.speech.clone(),
             plugins: std::mem::take(&mut self.plugins),
             ai: self.ai.take(),
+            net: self.net.take(),
             scheduler: self.scheduler.take(),
             run,
             dry_run,
@@ -855,6 +910,7 @@ impl PluginHost {
         let (peers, result) = invoke(peers, plugin, operation, args, 0);
         self.plugins = peers.plugins;
         self.ai = peers.ai;
+        self.net = peers.net;
         self.scheduler = peers.scheduler;
         for (_, event) in peers.events {
             if self.events.record(&event).is_err() {
@@ -898,6 +954,509 @@ impl PluginHost {
         self.events.prune(now_ms.saturating_sub(EVENT_RETENTION_MS))
     }
 
+    /// HTTP-03 installs the worker's queue; headless hosts have no worker.
+    pub fn set_net(&mut self, net: Option<terrarium_net::Net>) {
+        self.net = net;
+    }
+    pub fn net(&self) -> Option<&terrarium_net::Net> {
+        self.net.as_ref()
+    }
+    pub fn net_mut(&mut self) -> Option<&mut terrarium_net::Net> {
+        self.net.as_mut()
+    }
+
+    /// Creates private counters/audit next to this host's device-local data.
+    pub fn enable_http(&mut self) -> std::result::Result<(), String> {
+        self.net = Some(terrarium_net::Net::open(&self.cfg.data_dir).map_err(|e| e.message)?);
+        Ok(())
+    }
+    fn http_identity(&self, job: &terrarium_net::Job) -> bool {
+        let Some(loaded) = self.plugins.get(&job.plugin) else {
+            return false;
+        };
+        if !self.open_spaces.contains(&job.space)
+            || !loaded.manifest.permissions.iter().any(|p| p == "http")
+        {
+            return false;
+        }
+        let Ok(rules) = terrarium_net::HostRules::new(&loaded.manifest.hosts) else {
+            return false;
+        };
+        if rules.patterns() != job.allowed.patterns() {
+            return false;
+        }
+        self.http_package_approved(&job.plugin)
+    }
+    fn http_package_approved(&self, plugin: &str) -> bool {
+        let Some(loaded) = self.plugins.get(plugin) else {
+            return false;
+        };
+        let Ok(installed) = self.packages.installed() else {
+            return false;
+        };
+        if let Some(current) = installed.iter().find(|p| p.id == plugin) {
+            if current.removed {
+                return false;
+            }
+            if current.digest != crate::BUNDLED_DIGEST {
+                let Ok(Some(dir)) = self
+                    .packages
+                    .materialize_approved(current, cfg!(debug_assertions))
+                else {
+                    return false;
+                };
+                return dir == loaded.dir;
+            }
+        }
+        // Explicit load() callers (including preview) authorize dev/bundled packages.
+        true
+    }
+    pub fn http_job_current(&self, job: &terrarium_net::Job) -> bool {
+        self.net().is_some_and(|n| n.is_live(&job.id))
+            && self.http_identity(job)
+            && self.active_http_accounts.get(&job.id).is_none_or(|lease| {
+                self.vaults
+                    .get(&job.space)
+                    .is_some_and(|v| v.current(lease))
+            })
+    }
+    pub fn take_http_job(
+        &mut self,
+    ) -> Option<(
+        terrarium_net::Job,
+        Option<terrarium_net::vault::AccountLease>,
+    )> {
+        loop {
+            let mut job = self.net_mut()?.take()?;
+            if self.http_identity(&job) {
+                let auth = if let Some(auth) = &job.request.auth {
+                    let result =
+                        (|| {
+                            let error = || terrarium_net::NetError {
+                                code: "unavailable".into(),
+                                message: vault_unavailable(),
+                                temporary: false,
+                            };
+                            let (rules, signer) =
+                                self.vault_authority(&job.plugin).map_err(|_| error())?;
+                            let host = url_host(&job.request.url).map_err(|_| error())?;
+                            let lease = self.vaults.get(&job.space).ok_or_else(error)?.lease(
+                                &job.plugin,
+                                &auth.account,
+                                &host,
+                                &rules,
+                                &signer,
+                            )?;
+                            if lease.is_oauth() && lease.provider().is_none() {
+                                return Err(error());
+                            }
+                            if let Some(provider) = lease.provider() {
+                                if !self.plugins.get(&job.plugin).is_some_and(|p| {
+                                    p.manifest.oauth.values().any(|d| d == provider)
+                                }) {
+                                    return Err(error());
+                                }
+                            }
+                            Ok(lease)
+                        })();
+                    match result {
+                        Ok(lease) => Some(lease),
+                        Err(error) => {
+                            job.dispatch_error = Some(error);
+                            return Some((job, None));
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(lease) = &auth {
+                    self.active_http_accounts
+                        .insert(job.id.clone(), lease.clone());
+                }
+                return Some((job, auth));
+            }
+            let net = self.net_mut()?;
+            net.cancel(&job.id);
+            net.finish(&job.id);
+        }
+    }
+    pub fn discard_http_job(&mut self, id: &str) {
+        self.active_http_accounts.remove(id);
+        if let Some(net) = self.net_mut() {
+            net.cancel(id);
+            net.finish(id);
+        }
+    }
+    pub fn deliver_http(
+        &mut self,
+        job: terrarium_net::Job,
+        result: std::result::Result<terrarium_net::Response, terrarium_net::NetError>,
+    ) -> Option<Finished> {
+        let live = self.http_job_current(&job);
+        self.net_mut()?.finish(&job.id);
+        let account = self.active_http_accounts.remove(&job.id);
+        if live && result.as_ref().is_err_and(|e| e.code == "unauthorized") {
+            if let Some(lease) = &account {
+                if let Some(vault) = self.vaults.get_mut(&job.space) {
+                    let _ = vault.deactivate(lease);
+                }
+            }
+        }
+        if !live {
+            return None;
+        }
+        let mut payload = match &result {
+            Ok(r) => {
+                serde_json::json!({"request":job.id,"ok":true,"status":r.status,"headers":r.headers,"body":r.body,"context":job.request.context})
+            }
+            Err(e) => {
+                serde_json::json!({"request":job.id,"ok":false,"error":{"code":e.code,"message":e.message,"temporary":e.temporary},"context":job.request.context})
+            }
+        };
+        let mut failure = result.as_ref().err().map(|e| {
+            if e.temporary {
+                Outcome::Retry(e.message.clone())
+            } else {
+                Outcome::Failed(e.message.clone())
+            }
+        });
+        if payload.to_string().len() > 4 * 1024 * 1024 {
+            payload = serde_json::json!({"request":job.id,"ok":false,"error":{"code":"too-large","message":"The reply is too large.","temporary":false},"context":job.request.context});
+            failure = Some(Outcome::Failed("The reply is too large.".into()));
+        }
+        let call = self.call_for_run(
+            &job.space,
+            &job.plugin,
+            &job.on_done,
+            &payload,
+            job.run.clone(),
+        );
+        let outcome = match call {
+            Err(_) => Outcome::Failed("Saving the web reply failed.".into()),
+            Ok(v) if v["$run"]["status"].as_str() == Some("failed") => {
+                Outcome::Failed("The web reply callback failed.".into())
+            }
+            Ok(v) if v["$run"]["status"].as_str() == Some("retry") => {
+                Outcome::Retry("The web reply callback asked to retry.".into())
+            }
+            Ok(v) => failure.unwrap_or_else(|| Outcome::Done(notice(&v))),
+        };
+        self.finish_async(job.run?, outcome)
+    }
+    fn has_async(&self, run: &str) -> bool {
+        self.ai().has_run(run)
+            || self.active_ai.values().any(|r| r == run)
+            || self.net().is_some_and(|n| n.has_run(run))
+    }
+    fn finish_async(&mut self, run: String, outcome: Outcome) -> Option<Finished> {
+        // Retain failures while other replies and callback-submitted work remain.
+        let replace = match self.async_outcomes.get(&run) {
+            Some(Outcome::Failed(_)) => false,
+            Some(Outcome::Retry(_)) => matches!(outcome, Outcome::Failed(_)),
+            _ => true,
+        };
+        if replace {
+            self.async_outcomes.insert(run.clone(), outcome);
+        }
+        if self.has_async(&run) {
+            return None;
+        }
+        let outcome = self.async_outcomes.remove(&run)?;
+        self.scheduler_mut()
+            .finish(&run, outcome, now_ms())
+            .ok()
+            .flatten()
+    }
+
+    fn vault_authority(
+        &self,
+        plugin: &str,
+    ) -> std::result::Result<(terrarium_net::HostRules, String), String> {
+        if !self.http_package_approved(plugin) {
+            return Err("This plugin needs local approval.".into());
+        }
+        let loaded = self
+            .plugins
+            .get(plugin)
+            .ok_or("This plugin is unavailable.")?;
+        if !loaded.manifest.permissions.iter().any(|p| p == "http") {
+            return Err("This plugin has no network access.".into());
+        }
+        let rules = terrarium_net::HostRules::new(&loaded.manifest.hosts).map_err(|e| e.message)?;
+        // Approved installed directories contain both full digest and signer fingerprint.
+        // Bundled/dev identities also bind the exact loaded package generation.
+        use sha2::{Digest, Sha256};
+        let signer = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "{}:{}",
+                loaded.dir.display(),
+                fingerprint(&loaded.dir)
+            ))
+        );
+        Ok((rules, signer))
+    }
+    /// Main-window OAuth preparation. The caller performs network I/O outside this lock.
+    pub fn prepare_oauth(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        name: &str,
+        kind: &str,
+    ) -> std::result::Result<OAuthPreparation, String> {
+        if !self.open_spaces.contains(space) {
+            return Err(vault_unavailable());
+        }
+        let (rules, signer) = self.vault_authority(plugin)?;
+        let def = self
+            .plugins
+            .get(plugin)
+            .and_then(|p| p.manifest.oauth.get(kind))
+            .cloned()
+            .ok_or("Choose a sign-in provider.")?;
+        let generation = self
+            .vaults
+            .get_mut(space)
+            .ok_or_else(vault_unavailable)?
+            .list(plugin, &signer)
+            .map_err(|e| e.message)?
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.generation);
+        let client = self
+            .net_mut()
+            .ok_or_else(vault_unavailable)?
+            .oauth_client(space, plugin, &def, &rules)
+            .map_err(|e| e.message)?;
+        Ok(OAuthPreparation {
+            provider: def,
+            signer,
+            generation,
+            client,
+        })
+    }
+    pub fn oauth_current(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        name: &str,
+        identity: (&str, Option<&str>),
+        provider: &terrarium_net::oauth::OAuthDef,
+    ) -> bool {
+        let (signer, generation) = identity;
+        self.open_spaces.contains(space)
+            && self
+                .vault_authority(plugin)
+                .is_ok_and(|(_, current)| current == signer)
+            && self
+                .plugins
+                .get(plugin)
+                .is_some_and(|p| p.manifest.oauth.values().any(|d| d == provider))
+            && self
+                .vaults
+                .get_mut(space)
+                .and_then(|v| v.list(plugin, signer).ok())
+                .is_some_and(|list| {
+                    list.into_iter()
+                        .find(|a| a.name == name)
+                        .map(|a| a.generation)
+                        .as_deref()
+                        == generation
+                })
+    }
+    pub fn finish_oauth(
+        &mut self,
+        space: &str,
+        plugin: &str,
+        name: &str,
+        identity: (&str, Option<&str>),
+        tokens: terrarium_net::vault::TokenSet,
+    ) -> std::result::Result<Value, String> {
+        let (signer, generation) = identity;
+        let (rules, current_signer) = self.vault_authority(plugin)?;
+        if !self.open_spaces.contains(space)
+            || signer != current_signer
+            || !self.plugins.get(plugin).is_some_and(|p| {
+                p.manifest
+                    .oauth
+                    .values()
+                    .any(|d| Some(d) == tokens.provider.as_ref())
+            })
+        {
+            return Err(vault_unavailable());
+        }
+        let vault = self.vaults.get_mut(space).ok_or_else(vault_unavailable)?;
+        let current = vault
+            .list(plugin, signer)
+            .map_err(|e| e.message)?
+            .into_iter()
+            .find(|a| a.name == name)
+            .map(|a| a.generation);
+        if current.as_deref() != generation {
+            return Err(vault_unavailable());
+        }
+        let hosts = tokens
+            .provider
+            .as_ref()
+            .ok_or_else(vault_unavailable)?
+            .api_hosts
+            .clone();
+        vault
+            .put_oauth(plugin, name, &hosts, tokens, &rules, signer)
+            .map_err(|e| e.message)?;
+        if let Some(net) = self.net_mut() {
+            net.clear_account(space, plugin, name);
+        }
+        self.vault_service(
+            "vault_accounts",
+            &serde_json::json!({"space":space,"plugin":plugin}),
+        )
+    }
+    /// Trusted Settings service entry only; deliberately absent from invoke/commands.
+    pub fn vault_service(&mut self, cmd: &str, args: &Value) -> std::result::Result<Value, String> {
+        let plugin = args["plugin"].as_str().ok_or("Choose a plugin.")?;
+        let space = args["space"].as_str().unwrap_or(DEFAULT_SPACE);
+        let (rules, signer) = self.vault_authority(plugin)?;
+        let vault = self.vaults.get_mut(space).ok_or_else(vault_unavailable)?;
+        let name = args["name"].as_str().unwrap_or_default();
+        match cmd {
+            "vault_accounts" => (),
+            "vault_put_bearer" => {
+                let hosts: Vec<String> = serde_json::from_value(args["hosts"].clone())
+                    .map_err(|_| "Choose account hosts.")?;
+                vault
+                    .put_bearer(
+                        plugin,
+                        name,
+                        &hosts,
+                        args["token"].as_str().unwrap_or_default(),
+                        &rules,
+                        &signer,
+                    )
+                    .map_err(|e| e.message)?;
+            }
+            "vault_remove" => {
+                vault.remove(plugin, name).map_err(|e| e.message)?;
+            }
+            "vault_approve" => {
+                if let Some(provider) = vault.oauth_provider(plugin, name).map_err(|e| e.message)? {
+                    if !self
+                        .plugins
+                        .get(plugin)
+                        .is_some_and(|p| p.manifest.oauth.values().any(|d| d == &provider))
+                    {
+                        return Err(vault_unavailable());
+                    }
+                }
+                // Revalidate manifest before activating a peer account.
+                let info = vault
+                    .list(plugin, &signer)
+                    .map_err(|e| e.message)?
+                    .into_iter()
+                    .find(|a| a.name == name)
+                    .ok_or_else(vault_unavailable)?;
+                if !info.readable
+                    || info.hosts.iter().any(|h| !rules.allows(h))
+                    || (info.kind == "oauth"
+                        && vault
+                            .oauth_provider(plugin, name)
+                            .map_err(|e| e.message)?
+                            .is_none())
+                {
+                    return Err(vault_unavailable());
+                }
+                vault
+                    .approve(
+                        plugin,
+                        name,
+                        &signer,
+                        args["generation"].as_str().unwrap_or_default(),
+                    )
+                    .map_err(|e| e.message)?;
+            }
+            _ => return Err("Unknown account action.".into()),
+        }
+        let result = serde_json::to_value(vault.list(plugin, &signer).map_err(|e| e.message)?)
+            .map_err(|_| vault_unavailable());
+        if cmd != "vault_accounts" {
+            if let Some(net) = self.net_mut() {
+                net.clear_account(space, plugin, name);
+            }
+        }
+        result
+    }
+    pub fn remove_plugin_accounts(&mut self, plugin: &str) -> std::result::Result<(), String> {
+        if let Some(net) = self.net_mut() {
+            net.clear(Some(plugin));
+        }
+        for vault in self.vaults.values_mut() {
+            vault.remove_plugin(plugin).map_err(|e| e.message)?;
+        }
+        for space in self
+            .spaces
+            .list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|s| s.id)
+        {
+            if !self.vaults.contains_key(&space) {
+                let dir = self.space_dir(&space);
+                if dir.join("_vault.db").exists() {
+                    let mut vault = terrarium_net::vault::Vault::open(
+                        &dir,
+                        store_config(
+                            &self.cfg,
+                            &store_id(&space, terrarium_net::vault::VAULT_STORE_ID),
+                        ),
+                        &space,
+                    )
+                    .map_err(|e| e.message)?;
+                    vault.remove_plugin(plugin).map_err(|e| e.message)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Worker calls this under the host lock before sending and after refresh I/O.
+    pub fn update_http_account(
+        &mut self,
+        job: &terrarium_net::Job,
+        lease: &terrarium_net::vault::AccountLease,
+        tokens: Option<terrarium_net::vault::TokenSet>,
+    ) -> std::result::Result<terrarium_net::vault::AccountLease, terrarium_net::NetError> {
+        let error = || terrarium_net::NetError {
+            code: "unavailable".into(),
+            message: vault_unavailable(),
+            temporary: false,
+        };
+        if !self.http_job_current(job)
+            || lease.space() != job.space
+            || lease.plugin() != job.plugin
+            || job
+                .request
+                .auth
+                .as_ref()
+                .is_none_or(|a| a.account != lease.name())
+        {
+            return Err(error());
+        }
+        let (rules, signer) = self.vault_authority(&job.plugin).map_err(|_| error())?;
+        let host = url_host(&job.request.url).map_err(|_| error())?;
+        let vault = self.vaults.get_mut(&job.space).ok_or_else(error)?;
+        if !vault.current(lease) {
+            return Err(error());
+        }
+        let current = vault.lease(&job.plugin, lease.name(), &host, &rules, &signer)?;
+        let next = if let Some(tokens) = tokens {
+            vault.refreshed(&current, tokens)?
+        } else {
+            current
+        };
+        self.active_http_accounts
+            .insert(job.id.clone(), next.clone());
+        Ok(next)
+    }
+
     // ---- AI ------------------------------------------------------------
 
     pub fn ai(&self) -> &Ai {
@@ -914,7 +1473,11 @@ impl PluginHost {
 
     /// Sets the root that seals the API key (see [`Sealer`]).
     pub fn set_ai_sealer(&mut self, sealer: Sealer) {
-        self.ai_mut().set_sealer(sealer);
+        self.ai_mut().set_sealer(sealer.clone());
+        for vault in self.vaults.values_mut() {
+            vault.set_sealer(sealer.clone());
+        }
+        self.vault_sealer = Some(sealer);
     }
 
     /// Sets the key that encrypts local blobs at rest.
@@ -982,6 +1545,9 @@ impl PluginHost {
     /// result to [`PluginHost::deliver_ai`].
     pub fn take_ai_job(&mut self) -> Option<(Job, AiConfig, Option<String>)> {
         let next = self.ai_mut().take()?;
+        if let Some(run) = &next.0.run {
+            self.active_ai.insert(next.0.id.clone(), run.clone());
+        }
         if next.0.plugin == crate::assistant::PLUGIN {
             self.assistant.begin(&next.0);
         }
@@ -995,6 +1561,7 @@ impl PluginHost {
         job: Job,
         result: std::result::Result<Completion, AiError>,
     ) -> Option<Finished> {
+        self.active_ai.remove(&job.id);
         self.ai_mut().finish(&result);
         if job.plugin == crate::assistant::PLUGIN {
             self.assistant.finish(&job, result);
@@ -1031,17 +1598,15 @@ impl PluginHost {
             (_, Ok(v)) if v["$run"]["status"].as_str() == Some("failed") => {
                 Outcome::Failed(v["$run"]["message"].as_str().unwrap_or("").to_string())
             }
+            (_, Ok(v)) if v["$run"]["status"].as_str() == Some("retry") => {
+                Outcome::Retry("The AI reply callback asked to retry.".into())
+            }
             (Err(e), _) if e.temporary => Outcome::Retry(e.message.clone()),
             (Err(e), _) => Outcome::Failed(e.message.clone()),
-            (Ok(_), Ok(_)) if self.ai().has_run(&run) => Outcome::Waiting,
+
             (Ok(_), Ok(v)) => Outcome::Done(notice(v)),
         };
-        self.scheduler_mut()
-            .finish(&run, outcome, now_ms())
-            .unwrap_or_else(|e| {
-                eprintln!("run {run}: {e}");
-                None
-            })
+        self.finish_async(run, outcome)
     }
 
     pub(crate) fn assistant_submit(&mut self, args: &Value) -> std::result::Result<Value, String> {
@@ -1191,11 +1756,11 @@ impl PluginHost {
                         Some("failed") => Outcome::Failed(message),
                         Some("skipped") => Outcome::Skip(message),
                         Some("retry") => Outcome::Retry(message),
-                        _ if self.ai().has_run(&started.run) => Outcome::Waiting,
+                        _ if self.has_async(&started.run) => Outcome::Waiting,
                         _ => Outcome::Done(notice(&value)),
                     }
                 }
-                Ok(_) if self.ai().has_run(&started.run) => Outcome::Waiting,
+                Ok(_) if self.has_async(&started.run) => Outcome::Waiting,
                 Ok(_) => Outcome::Done(None),
                 Err(RuntimeError::Plugin { code, message }) if code == "retry" => {
                     Outcome::Retry(message)
@@ -1204,6 +1769,14 @@ impl PluginHost {
                     Outcome::Skip(message)
                 }
                 Err(e) => Outcome::Failed(e.to_string()),
+            };
+            let outcome = if self.has_async(&started.run) {
+                if !matches!(outcome, Outcome::Waiting) {
+                    self.async_outcomes.insert(started.run.clone(), outcome);
+                }
+                Outcome::Waiting
+            } else {
+                outcome
             };
             match self.scheduler_mut().finish(&started.run, outcome, now_ms()) {
                 Ok(Some(done)) => ended.push(done),
@@ -1298,6 +1871,7 @@ pub(crate) struct Peers {
     pub speech: Option<crate::speech::SpeechConfig>,
     plugins: BTreeMap<String, LoadedPlugin>,
     pub ai: Option<Ai>,
+    pub net: Option<terrarium_net::Net>,
     pub scheduler: Option<Scheduler>,
     /// The scheduled run this call serves, if any.
     pub run: Option<String>,
@@ -1453,6 +2027,8 @@ fn invoke(
         uses: &uses,
         speech: loaded.manifest.permissions.iter().any(|p| p == "speech"),
         ai: loaded.manifest.permissions.iter().any(|p| p == "ai"),
+        http: loaded.manifest.permissions.iter().any(|p| p == "http"),
+        hosts: loaded.manifest.hosts.clone(),
         operations: loaded.manifest.operations.keys().cloned().collect(),
         events: loaded.manifest.events.clone(),
         depth,
@@ -1554,6 +2130,11 @@ impl terrarium_core::StoreSet for PluginHost {
             terrarium_ai::STORE_ID.to_string(),
             terrarium_scheduler::STORE_ID.to_string(),
         ];
+        ids.extend(
+            self.vaults
+                .keys()
+                .map(|space| store_id(space, terrarium_net::vault::VAULT_STORE_ID)),
+        );
         for (id, loaded) in &self.plugins {
             ids.extend(loaded.stores.keys().map(|space| store_id(space, id)));
         }
@@ -1575,6 +2156,12 @@ impl terrarium_core::StoreSet for PluginHost {
             _ => {}
         }
         let (space, plugin) = split_store_id(id);
+        if plugin == terrarium_net::vault::VAULT_STORE_ID {
+            return self
+                .vaults
+                .get_mut(space)
+                .map(terrarium_net::vault::Vault::store_mut);
+        }
         self.plugins
             .get_mut(plugin)?
             .stores
@@ -1611,4 +2198,20 @@ pub fn fingerprint(dir: &Path) -> u128 {
     let mut latest = 0;
     walk(dir, true, &mut latest);
     latest
+}
+
+fn vault_unavailable() -> String {
+    "Sign in again on this device".into()
+}
+fn url_host(url: &str) -> std::result::Result<String, String> {
+    // Request parsing already canonicalized/validated the URL at admission.
+    terrarium_net::request_host(url).ok_or_else(vault_unavailable)
+}
+
+/// Sealed-account generation and locally approved provider captured before browser I/O.
+pub struct OAuthPreparation {
+    pub provider: terrarium_net::oauth::OAuthDef,
+    pub signer: String,
+    pub generation: Option<String>,
+    pub client: terrarium_net::oauth::Client,
 }

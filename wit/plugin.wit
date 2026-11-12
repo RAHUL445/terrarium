@@ -130,6 +130,17 @@ interface events {
   emit: func(name: string, payload: json) -> result<_, plugin-error>;
 }
 
+/// Needs http permission and locally approved manifest hosts.
+interface http {
+  use types.{json, plugin-error};
+  /// Permission, local approval, worker availability and queue/quota capacity.
+  /// Does not promise a particular URL, account or DNS result will work.
+  available: func() -> bool;
+  /// Queue now; execution is possible only after the calling operation commits.
+  /// Callback: {request, ok, status?, headers?, body?, error?, context}.
+  fetch: func(request: json, on-done: string) -> result<string, plugin-error>;
+}
+
 interface log {
   info: func(message: string);
 }
@@ -141,6 +152,7 @@ world plugin {
   import interop;
   import speech;
   import ai;
+  import http;
   import schedule;
   import events;
 

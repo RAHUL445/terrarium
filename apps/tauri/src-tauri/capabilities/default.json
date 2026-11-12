@@ -62,6 +62,8 @@
     "allow-join-space",
     "allow-sync-now",
     "allow-recovery-phrase",
+    "allow-vault-sign-in",
+    "allow-vault-cancel",
     "allow-connect-drive",
     "allow-disconnect-drive",
     "allow-take-links",

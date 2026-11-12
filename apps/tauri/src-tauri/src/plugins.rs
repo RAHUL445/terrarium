@@ -33,6 +33,7 @@ pub struct PluginList {
 
 #[derive(Serialize)]
 struct PluginInfo {
+    oauth: BTreeMap<String, terrarium_net::oauth::OAuthDef>,
     id: String,
     name: String,
     version: String,
@@ -77,6 +78,7 @@ impl From<&Manifest> for PluginInfo {
                 .collect()
         };
         PluginInfo {
+            oauth: m.oauth.clone(),
             id: m.id.clone(),
             name: m.name.clone(),
             version: m.version.clone(),

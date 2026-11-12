@@ -12,7 +12,15 @@ use tempfile::TempDir;
 use terrarium_runtime::ai::{AiConfig, AiError, Completion, Sealer};
 use terrarium_runtime::{build_plugin, HostConfig, PluginHost, RuntimeError};
 
-const PLUGINS: [&str; 6] = ["todo", "bookmarks", "habits", "notes", "reports", "voice"];
+const PLUGINS: [&str; 7] = [
+    "todo",
+    "bookmarks",
+    "habits",
+    "notes",
+    "reports",
+    "voice",
+    "feeds",
+];
 
 fn package(name: &str) -> PathBuf {
     support::package_root().join(name).canonicalize().unwrap()
@@ -2019,4 +2027,245 @@ fn habit_rule_chain_stops() {
             .len()
             <= 5
     );
+}
+
+fn feed_reply(status: u16, body: &str) -> terrarium_net::Response {
+    terrarium_net::Response {
+        status,
+        headers: [
+            ("etag".into(), "synthetic-etag".into()),
+            (
+                "last-modified".into(),
+                "Tue, 10 Nov 2026 12:00:00 GMT".into(),
+            ),
+        ]
+        .into(),
+        body: body.into(),
+        bytes_in: body.len() as u64,
+    }
+}
+
+#[test]
+fn feeds_fetch_deduplicate_conditionally_refresh_and_mark_read() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.enable_http().unwrap();
+    let url = "https://example.com/feed.xml";
+    let added = host.call("feeds", "add", &json!({"url":url})).unwrap();
+    let id = &added["id"];
+    let (job, auth) = host.take_http_job().expect("add queues one fetch");
+    assert!(auth.is_none());
+    assert_eq!(job.request.url, url);
+    assert_eq!(job.request.context, json!({"feed":id}));
+    let body = r#"<rss version="2.0"><channel><title>Synthetic news</title><item><guid>one</guid><title>First</title><link>https://example.com/one</link><description><![CDATA[<b>Safe</b> text]]></description></item><item><guid>two</guid><title>Second</title><link>javascript:alert(1)</link></item></channel></rss>"#;
+    host.deliver_http(job, Ok(feed_reply(200, body)));
+    assert!(host.take_http_job().is_none());
+    assert_eq!(
+        host.call("feeds", "add", &json!({"url":url})).unwrap()["id"],
+        *id
+    );
+    assert!(host.take_http_job().is_none(), "repeat add is idempotent");
+    let items = host.query("feeds", "items", &Map::new()).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items.iter().find(|i| i["guid"] == "two").unwrap()["link"],
+        ""
+    );
+    assert_eq!(
+        items.iter().find(|i| i["guid"] == "one").unwrap()["summary"],
+        "Safe text"
+    );
+    assert_eq!(
+        host.query("feeds", "unread_count", &Map::new()).unwrap()[0]["count"],
+        2
+    );
+    for status in [200, 304] {
+        host.call("feeds", "refresh", &json!({"id":id})).unwrap();
+        let (job, _) = host.take_http_job().unwrap();
+        assert_eq!(job.request.headers["If-None-Match"], "synthetic-etag");
+        assert_eq!(
+            job.request.headers["If-Modified-Since"],
+            "Tue, 10 Nov 2026 12:00:00 GMT"
+        );
+        host.deliver_http(
+            job,
+            Ok(feed_reply(status, if status == 200 { body } else { "" })),
+        );
+        assert_eq!(host.query("feeds", "items", &Map::new()).unwrap(), items);
+    }
+    host.call(
+        "feeds",
+        "mark_read",
+        &json!({"id":items[0]["id"], "read":true}),
+    )
+    .unwrap();
+    host.call(
+        "feeds",
+        "mark_read",
+        &json!({"id":items[0]["id"], "read":true}),
+    )
+    .unwrap();
+    assert_eq!(
+        host.query("feeds", "items", &params(json!({"unread":true})))
+            .unwrap()
+            .len(),
+        1
+    );
+    host.call("feeds", "mark_all_read", &json!({"feed_id":id}))
+        .unwrap();
+    host.call("feeds", "mark_all_read", &json!({"feed_id":id}))
+        .unwrap();
+    assert_eq!(
+        host.query("feeds", "unread_count", &Map::new()).unwrap()[0]["count"],
+        0
+    );
+    assert!(host
+        .query("feeds", "unread", &Map::new())
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        host.query("feeds", "search", &params(json!({"q":"First"})))
+            .unwrap()
+            .len(),
+        1
+    );
+    let feeds = host.query("feeds", "feeds", &Map::new()).unwrap();
+    assert_eq!(feeds[0]["title"], "Synthetic news");
+    assert!(feeds[0]["fetched_ms"].as_i64().unwrap() > 0);
+    let manifest = host.manifests().find(|m| m.id == "feeds").unwrap();
+    assert_eq!(
+        manifest.jobs["refresh"].schedule,
+        terrarium_runtime::Schedule::EveryMinutes(60)
+    );
+    assert_eq!(
+        manifest.jobs["refresh"].run_on,
+        terrarium_runtime::RunOn::Desktop
+    );
+}
+
+#[test]
+fn feeds_errors_and_late_replies_are_safe() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.enable_http().unwrap();
+    for url in [
+        "http://example.com/rss",
+        "javascript:alert(1)",
+        "https://127.0.0.1/rss",
+    ] {
+        assert!(host.call("feeds", "add", &json!({"url":url})).is_err());
+    }
+    let id = host
+        .call("feeds", "add", &json!({"url":"https://example.com/rss"}))
+        .unwrap()["id"]
+        .clone();
+    let (job, _) = host.take_http_job().unwrap();
+    host.deliver_http(
+        job,
+        Err(terrarium_net::NetError {
+            code: "too-large".into(),
+            message: "The reply is too large.".into(),
+            temporary: false,
+        }),
+    );
+    assert_eq!(
+        host.query("feeds", "feeds", &Map::new()).unwrap()[0]["last_error"],
+        "The reply is too large."
+    );
+    for (status, body, error) in [
+        (503, "", "The website returned 503"),
+        (200, "<not-a-feed>", "Could not read this RSS or Atom feed"),
+    ] {
+        host.call("feeds", "refresh", &json!({"id":id})).unwrap();
+        let (job, _) = host.take_http_job().unwrap();
+        host.deliver_http(job, Ok(feed_reply(status, body)));
+        assert_eq!(
+            host.query("feeds", "feeds", &Map::new()).unwrap()[0]["last_error"],
+            error
+        );
+    }
+    host.call("feeds", "refresh", &json!({"id":id})).unwrap();
+    let (job, _) = host.take_http_job().unwrap();
+    host.call("feeds", "remove", &json!({"id":id})).unwrap();
+    host.call("feeds", "remove", &json!({"id":id})).unwrap();
+    host.deliver_http(
+        job,
+        Ok(feed_reply(
+            200,
+            "<rss><channel><item><guid>late</guid></item></channel></rss>",
+        )),
+    );
+    assert!(host
+        .query("feeds", "feeds", &Map::new())
+        .unwrap()
+        .is_empty());
+    assert!(host
+        .query("feeds", "items", &Map::new())
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn feeds_keep_newest_200_and_preserve_older_unread() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.enable_http().unwrap();
+    host.call("feeds", "add", &json!({"url":"https://example.com/rss"}))
+        .unwrap();
+    let body = format!(
+        "<rss><channel>{}</channel></rss>",
+        (0..205)
+            .map(|i| format!(
+                "<item><guid>{i}</guid><pubDate>2026-11-10T12:{:02}:00Z</pubDate></item>",
+                i % 60
+            ))
+            .collect::<String>()
+    );
+    let (job, _) = host.take_http_job().unwrap();
+    host.deliver_http(job, Ok(feed_reply(200, &body)));
+    assert_eq!(
+        host.query("feeds", "items", &Map::new()).unwrap().len(),
+        205
+    );
+    host.call("feeds", "mark_all_read", &json!({})).unwrap();
+    for _ in 0..2 {
+        host.call("feeds", "scheduled_refresh", &json!({})).unwrap();
+        let (job, _) = host.take_http_job().unwrap();
+        host.deliver_http(job, Ok(feed_reply(200, &body)));
+        assert_eq!(
+            host.query("feeds", "items", &Map::new()).unwrap().len(),
+            200
+        );
+        assert_eq!(
+            host.query("feeds", "unread_count", &Map::new()).unwrap()[0]["count"],
+            0
+        );
+    }
+}
+
+#[test]
+fn feeds_refresh_is_capped_at_twenty() {
+    let data = TempDir::new().unwrap();
+    let mut host = host(&data);
+    host.enable_http().unwrap();
+    for i in 0..21 {
+        host.call(
+            "feeds",
+            "add",
+            &json!({"url":format!("https://example.com/{i}.xml")}),
+        )
+        .unwrap();
+        let (job, _) = host.take_http_job().unwrap();
+        host.deliver_http(job, Ok(feed_reply(304, "")));
+    }
+    assert_eq!(
+        host.call("feeds", "scheduled_refresh", &json!({})).unwrap()["queued"],
+        20
+    );
+    let mut count = 0;
+    while let Some((job, _)) = host.take_http_job() {
+        host.deliver_http(job, Ok(feed_reply(304, "")));
+        count += 1;
+    }
+    assert_eq!(count, 20);
 }

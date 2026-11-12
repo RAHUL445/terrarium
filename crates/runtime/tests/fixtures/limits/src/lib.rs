@@ -134,6 +134,68 @@ impl Plugin for Limits {
                 }
                 Ok(Value::Null)
             }
+            "http_available" => Ok(json!(terrarium_guest::http::available())),
+            "on_fetched" => {
+                storage::insert(
+                    "notes",
+                    json!({"note":json!(&args.0).to_string()})
+                        .as_object()
+                        .unwrap(),
+                )?;
+                if args
+                    .get("context")
+                    .is_some_and(|c| c["enqueue"].as_bool() == Some(true))
+                {
+                    terrarium_guest::http::fetch(
+                        &json!({"method":"GET","url":"https://example.com/","context":null}),
+                        "on_fetched",
+                    )?;
+                }
+                Ok(Value::Null)
+            }
+            "nested_fetch_then_fail" => {
+                terrarium_guest::interop::call("net-fixture", "fetch_ok", &json!({}))?;
+                Err(Error::invalid("outer failed"))
+            }
+            "fetch_raw" => terrarium_guest::http::fetch(
+                args.get("request").unwrap_or(&Value::Null),
+                "on_fetched",
+            )
+            .map(|id| json!(id)),
+            "fetch_ok"
+            | "fetch_commit_failure"
+            | "fetch_then_fail"
+            | "fetch_then_trap"
+            | "fetch_other_host"
+            | "fetch_bad_callback" => {
+                if operation == "fetch_commit_failure" {
+                    // The test installs a synthetic RAISE(ROLLBACK) trigger.
+                    assert!(storage::insert(
+                        "notes",
+                        json!({"note":"synthetic"}).as_object().unwrap()
+                    )
+                    .is_err());
+                }
+                let url = if operation == "fetch_other_host" {
+                    "https://other.org/"
+                } else {
+                    "https://example.com/"
+                };
+                let callback = if operation == "fetch_bad_callback" {
+                    "missing"
+                } else {
+                    "on_fetched"
+                };
+                let id =
+                    terrarium_guest::http::fetch(&json!({"method":"GET", "url":url}), callback)?;
+                if operation == "fetch_then_fail" {
+                    return Err(Error::invalid("failure after fetch"));
+                }
+                if operation == "fetch_then_trap" {
+                    panic!("trap after fetch");
+                }
+                Ok(json!(id))
+            }
             "ok" => Ok(json!({ "ok": true })),
             "oversized_reply" => {
                 storage::insert(

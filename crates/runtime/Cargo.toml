@@ -13,6 +13,7 @@ rusqlite.workspace = true
 terrarium-core = { path = "../core" }
 terrarium-ai = { path = "../ai" }
 terrarium-blobs = { path = "../blobs" }
+terrarium-net = { path = "../net" }
 terrarium-scheduler = { path = "../scheduler" }
 serde.workspace = true
 serde_json.workspace = true
@@ -31,6 +32,7 @@ tempfile.workspace = true
 
 [dev-dependencies]
 terrarium-sync = { path = "../sync" }
+rusqlite.workspace = true
 tempfile.workspace = true
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 jiff = "0.2"

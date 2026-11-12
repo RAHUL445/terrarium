@@ -84,10 +84,30 @@ pub fn start(app: AppHandle) {
 pub fn service(
     app: AppHandle,
     state: State<'_, Plugins>,
+    window: tauri::WebviewWindow,
     name: String,
     args: Option<Value>,
 ) -> Result<Value, String> {
     let args = args.unwrap_or(Value::Null);
+    if name.starts_with("vault_") {
+        if window.label() != "main" {
+            return Err("Accounts are available only in Settings.".into());
+        }
+        if name == "vault_remove" {
+            if let Some(cancel) = app
+                .state::<crate::vault::Pending>()
+                .0
+                .lock()
+                .unwrap()
+                .as_ref()
+            {
+                cancel.cancel();
+            }
+        }
+        return state
+            .with_host(|host| host.vault_service(&name, &args))
+            .ok_or("plugin host unavailable")?;
+    }
     let result = state
         .with_host(|host| services::invoke(host, &name, &args, cfg!(desktop)))
         .ok_or("plugin host unavailable")?
