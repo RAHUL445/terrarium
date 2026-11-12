@@ -94,6 +94,8 @@ More components and keys:
 | `json_each` | Queries may unpack JSON stored in a text column: `SELECT json_extract(j.value, '$.day') AS day FROM t, json_each(t.daily) j WHERE t.id = ?1` |
 | `action.then` | `{"state.open": ""}`: state set after the operation succeeds. `success` and `then` can use `{{result.*}}`, the operation's return value |
 | `{{!path}}`, `{{path == word}}`, `{{path != word}}` | Whole-string bindings for not and text comparison |
+| `{{state.expanded == @row.id}}` | Prefix the right operand with `@` to compare a scope path. Row-aware state conditions mount child queries only while true; ordinary right operands remain literal text. |
+| `button.focus_key` | Stable key (bindings allowed) used to restore keyboard focus after a state change replaces a row control. Use the same key on an expand/collapse pair; focus is not moved if the user has already focused another control. |
 | `ref` | `{type: "ref", ref: "todo/tasks/{{row.task_id}}", label: "Task"}` draws a host-resolved chip with the current title, kind icon and done state. Empty or invalid refs draw nothing; missing or trashed items show “Missing” or “In trash” and are disabled. Resolution is batched and cached until the view refreshes; titles never enter plugin scope. |
 | `backlinks` | `{type: "backlinks", ref: "{{row.$ref}}", title: "Linked from", empty: "Nothing links here yet."}` merges text mentions and relations, grouped by item kind. Each entry is a ref chip; relations also have Remove link. Reloads on view refresh. |
 | `ref-picker` | `{label?, placeholder?, action}` searches indexed items across plugins in this space. For example, `{type: "ref-picker", action: {link: {from: "{{row.$ref}}", to: "{{value.ref}}"}}}` runs the action with only `value.ref`; default label is “Link to…” and placeholder is “Search items”. A failed action keeps the choice open. |
@@ -800,6 +802,16 @@ declared scalar query parameters. A page View placement can use
 `{"saved_view":"<id>"}` while retaining its own geometry and focus. Removed
 definitions or unavailable filter choices remain visibly unresolved; they do
 not fall back to an unfiltered query. Existing inline View placements still work.
+
+Saved views also support `density` (`comfortable` or `compact`) and `fields`
+(comma-separated column keys). Omitted fields keep the legacy display; an empty
+string shows only the title. Titles always remain visible. Field visibility
+does not change filtering, sorting, board lanes, or the calendar date key.
+Compact spacing retains touch-sized row targets. The library provides checkbox
+filter pickers, collapsible customization and reset; in-progress drafts survive
+tab/navigation changes in the current app session without being saved as shared
+definitions. Apply remains a temporary preview. A browser reload ends that
+draft session.
 
 Query result requirements:
 

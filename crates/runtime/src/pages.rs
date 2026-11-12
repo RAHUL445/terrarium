@@ -28,6 +28,7 @@ const MAX_FOCUS: usize = 40;
 const MAX_ROWS: i64 = 400;
 const MAX_CONFIG_BYTES: usize = 4096;
 const MAX_FILTERS_BYTES: usize = 2048;
+const MAX_FIELDS_BYTES: usize = 1400;
 const MAX_ID: usize = 64;
 
 const SCHEMA: &str = r#"{
@@ -165,6 +166,26 @@ fn valid_view_setting_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn valid_fields_csv(fields: &str) -> bool {
+    if fields.len() > MAX_FIELDS_BYTES {
+        return false;
+    }
+    if fields.is_empty() {
+        return true;
+    }
+    let mut unique = BTreeSet::new();
+    let keys: Vec<_> = fields.split(',').collect();
+    keys.len() <= 20
+        && keys.iter().all(|key| {
+            !key.is_empty()
+                && key.len() <= 64
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                && unique.insert(*key)
+        })
+}
+
 fn valid_saved_view_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID
@@ -192,7 +213,7 @@ pub fn clean_saved_view_config(config: &Map<String, Value>) -> Result<Map<String
     if config.contains_key("saved_view") {
         return Err(bad("A saved view cannot reference another saved view"));
     }
-    let allowed = ["plugin", "query", "layout", "sort", "dir", "group", "date", "filters"];
+    let allowed = ["plugin", "query", "layout", "sort", "dir", "group", "date", "filters", "density", "fields"];
     if config.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(bad("Saved view has an unknown setting"));
     }
@@ -207,6 +228,16 @@ pub fn clean_saved_view_config(config: &Map<String, Value>) -> Result<Map<String
         let layout = value.as_str().filter(|value| ["list", "table", "board", "calendar"].contains(value))
             .ok_or_else(|| bad("Invalid saved view layout"))?;
         out.insert("layout".into(), json!(layout));
+    }
+    if let Some(value) = config.get("density") {
+        let density = value.as_str().filter(|value| ["comfortable", "compact"].contains(value))
+            .ok_or_else(|| bad("Invalid saved view density"))?;
+        out.insert("density".into(), json!(density));
+    }
+    if let Some(value) = config.get("fields") {
+        let fields = value.as_str().filter(|fields| valid_fields_csv(fields))
+            .ok_or_else(|| bad("Invalid saved view fields"))?;
+        out.insert("fields".into(), json!(fields));
     }
     if let Some(value) = config.get("dir") {
         let dir = value.as_str().filter(|value| ["asc", "desc"].contains(value))
@@ -321,6 +352,14 @@ pub fn host_widgets() -> Value {
                     "labels": ["List", "Table", "Board", "Calendar"],
                     "default": "list"
                 },
+                "density": {
+                    "type": "enum",
+                    "label": "Density",
+                    "values": ["comfortable", "compact"],
+                    "labels": ["Comfortable", "Compact"],
+                    "default": "comfortable"
+                },
+                "fields": { "type": "text", "label": "Columns", "max_length": 1400 },
                 "sort": { "type": "text", "label": "Sort by", "max_length": 64, "default": "" },
                 "dir": {
                     "type": "enum",
@@ -374,6 +413,13 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
             if !ok {
                 out.remove(key);
             }
+        }
+        if out
+            .get("fields")
+            .and_then(Value::as_str)
+            .is_some_and(|fields| !valid_fields_csv(fields))
+        {
+            out.remove("fields");
         }
         if let Some(id) = out.get("saved_view").and_then(Value::as_str) {
             if !valid_saved_view_id(id) {
@@ -874,6 +920,45 @@ mod tests {
         let mut pages = open(&dir, "device-a");
         let saved = pages.save_view("personal", None, "Default tasks", clean).unwrap();
         assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn saved_view_fields_and_density_round_trip_and_validate() {
+        let config = json!({
+            "plugin": "todo",
+            "query": "tasks",
+            "density": "compact",
+            "fields": "title,due_date,board_lane"
+        });
+        let clean = clean_saved_view_config(config.as_object().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages = open(&dir, "device-a");
+        let saved = pages.save_view("personal", None, "Compact tasks", clean).unwrap();
+        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved.clone()));
+        assert_eq!(saved.config["density"], "compact");
+        assert_eq!(saved.config["fields"], "title,due_date,board_lane");
+
+        let title_only = json!({"plugin":"todo", "query":"tasks", "fields":""});
+        assert_eq!(clean_saved_view_config(title_only.as_object().unwrap()).unwrap()["fields"], "");
+
+        let invalid_fields = vec![
+            "bad-key".to_string(),
+            "a".repeat(65),
+            "title,title".to_string(),
+            "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u".to_string(),
+            "a,".repeat(701),
+        ];
+        for fields in invalid_fields {
+            let invalid = json!({"plugin":"todo", "query":"tasks", "fields":fields});
+            assert!(clean_saved_view_config(invalid.as_object().unwrap()).is_err(), "accepted fields {}", invalid["fields"]);
+        }
+        let invalid_density = json!({"plugin":"todo", "query":"tasks", "density":"dense"});
+        assert!(clean_saved_view_config(invalid_density.as_object().unwrap()).is_err());
+
+        let widget = json!({"density":"compact", "fields":"title,due_date"});
+        assert_eq!(clean_host_config("view", widget.as_object().unwrap()).unwrap(), widget.as_object().unwrap().clone());
+        let unsafe_widget = json!({"fields":"title,title", "density":"dense"});
+        assert_eq!(clean_host_config("view", unsafe_widget.as_object().unwrap()).unwrap(), Map::new());
     }
 
     #[test]

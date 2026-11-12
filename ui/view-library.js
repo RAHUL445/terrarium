@@ -59,6 +59,42 @@
     return config;
   }
 
+  // Native checkboxes keep multiple selection usable with touch and keyboard.
+  function choicePicker(label, choices, selected, onChange) {
+    const node = element("details", "pp-choice-picker");
+    const summary = element("summary", "pp-input");
+    const panel = element("div", "pp-choice-panel");
+    const search = element("input", "pp-input");
+    search.type = "search"; search.placeholder = `Find ${label.toLowerCase()}…`;
+    search.setAttribute("aria-label", `Find ${label.toLowerCase()}`);
+    const clear = element("button", "pp-button pp-ghost", "Clear selection"); clear.type = "button";
+    const list = element("div", "pp-choice-options");
+    const values = new Set(selected), checks = [];
+    const available = new Map(choices.map(choice => [String(choice.value), String(choice.label ?? choice.value)]));
+    for (const value of selected) if (!available.has(value)) available.set(value, `Unavailable choice · ${value}`);
+    const update = () => {
+      summary.textContent = values.size ? `${label}: ${values.size} selected` : `${label}: Any`;
+      for (const { input } of checks) input.checked = values.has(input.value);
+    };
+    for (const [value, title] of available) {
+      const row = element("label", "pp-choice-option");
+      const input = element("input"); input.type = "checkbox"; input.value = value;
+      input.setAttribute("aria-label", `${label}: ${title}`);
+      row.append(input, element("span", "", title)); list.append(row); checks.push({ row, input, title });
+      input.addEventListener("change", () => { input.checked ? values.add(value) : values.delete(value); update(); onChange?.(); });
+    }
+    clear.addEventListener("click", () => { values.clear(); update(); onChange?.(); });
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      for (const { row, title } of checks) row.hidden = !title.toLowerCase().includes(query);
+    });
+    node.addEventListener("keydown", event => {
+      if (event.key === "Escape") { node.open = false; summary.focus(); event.stopPropagation(); }
+    });
+    panel.append(search, clear, list); node.append(summary, panel); update();
+    return { node, read: () => [...values].join(",") };
+  }
+
   function mount(node, spec, options) {
     const opts = options || {};
     const pluginId = String(opts.plugin || "");
@@ -75,6 +111,7 @@
     let selectedAvailable = false;
     let currentRecord = null;
     let draftConfig = null;
+    let appliedConfig = null;
     let initialized = false;
     let recordRequest = 0;
     let refreshRequest = 0;
@@ -82,6 +119,8 @@
     let filterControls = new Map();
     let filterChoices = new Map();
     let validControls = false;
+    let fieldControls = [];
+    let saving = false;
 
     const rootNode = element("div", "pp-stack");
     rootNode.style.flexDirection = "column";
@@ -95,6 +134,11 @@
     const newButton = element("button", "pp-button", "New view");
     newButton.type = "button";
     toolbar.append(savedSelect, newButton);
+    const summary = element("p", "pp-view-summary");
+    const editor = element("details", "pp-view-editor");
+    editor.append(element("summary", "pp-button pp-ghost", "Customize view"));
+    const editorBody = element("div", "pp-view-editor-body");
+    editor.append(editorBody);
 
     const controls = element("div", "pp-stack");
     controls.style.flexWrap = "wrap";
@@ -117,6 +161,10 @@
     option(dirField.select, "desc", "Descending");
     const groupField = makeSelect("Group by", controls);
     const dateField = makeSelect("Calendar date", controls);
+    const densityField = makeSelect("Density", controls);
+    option(densityField.select, "comfortable", "Comfortable");
+    option(densityField.select, "compact", "Compact");
+    const fieldsArea = element("fieldset", "pp-view-fields");
     const filtersArea = element("div", "pp-stack");
     filtersArea.style.flexWrap = "wrap";
     filtersArea.style.gap = "8px";
@@ -132,9 +180,23 @@
     const saveButton = makeButton("Save changes", "pp-button", actions);
     const saveAsButton = makeButton("Save as new", "pp-button", actions);
     const removeButton = makeButton("Delete view", "pp-button", actions);
+    const resetButton = makeButton("Reset changes", "pp-button pp-ghost", actions);
     const previewNode = element("div", "pp-view-library-preview");
     node.replaceChildren(rootNode);
-    rootNode.append(toolbar, controls, filtersArea, note, error, actions, previewNode);
+    editorBody.append(controls, filtersArea, fieldsArea, note, actions);
+    rootNode.append(toolbar, summary, editor, error, previewNode);
+
+    function changed() {
+      summary.textContent = "Unsaved changes · Apply to preview, or save to keep them.";
+    }
+    editor.addEventListener("input", changed);
+    editor.addEventListener("change", changed);
+    function describe(config) {
+      const entry = viewEntry(config).entry;
+      const filters = readFilters(config?.filters, entry?.view.filters || []).values;
+      const active = (entry?.view.filters || []).filter(def => filters[def.param] != null && filters[def.param] !== "");
+      summary.textContent = `${currentRecord?.title || "New view"} · ${config.layout || "list"} · ${active.length ? `${active.length} filters` : "Default filters"}`;
+    }
 
     function makeSelect(label, parent) {
       const field = element("label", "pp-field");
@@ -172,13 +234,14 @@
         const control = filterControls.get(definition.param);
         if (!control) continue;
         let value;
-        if (control.multiple) value = Array.from(control.selectedOptions, (item) => item.value).join(",");
+        if (control.read) value = control.read();
+        else if (control.multiple) value = Array.from(control.selectedOptions, (item) => item.value).join(",");
         else value = control.value;
         const defaultValue = entryResult.entry.view.params?.[definition.param];
         // An empty selection clears a non-empty query default; otherwise it means all.
         if (value !== "" || (defaultValue != null && String(defaultValue) !== "")) filters[definition.param] = value;
       }
-      return savedConfig(
+      const config = savedConfig(
         pluginId,
         queryField.select.value,
         layoutField.select.value,
@@ -188,6 +251,9 @@
         dateField.select.value,
         JSON.stringify(filters),
       );
+      config.density = densityField.select.value;
+      config.fields = fieldControls.filter(input => input.checked).map(input => input.value).join(",");
+      return config;
     }
     function destroyPreview() {
       preview?.dispose?.();
@@ -195,6 +261,7 @@
       previewNode.replaceChildren();
     }
     async function renderPreview(config) {
+      appliedConfig = { ...config };
       const generationAtStart = ++generation;
       destroyPreview();
       const found = viewEntry(config);
@@ -229,7 +296,7 @@
       const hasEmptyChoice = choices.some((item) => item && item.value != null && String(item.value) === "");
       if (!multiple && !hasEmptyChoice) {
         const defaultChoice = choices.find(item => String(item.value) === String(fallback));
-        option(select, "", defaultChoice ? `Default (${defaultChoice.label})` : "All");
+        if (!defaultChoice) option(select, "", "Any");
       }
       const known = new Set();
       for (const item of choices) {
@@ -249,7 +316,7 @@
         for (const item of select.options) item.selected = selectedValues.includes(item.value);
       } else {
         select.multiple = false;
-        select.value = selectedValues[0] || "";
+        select.value = selectedValues[0] || (hasEmptyChoice ? "" : String(fallback ?? ""));
       }
     }
     async function buildControls(config) {
@@ -280,7 +347,7 @@
       filterControls = new Map();
       filtersArea.replaceChildren();
       for (const definition of defs) {
-        const field = element("label", "pp-field");
+        const field = element(definition.multiple ? "div" : "label", "pp-field");
         field.append(element("span", "pp-label", definition.label || definition.param));
         const control = element(isChoiceFilter(definition) ? "select" : "input", "pp-input");
         if (control.tagName === "INPUT") control.type = "text";
@@ -288,6 +355,11 @@
         else control.setAttribute("aria-label", definition.label || definition.param);
         const saved = filterValues[definition.param];
         const selected = saved == null || saved === "" ? [] : definition.multiple ? String(saved).split(",") : [String(saved)];
+        if (definition.multiple && isChoiceFilter(definition)) {
+          const picker = choicePicker(definition.label || definition.param, filterChoices.get(definition.param) || [], selected, changed);
+          filterControls.set(definition.param, picker);
+          field.append(picker.node); filtersArea.append(field); continue;
+        }
         if (control.tagName === "SELECT") fillChoiceSelect(control, filterChoices.get(definition.param) || [], selected, Boolean(definition.multiple), view.params?.[definition.param]);
         else control.value = saved == null ? "" : String(saved);
         control.addEventListener(control.tagName === "SELECT" ? "change" : "input", () => {
@@ -298,6 +370,18 @@
         filtersArea.append(field);
       }
       const columns = Array.isArray(view.columns) ? view.columns : [];
+      fieldsArea.replaceChildren(element("legend", "", "Visible fields"));
+      fieldControls = [];
+      const chosenFields = typeof config.fields === "string" ? config.fields.split(",") : columns.map(column => column.key);
+      for (const column of columns) {
+        const label = element("label", "pp-choice-option");
+        const input = element("input"); input.type = "checkbox"; input.value = column.key;
+        input.disabled = column.key === (view.title_column || "title");
+        input.checked = input.disabled || chosenFields.includes(column.key);
+        input.setAttribute("aria-label", `Show ${column.label}`);
+        label.append(input, element("span", "", column.label)); fieldsArea.append(label); fieldControls.push(input);
+      }
+      densityField.select.value = config.density === "compact" ? "compact" : "comfortable";
       queryField.select.replaceChildren();
       for (const entry of VIEWS().viewsOf([plugin])) option(queryField.select, entry.query, entry.view.title || entry.query);
       queryField.select.value = config.query;
@@ -327,9 +411,10 @@
       saveButton.disabled = !selectedId || !selectedAvailable;
       removeButton.disabled = !selectedId || !selectedAvailable;
       validControls = true;
+      describe(config);
       return true;
     }
-    function setDraft(config, record) {
+    function setDraft(config, record, previewConfig = config) {
       recordRequest++;
       currentRecord = record || null;
       selectedId = record?.id || "";
@@ -337,7 +422,8 @@
       draftConfig = { ...(config || {}) };
       initialized = true;
       titleInput.value = record?.title || "";
-      return buildControls(draftConfig).then((ok) => ok && renderPreview(draftConfig));
+      editor.open = !record;
+      return buildControls(draftConfig).then((ok) => ok && renderPreview(previewConfig));
     }
     function configFromFields() {
       if (!validControls) throw new Error("Choose a valid plugin query and load its filter choices first.");
@@ -398,6 +484,20 @@
           return preview?.refresh ? preview.refresh().then(() => true) : true;
         }
         if (initialized) return preview?.refresh ? preview.refresh().then(() => true) : true;
+        if (opts.snapshot?.config && !initialized) {
+          const snapshot = opts.snapshot;
+          const record = own.find(record => record.id === snapshot.selectedId) || (snapshot.selectedId ? { id: snapshot.selectedId, title: snapshot.title, config: snapshot.config } : null);
+          await setDraft(snapshot.config, record, snapshot.appliedConfig || snapshot.config);
+          if (snapshot.selectedId && !own.some(record => record.id === snapshot.selectedId)) option(savedSelect, snapshot.selectedId, "Unavailable saved view");
+          savedSelect.value = snapshot.selectedId || "";
+          titleInput.value = snapshot.title || "";
+          editor.open = Boolean(snapshot.open);
+          if (snapshot.selectedId && !own.some(record => record.id === snapshot.selectedId)) {
+            selectedAvailable = false; saveButton.disabled = true; removeButton.disabled = true; setError(unavailableMessage());
+          }
+          if (snapshot.dirty) changed();
+          return true;
+        }
         return setDraft(defaultConfig(), null);
       } catch (e) {
         if (!disposed && request === refreshRequest) setError(String(e?.message || e));
@@ -410,10 +510,15 @@
         const parsed = readFilters(config.filters, viewEntry(config).entry?.view.filters || []);
         if (parsed.error) throw new Error(parsed.error);
         draftConfig = config;
-        return await renderPreview(config);
+        const ok = await renderPreview(config);
+        if (ok) { summary.textContent = "Previewing changes · Save changes or Save as new to keep them."; editor.open = false; }
+        return ok;
       } catch (e) { setError(String(e?.message || e)); return false; }
     }
     async function save(asNew) {
+      if (saving) return false;
+      saving = true;
+      saveButton.disabled = true; saveAsButton.disabled = true;
       try {
         const updating = !asNew && Boolean(selectedId);
         if (updating && !selectedAvailable) throw new Error("This saved view is unavailable. Use Save as new to keep the draft.");
@@ -436,7 +541,12 @@
         await setDraft(record.config, record);
         toast(updating ? "Updated shared view" : "Saved new view", "ok");
         return true;
-      } catch (e) { setError(String(e?.message || e)); return false; }
+      } catch (e) { setError(String(e?.message || e)); editor.open = true; return false; }
+      finally {
+        saving = false;
+        saveButton.disabled = !validControls || !selectedId || !selectedAvailable;
+        saveAsButton.disabled = false;
+      }
     }
     async function remove() {
       if (!selectedId || !selectedAvailable) return false;
@@ -460,6 +570,7 @@
       loadRecord(savedSelect.value);
     });
     newButton.addEventListener("click", () => { setDraft(defaultConfig(), null); });
+    resetButton.addEventListener("click", () => { setDraft(currentRecord?.config || defaultConfig(), currentRecord); });
     queryField.select.addEventListener("change", () => {
       const next = { ...defaultConfig(), query: queryField.select.value };
       setDraft(next, currentRecord);
@@ -474,6 +585,8 @@
       ready,
       refresh,
       flush: async () => preview?.flush ? preview.flush() : true,
+      snapshot: () => ({ selectedId, title: titleInput.value, config: validControls ? readControlConfig() : draftConfig, appliedConfig,
+        open: editor.open, dirty: summary.textContent.startsWith("Unsaved") || summary.textContent.startsWith("Previewing") }),
       dispose() {
         if (disposed) return;
         disposed = true;
@@ -484,7 +597,7 @@
     };
   }
 
-  const api = { mount, readFilters, isChoiceFilter, filterDefaults, savedConfig };
+  const api = { mount, readFilters, isChoiceFilter, filterDefaults, savedConfig, choicePicker };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TerrariumViewLibrary = api;
 })(typeof window === "undefined" ? globalThis : window);

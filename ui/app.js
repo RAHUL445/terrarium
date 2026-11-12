@@ -344,7 +344,8 @@ function bridge(plugin) {
   const desktopSave = Boolean(window.__TAURI__ && !/Android/.test(navigator.userAgent) && !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname));
   const api = {
     plugin,
-    mountViewLibrary: (node, spec) => window.TerrariumViewLibrary.mount(node, spec, {
+    mountViewLibrary: (node, spec, state) => window.TerrariumViewLibrary.mount(node, spec, {
+      ...state,
       plugin,
       plugins: pluginList.plugins,
       bridge: api,

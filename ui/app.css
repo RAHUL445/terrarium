@@ -434,6 +434,34 @@ ul.plain li strong { color: var(--ink); font-weight: 600; }
 .pp-tab { min-height: 34px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-weight: 500; }
 .pp-tab[aria-selected="true"] { background: var(--surface); color: var(--ink); font-weight: 600; }
 .pp-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pp-view-summary { margin: 0; color: var(--muted); font-size: 13px; }
+.pp-view-editor { border: 1px solid var(--border); border-radius: 10px; }
+.pp-view-editor > summary { cursor: pointer; width: fit-content; margin: 4px; }
+.pp-view-editor-body { display: grid; gap: 16px; padding: 12px; }
+.pp-view-fields { display: flex; flex-wrap: wrap; gap: 4px 16px; border: 0; padding: 0; margin: 0; }
+.pp-view-fields legend { font-size: 13px; color: var(--muted); padding: 0 0 8px; }
+.pp-choice-picker { min-width: 150px; max-width: 100%; position: relative; }
+.pp-choice-picker > summary { cursor: pointer; list-style: none; overflow-wrap: anywhere; }
+.pp-choice-picker > summary::after { content: " ▾"; }
+.pp-choice-panel { padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; display: grid; gap: 6px; }
+.pp-choice-options { max-height: 220px; overflow-y: auto; }
+.pp-choice-option { display: flex; align-items: center; gap: 8px; min-height: 36px; cursor: pointer; font-size: 13px; overflow-wrap: anywhere; }
+.pp-choice-option[hidden] { display: none; }
+.pp-choice-option input { flex: none; accent-color: var(--accent-strong); width: 18px; height: 18px; }
+.pp-choice-picker:focus-within { outline-offset: 3px; }
+.pp-data-view[data-density="compact"] .pp-item { padding: 7px 10px; min-height: 36px; }
+.pp-data-view[data-density="compact"] .pp-item-title { font-size: 14px; }
+.pp-data-view[data-density="compact"] .pp-table th,
+.pp-data-view[data-density="compact"] .pp-table td { padding: 5px 8px; }
+@media (max-width: 600px) {
+  .pp-view-editor-body > .pp-stack > .pp-field { flex: 1 1 140px; }
+  .pp-choice-picker { min-width: 0; }
+  .pp-choice-option { min-height: 44px; }
+  .pp-view-editor-body .pp-button { min-height: 44px; }
+}
+@media (pointer: coarse) {
+  .pp-data-view[data-density="compact"] .pp-item { min-height: 44px; }
+}
 .pp-label { font-size: 13px; color: var(--muted); }
 .pp-input { min-height: 40px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
 input.pp-input, textarea.pp-input, select.pp-input { width: 100%; min-width: 0; max-width: 100%; }

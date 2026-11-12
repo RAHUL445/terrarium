@@ -12,6 +12,8 @@
 // that is exactly "{{path}}" yields the raw value (number, boolean, null); otherwise lookups are joined as text.
 // A whole string may also be "{{!path}}" (not) or "{{path == word}}" /
 // "{{path != word}}", compared as text.
+// Prefix the right operand with @ to compare another scope path instead of
+// a literal, e.g. "{{state.expanded == @row.id}}". No expressions are evaluated.
 //
 // All text goes through textContent / setAttribute: templates cannot
 // inject markup or event handlers.
@@ -20,7 +22,7 @@
 (function () {
   const profile = window.TerrariumPerformance || { measureSync: (name, run) => run() };
   const lifecycle = { activeViews: 0, activeTimers: 0, mountedTotal: 0, disposedTotal: 0 };
-  const WHOLE = /^\{\{\s*(!?)\s*([\w$.]+)\s*(?:(==|!=)\s*([\w$.-]*)\s*)?\}\}$/;
+  const WHOLE = /^\{\{\s*(!?)\s*([\w$.]+)\s*(?:(==|!=)\s*(@?[\w$.-]*)\s*)?\}\}$/;
   const PART = /\{\{\s*([\w$.]+)\s*\}\}/g;
   const MAX_BLOB_BYTES = 25 * 1024 * 1024;
   const IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -46,7 +48,10 @@
       if (whole) {
         const [, not, path, op, word] = whole;
         let value = lookup(scope, path);
-        if (op) value = (String(value ?? "") === word) === (op === "==");
+        if (op) {
+          const other = word.startsWith("@") ? lookup(scope, word.slice(1)) : word;
+          value = (String(value ?? "") === String(other ?? "")) === (op === "==");
+        }
         return not ? !truthy(value) : value;
       }
       return input.replace(PART, (_, path) => {
@@ -495,6 +500,8 @@
       this.lists = [];
       this.watchers = [];
       this.cleanups = [];
+      this.librarySnapshots = new Map(Object.entries(options.snapshot?.libraries || {}));
+      this.libraries = new Map();
       this.timers = new Map();
       this.disposed = false;
       lifecycle.activeViews++; lifecycle.mountedTotal++;
@@ -567,7 +574,8 @@
     }
 
     snapshot() {
-      return { state: structuredClone(this.state), forms: [...this.root.querySelectorAll("form[data-pp-draft]")].map(form => {
+      for (const [key, library] of this.libraries) this.librarySnapshots.set(key, library.snapshot?.());
+      return { state: structuredClone(this.state), libraries: Object.fromEntries(this.librarySnapshots), forms: [...this.root.querySelectorAll("form[data-pp-draft]")].map(form => {
         const fields = [...form.querySelectorAll("[data-pp-name]")];
         return { names: fields.map(input => input.dataset.ppName).join("|"), values: fields.map(input => ({ value: input.value, checked: input.checked })) };
       }) };
@@ -588,9 +596,17 @@
       if (this.disposed) return;
       const key = path.replace(/^state\./, "");
       if (this.state[key] === value) return;
+      const active = document.activeElement;
+      const focusKey = this.root.contains(active) ? active?.dataset?.ppFocus : null;
       this.state[key] = value;
       for (const watch of this.watchers) watch();
-      this.refresh();
+      this.refresh().then(() => {
+        if (!focusKey || this.disposed) return;
+        // Do not steal focus if the user moved to another control while loading.
+        if (document.activeElement && document.activeElement !== active && document.activeElement !== document.body) return;
+        const replacement = [...this.root.querySelectorAll("[data-pp-focus]")].find(node => node.dataset.ppFocus === focusKey);
+        replacement?.focus({ preventScroll: true });
+      });
     }
 
     refresh() {
@@ -716,8 +732,8 @@
       return region;
     }
 
-    // A node whose `if` depends on state outside a list row is shown and
-    // hidden as state changes.
+    // A node whose `if` depends on state keeps its row scope while responding
+    // to state changes. Its child queries mount only while the condition holds.
     reactive(spec, scope) {
       const holder = el("div", "pp-if");
       const inner = { ...spec };
@@ -736,7 +752,7 @@
       let region = { lists: [], watchers: [] };
       this.cleanups.push(() => this.release(region));
       const sync = () => {
-        const want = truthy(resolve(spec.if, this.scope()));
+        const want = truthy(resolve(spec.if, { ...scope, state: this.state }));
         if (want !== shown) {
           shown = want;
           this.release(region);
@@ -756,7 +772,7 @@
 
     node(spec, scope) {
       if (!spec || typeof spec !== "object") return null;
-      if ("if" in spec && typeof spec.if === "string" && (spec.if.includes("form.") || (!scope.row && spec.if.includes("state.")))) return this.reactive(spec, scope);
+      if ("if" in spec && typeof spec.if === "string" && (spec.if.includes("form.") || spec.if.includes("state."))) return this.reactive(spec, scope);
       if ("if" in spec && !truthy(resolve(spec.if, scope))) return null;
       const make = COMPONENTS[spec.type];
       const node = make ? make.call(this, spec, scope) : el("div", "pp-unsupported", `Unsupported component: ${spec.type}`);
@@ -780,8 +796,14 @@
     "view-library"(spec) {
       const node = el("div", "pp-view-library");
       if (!this.bridge.mountViewLibrary) { node.textContent = "Saved views are unavailable in this host."; return node; }
-      const library = this.bridge.mountViewLibrary(node, spec);
-      this.cleanups.push(() => library?.dispose());
+      const key = spec.id || spec.query || "default";
+      const library = this.bridge.mountViewLibrary(node, spec, { snapshot: this.librarySnapshots.get(key) });
+      this.libraries.set(key, library);
+      this.cleanups.push(() => {
+        this.librarySnapshots.set(key, library?.snapshot?.());
+        if (this.libraries.get(key) === library) this.libraries.delete(key);
+        library?.dispose();
+      });
       this.lists.push(() => library?.refresh());
       return node;
     },
@@ -1000,6 +1022,7 @@
     button(spec, scope) {
       const variant = ["primary", "danger", "ghost"].includes(spec.variant) ? ` pp-${spec.variant}` : spec.variant === "chip" ? " pp-chip" : "";
       const node = el("button", `pp-button${variant}`, resolve(spec.label, scope));
+      if (spec.focus_key) node.dataset.ppFocus = String(resolve(spec.focus_key, scope));
       if ("pressed" in spec) node.setAttribute("aria-pressed", String(truthy(resolve(spec.pressed, scope))));
       if (spec.icon && ICONS[spec.icon]) {
         node.prepend(icon(spec.icon));

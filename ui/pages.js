@@ -740,6 +740,8 @@
           group: safe.group || "",
           date: safe.date || "",
           filters: raw.plugin === fields.plugin && raw.query === fields.query ? fields.filters : undefined,
+          fields: raw.plugin === fields.plugin && raw.query === fields.query ? fields.fields : undefined,
+          density: fields.density,
         });
       };
 

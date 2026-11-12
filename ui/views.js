@@ -54,6 +54,15 @@
     return typeof layout === "string" && layout ? layout : "list";
   }
 
+  function visibleColumns(view, config) {
+    const all = view.columns || [];
+    if (typeof config?.fields !== "string") return all;
+    const selected = new Set(config.fields.split(",").filter(Boolean));
+    const unknown = [...selected].filter(key => !all.some(column => column.key === key));
+    if (unknown.length) throw new Error("Some display fields are unavailable. Customize this view to choose its fields again.");
+    return all.filter(column => column.key === (view.title_column || "title") || selected.has(column.key));
+  }
+
   function compareValues(a, b, type) {
     const kind = String(type || "string");
     const numberLike = kind === "integer" || kind === "number";
@@ -138,9 +147,12 @@
     const titleColumn = typeof view.title_column === "string" && view.title_column ? view.title_column : "title";
     const title = `{{row.${titleColumn}}}`;
     const open = { navigate: { item: "{{row.id}}" } };
-    const dateColumn = columns(view, ["date"])[0];
+    const shown = visibleColumns(view, config);
+    const explicitFields = typeof config?.fields === "string";
+    const dateColumn = shown.find(column => column.type === "date");
     const enumColumns = columns(view, ["enum"]);
-    const chips = enumColumns.map((column) => ({ text: `{{row.${column.key}__label}}` }));
+    const chips = shown.filter(column => column.type === "enum" || (explicitFields && column.key !== titleColumn && column !== dateColumn))
+      .map(column => ({ text: column.type === "enum" ? `{{row.${column.key}__label}}` : `{{row.${column.key}}}` }));
     const item = {
       type: "item",
       title,
@@ -149,7 +161,7 @@
       action: open,
     };
     if (s.layout === "table") {
-      const tableColumns = (view.columns || []).map((column) => ({
+      const tableColumns = shown.map((column) => ({
         key: column.type === "enum" ? `${column.key}__label` : column.key,
         label: column.label,
         type: column.type === "enum" ? "string" : column.type,
@@ -165,7 +177,7 @@
           columns: tableColumns,
           sort,
           dir: s.dir,
-          empty: "Nothing to show.",
+          empty: "No items match this view. Adjust its filters or capture a new item.",
           empty_focus: "Nothing matches “{{$page.focus}}”.",
           action: open,
         },
@@ -214,7 +226,7 @@
         query: entry.query,
         params,
         ...(s.group ? { group: enumColumns.some(c => c.key === s.group) ? `${s.group}__label` : s.group } : {}),
-        empty: "Nothing to show.",
+        empty: "No items match this view. Adjust its filters or capture a new item.",
         empty_focus: "Nothing matches “{{$page.focus}}”.",
         item,
       },
@@ -276,6 +288,8 @@
 
   // Used by both page placements and the host view library inside plugin pages.
   function mount(body, options) {
+    body.classList.add("pp-data-view");
+    body.dataset.density = options.config?.density === "compact" ? "compact" : "comfortable";
     let child = null, dead = false, revision = 0, signature = "";
     const load = async () => {
       const seq = ++revision;
@@ -304,7 +318,7 @@
     return handle;
   }
 
-  const api = { viewsOf, find, columns, layouts, settings, layoutFor, compareValues, prepareRows, template, wrapBridge, filterParams, resolveChoices, validateChoices, mount };
+  const api = { viewsOf, find, columns, layouts, settings, layoutFor, visibleColumns, compareValues, prepareRows, template, wrapBridge, filterParams, resolveChoices, validateChoices, mount };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.TerrariumViews = api;
 })(typeof window === "undefined" ? globalThis : window);

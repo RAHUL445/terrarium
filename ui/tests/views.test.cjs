@@ -3,6 +3,23 @@ const assert = require("node:assert/strict");
 const views = require("../views.js");
 const { rendererHarness } = require("./helpers/renderer-dom.cjs");
 
+test("visible fields keep the title and hide metadata without changing grouping", () => {
+  const entry = { query: "tasks", view: { title: "Tasks", title_column: "title", columns: [
+    { key: "title", label: "Task", type: "string" },
+    { key: "status", label: "Status", type: "enum", values: ["open"], labels: ["Open"] },
+    { key: "due", label: "Due", type: "date" },
+    { key: "tags", label: "Tags", type: "string" },
+  ] } };
+  assert.deepEqual(views.visibleColumns(entry.view, {}).map(c => c.key), ["title", "status", "due", "tags"]);
+  assert.deepEqual(views.template(entry, { layout: "table", fields: "tags" }).body.columns.map(c => c.key), ["title", "tags"]);
+  const list = views.template(entry, { layout: "list", group: "status", fields: "" }).body;
+  assert.equal(list.group, "status__label");
+  assert.equal(list.item.chips, undefined);
+  assert.equal(list.item.subtitle, undefined);
+  assert.equal(views.template(entry, { layout: "board", group: "status", fields: "" }).body.columns.length, 1);
+  assert.throws(() => views.visibleColumns(entry.view, { fields: "removed" }), /unavailable/);
+});
+
 test("unavailable saved choices fail closed without dropping valid filters", async () => {
   const view = { filters: [{ param: "lists", label: "Lists", multiple: true, choices_query: "lists" }] };
   const bridge = { query: async () => [{ value: "l1" }, { value: "l2" }] };
