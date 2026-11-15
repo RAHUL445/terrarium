@@ -118,7 +118,31 @@ fn tools_from(all: &Value, elicit: bool) -> BTreeMap<String, Tool> {
                 Vec::new()
             },
         };
+        // A renamed plugin's commands also answer to its former ids, for a
+        // release or more, so clients that saved the old tool names work.
+        let aliases: Vec<(String, Tool)> = c["former_plugins"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(|former| {
+                let rest = id.split_once('.')?.1;
+                let mut alias = tool.clone();
+                alias.id = format!("{former}.{rest}");
+                let text = alias.info["description"].as_str().unwrap_or_default();
+                alias.info["description"] =
+                    json!(format!("Deprecated alias of {name}. {text}").trim_end());
+                let mut alias_name = format!("{former}_{}", rest.replace('.', "_"));
+                if alias.kind == "query" && name.ends_with("_query") {
+                    alias_name.push_str("_query");
+                }
+                Some((alias_name, alias))
+            })
+            .collect();
         tools.insert(name, tool);
+        for (alias_name, alias) in aliases {
+            tools.entry(alias_name).or_insert(alias);
+        }
     }
     tools
 }
@@ -754,6 +778,54 @@ mod tests {
             { "id": "page.create", "kind": "action", "owner": "host", "effect": "write", "space": true,
               "params": { "title": { "type": "string", "required": true } } }
         ])
+    }
+
+    #[test]
+    fn a_renamed_plugin_keeps_its_old_tool_names_as_deprecated_aliases() {
+        let all = json!([
+            { "id": "tasks.create", "kind": "action", "owner": "plugin", "plugin": "tasks",
+              "former_plugins": ["todo"], "effect": "write", "space": true,
+              "description": "Create a task.",
+              "params": { "title": { "type": "string", "required": true } } },
+            { "id": "tasks.note_settings", "kind": "action", "owner": "plugin", "plugin": "tasks",
+              "former_plugins": ["todo"], "effect": "write", "space": true },
+            { "id": "tasks.note_settings", "kind": "query", "owner": "plugin", "plugin": "tasks",
+              "former_plugins": ["todo"], "effect": "read", "space": true },
+            { "id": "notes.create", "kind": "action", "owner": "plugin", "plugin": "notes",
+              "effect": "write", "space": true }
+        ]);
+        let tools = tools_from(&all, false);
+        let names: Vec<&str> = tools.keys().map(String::as_str).collect();
+        assert_eq!(
+            names,
+            [
+                "notes_create",
+                "tasks_create",
+                "tasks_note_settings",
+                "tasks_note_settings_query",
+                "todo_create",
+                "todo_note_settings",
+                "todo_note_settings_query"
+            ]
+        );
+        let alias = &tools["todo_create"];
+        assert_eq!(alias.id, "todo.create");
+        let listed = tool_json("todo_create", alias);
+        let text = listed["description"].as_str().unwrap();
+        assert!(
+            text.starts_with("Deprecated alias of tasks_create. Create a task."),
+            "{text}"
+        );
+        assert_eq!(
+            listed["inputSchema"],
+            tool_json("tasks_create", &tools["tasks_create"])["inputSchema"]
+        );
+        assert!(!tools["tasks_create"].info["description"]
+            .as_str()
+            .unwrap()
+            .contains("Deprecated"));
+        assert_eq!(tools["todo_note_settings_query"].id, "todo.note_settings");
+        assert_eq!(tools["todo_note_settings_query"].kind, "query");
     }
 
     #[test]

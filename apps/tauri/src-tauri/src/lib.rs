@@ -269,7 +269,7 @@ fn ms(since: Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Measures this device: To-do load (component compile + storage open),
+/// Measures this device: Task manager load (component compile + storage open),
 /// operation round trips, a query, and raw storage inserts. Runs against
 /// throwaway databases, never the user's data.
 #[tauri::command]
@@ -277,9 +277,9 @@ fn run_benchmark(
     state: State<'_, AppState>,
     plugins: State<'_, plugins::Plugins>,
 ) -> CmdResult<Benchmark> {
-    let todo = plugins
-        .package_dir("todo")
-        .ok_or("To-do plugin is not loaded")?;
+    let tasks = plugins
+        .package_dir("tasks")
+        .ok_or("Task manager plugin is not loaded")?;
     let scratch = state.data_dir.join("benchmark");
     let _ = fs::remove_dir_all(&scratch);
     let result = (|| -> CmdResult<Benchmark> {
@@ -287,7 +287,7 @@ fn run_benchmark(
         cfg.data_dir = scratch.join("plugins");
         let mut host = terrarium_runtime::PluginHost::new(cfg).map_err(err)?;
         let started = Instant::now();
-        host.load(&todo).map_err(err)?;
+        host.load(&tasks).map_err(err)?;
         let plugin_load_ms = ms(started);
 
         let calls = 50;
@@ -295,7 +295,7 @@ fn run_benchmark(
         for i in 0..calls {
             let started = Instant::now();
             host.call(
-                "todo",
+                "tasks",
                 "create",
                 &json!({ "title": format!("Benchmark task {i}") }),
             )
@@ -305,7 +305,7 @@ fn run_benchmark(
         times.sort_by(f64::total_cmp);
         let started = Instant::now();
         let params = json!({ "today": "2026-11-01", "filter": "all", "q": "" });
-        host.query("todo", "tasks", params.as_object().unwrap())
+        host.query("tasks", "tasks", params.as_object().unwrap())
             .map_err(err)?;
         let query_ms = ms(started);
 

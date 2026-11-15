@@ -15,7 +15,7 @@ fn package(name: &str) -> PathBuf {
     static BUILT: OnceLock<()> = OnceLock::new();
     let dir = |n: &str| support::package_root().join(n).canonicalize().unwrap();
     BUILT.get_or_init(|| {
-        for n in ["todo", "notes"] {
+        for n in ["tasks", "notes"] {
             build_plugin(&dir(n)).unwrap();
         }
     });
@@ -34,7 +34,7 @@ fn host(root: &TempDir, device: &str) -> PluginHost {
         speech: None,
     })
     .unwrap();
-    for name in ["todo", "notes"] {
+    for name in ["tasks", "notes"] {
         host.load(&package(name)).unwrap();
     }
     host
@@ -90,7 +90,7 @@ fn each_space_has_its_own_data_and_interop_stays_inside_it() {
     assert_eq!(count(&host, &work.id), 2);
 
     // A plugin loaded later gets a store in every open space.
-    host.load(&package("todo")).unwrap();
+    host.load(&package("tasks")).unwrap();
     assert_eq!(titles(&host, &work.id), vec!["Call client", "Ship report"]);
 
     // Removing closes the space (data kept), adding back reopens it.

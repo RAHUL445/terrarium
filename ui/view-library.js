@@ -121,6 +121,8 @@
     let validControls = false;
     let fieldControls = [];
     let saving = false;
+    let reuseShared = false;
+    let groupChoiceRefresh = () => {};
 
     const rootNode = element("div", "pp-stack");
     rootNode.style.flexDirection = "column";
@@ -131,9 +133,15 @@
     const savedSelect = element("select", "pp-input");
     savedSelect.setAttribute("aria-label", "Saved view");
     savedSelect.style.maxWidth = "240px";
-    const newButton = element("button", "pp-button", "New view");
+    const newButton = element("button", "pp-button", opts.localEditor ? "Make independent copy" : "New view");
     newButton.type = "button";
     toolbar.append(savedSelect, newButton);
+    const reuseButton = opts.localEditor ? makeButton("Use shared view", "pp-button", toolbar) : null;
+    // A page that lists saved views itself opens one (`selected`) or starts a
+    // new one from its current filters (`draft`); the picker is then hidden.
+    const selectedOnOpen = typeof spec?.selected === "string" ? spec.selected : "";
+    const draftOnOpen = spec?.draft && typeof spec.draft === "object" ? spec.draft : null;
+    toolbar.hidden = Boolean(!opts.localEditor && (spec?.selected !== undefined || draftOnOpen));
     const summary = element("p", "pp-view-summary");
     const editor = element("details", "pp-view-editor");
     editor.append(element("summary", "pp-button pp-ghost", "Customize view"));
@@ -161,6 +169,7 @@
     option(dirField.select, "desc", "Descending");
     const groupField = makeSelect("Group by", controls);
     const dateField = makeSelect("Calendar date", controls);
+    layoutField.select.addEventListener("change", () => groupChoiceRefresh());
     const densityField = makeSelect("Density", controls);
     option(densityField.select, "comfortable", "Comfortable");
     option(densityField.select, "compact", "Compact");
@@ -169,25 +178,36 @@
     filtersArea.style.flexWrap = "wrap";
     filtersArea.style.gap = "8px";
 
-    const note = element("p", "muted", "Saving changes updates every page that uses this shared view.");
+    const note = element("p", "muted", opts.localEditor
+      ? "Changes stay on this page when you press Apply. Preview changes uses the current page focus and review period. Save as shared view creates a reusable view."
+      : "Saving changes updates every page that uses this shared view.");
     const error = element("p", "error");
     error.setAttribute("role", "alert");
     error.hidden = true;
     const actions = element("div", "pp-stack");
     actions.style.flexWrap = "wrap";
     actions.style.gap = "8px";
-    const applyButton = makeButton("Apply", "pp-button pp-primary", actions);
+    const applyButton = makeButton(opts.localEditor ? "Preview changes" : "Apply", "pp-button pp-primary", actions);
     const saveButton = makeButton("Save changes", "pp-button", actions);
-    const saveAsButton = makeButton("Save as new", "pp-button", actions);
+    const saveAsButton = makeButton(opts.localEditor ? "Save as shared view" : "Save as new", "pp-button", actions);
     const removeButton = makeButton("Delete view", "pp-button", actions);
     const resetButton = makeButton("Reset changes", "pp-button pp-ghost", actions);
+    if (opts.localEditor) {
+      saveButton.hidden = true;
+      removeButton.hidden = true;
+      applyButton.title = "Preview this local draft; page Apply saves it to this placement.";
+    }
     const previewNode = element("div", "pp-view-library-preview");
     node.replaceChildren(rootNode);
     editorBody.append(controls, filtersArea, fieldsArea, note, actions);
     rootNode.append(toolbar, summary, editor, error, previewNode);
 
     function changed() {
+      if (opts.localEditor) reuseShared = false;
       summary.textContent = "Unsaved changes · Apply to preview, or save to keep them.";
+      if (opts.localEditor && validControls) {
+        try { opts.onConfigChange?.(readControlConfig()); } catch (_) { /* partially edited controls */ }
+      }
     }
     editor.addEventListener("input", changed);
     editor.addEventListener("change", changed);
@@ -236,6 +256,8 @@
         let value;
         if (control.read) value = control.read();
         else if (control.multiple) value = Array.from(control.selectedOptions, (item) => item.value).join(",");
+        else if (control.dataset.filterType === "boolean" && control.value !== "") value = control.value === "true";
+        else if (control.type === "number" && control.value !== "") value = Number(control.value);
         else value = control.value;
         const defaultValue = entryResult.entry.view.params?.[definition.param];
         // An empty selection clears a non-empty query default; otherwise it means all.
@@ -267,11 +289,13 @@
       const found = viewEntry(config);
       if (found.error) { setError(found.error); return false; }
       try {
+        const focus = typeof opts.focus === "function" ? opts.focus() : opts.focus;
         const mounted = VIEWS().mount(previewNode, {
           entry: found.entry,
           config,
           bridge,
-          focus: "",
+          focus: focus == null ? "" : String(focus),
+          period: opts.period || null,
           size: "regular",
         });
         preview = mounted;
@@ -285,6 +309,7 @@
         const renderError = firstPreviewChild?.classList.contains("pp-error") ? firstPreviewChild : null;
         if (renderError) { setError(renderError.textContent); return false; }
         setError(selectedId && !selectedAvailable ? unavailableMessage() : "");
+        opts.onPreview?.(config);
         return true;
       } catch (e) {
         if (!disposed && generationAtStart === generation) setError(String(e?.message || e));
@@ -349,8 +374,11 @@
       for (const definition of defs) {
         const field = element(definition.multiple ? "div" : "label", "pp-field");
         field.append(element("span", "pp-label", definition.label || definition.param));
-        const control = element(isChoiceFilter(definition) ? "select" : "input", "pp-input");
-        if (control.tagName === "INPUT") control.type = "text";
+        const booleanFilter = definition.type === "boolean";
+        const nativeTypedFilter = definition.type === "date" || definition.type === "number";
+        const control = element((isChoiceFilter(definition) && !nativeTypedFilter) || booleanFilter ? "select" : "input", "pp-input");
+        control.dataset.filterType = definition.type || "";
+        if (control.tagName === "INPUT") control.type = definition.type === "date" || definition.type === "number" ? definition.type : "text";
         if (definition.multiple && control.tagName === "SELECT") control.setAttribute("aria-label", `${definition.label || definition.param} (multiple)`);
         else control.setAttribute("aria-label", definition.label || definition.param);
         const saved = filterValues[definition.param];
@@ -360,7 +388,12 @@
           filterControls.set(definition.param, picker);
           field.append(picker.node); filtersArea.append(field); continue;
         }
-        if (control.tagName === "SELECT") fillChoiceSelect(control, filterChoices.get(definition.param) || [], selected, Boolean(definition.multiple), view.params?.[definition.param]);
+        if (control.tagName === "SELECT") {
+          const choices = booleanFilter
+            ? [{ value: "true", label: "Yes" }, { value: "false", label: "No" }]
+            : filterChoices.get(definition.param) || [];
+          fillChoiceSelect(control, choices, selected, Boolean(definition.multiple), view.params?.[definition.param]);
+        }
         else control.value = saved == null ? "" : String(saved);
         control.addEventListener(control.tagName === "SELECT" ? "change" : "input", () => {
           filterValues[definition.param] = control.multiple ? Array.from(control.selectedOptions, (item) => item.value).join(",") : control.value;
@@ -393,8 +426,10 @@
       layoutField.select.replaceChildren(...VIEWS().layouts(view).map((layout) => {
         const item = element("option", "", layout[0].toUpperCase() + layout.slice(1)); item.value = layout; return item;
       }));
-      labels(sortField, () => true);
-      labels(groupField, (column) => column.type === "enum");
+      const declaredSortValues = view.pagination || Array.isArray(view.sorts)
+        ? new Set((Array.isArray(view.sorts) ? view.sorts : []).flatMap(sort => Array.isArray(sort?.values) ? sort.values.map(String) : []))
+        : null;
+      labels(sortField, column => !declaredSortValues || declaredSortValues.has(String(column.key)));
       labels(dateField, (column) => column.type === "date");
       filterValues = filterDefaults(view, defs, parsed.values);
       titleInput.value = currentRecord?.title || "";
@@ -402,16 +437,31 @@
       layoutField.select.value = settings.layout;
       sortField.select.value = settings.sort;
       dirField.select.value = settings.dir;
-      groupField.select.value = settings.group;
+      let groupInitialized = false;
+      groupChoiceRefresh = () => {
+        const board = layoutField.select.value === "board";
+        labels(groupField, column => column.type === "enum" || (!board && column.type === "string"));
+        groupField.select.value = VIEWS().settings(view, {
+          ...config,
+          layout: layoutField.select.value,
+          group: groupInitialized ? groupField.select.value : settings.group,
+        }).group;
+        groupInitialized = true;
+      };
+      groupChoiceRefresh();
       dateField.select.value = settings.date;
       const supports = new Set(VIEWS().layouts(view));
       layoutField.field.hidden = supports.size < 2;
-      groupField.field.hidden = !columns.some((column) => column.type === "enum");
+      groupField.field.hidden = !columns.some((column) => column.type === "enum" || column.type === "string");
       dateField.field.hidden = !columns.some((column) => column.type === "date");
       saveButton.disabled = !selectedId || !selectedAvailable;
       removeButton.disabled = !selectedId || !selectedAvailable;
+      if (reuseButton) reuseButton.disabled = !selectedId || !selectedAvailable;
+      newButton.disabled = false;
+      saveAsButton.disabled = false;
       validControls = true;
       describe(config);
+      if (opts.localEditor) opts.onConfigChange?.(readControlConfig());
       return true;
     }
     function setDraft(config, record, previewConfig = config) {
@@ -419,6 +469,7 @@
       currentRecord = record || null;
       selectedId = record?.id || "";
       selectedAvailable = Boolean(record);
+      if (!record) reuseShared = false;
       draftConfig = { ...(config || {}) };
       initialized = true;
       titleInput.value = record?.title || "";
@@ -438,6 +489,7 @@
         const record = await service("view_get", { id });
         if (disposed || request !== recordRequest) return false;
         if (!record || typeof record !== "object") throw new Error("Saved view was not returned.");
+        if (opts.localEditor) reuseShared = false;
         return setDraft(record.config, record);
       } catch (e) {
         if (!disposed && request === recordRequest) setError(String(e?.message || e));
@@ -450,6 +502,37 @@
       if (!first) return { plugin: pluginId, query: "" };
       return { plugin: pluginId, query: first.query, layout: "list", sort: "", dir: "asc", group: "", date: "", filters: "{}" };
     }
+    // Only declared filters with plain values are kept; unknown layouts and
+    // sorts fall back through the normal view settings.
+    function configFromDraft(draft) {
+      const config = defaultConfig();
+      for (const key of ["layout", "sort", "dir", "group", "date", "density"]) {
+        if (typeof draft[key] === "string" && draft[key]) config[key] = draft[key];
+      }
+      // `layouts` maps a page's own layout name to view settings, e.g.
+      // {"kanban": {"layout": "board", "group": "board_lane"}}.
+      const mapped = draft.layouts && typeof draft.layouts === "object" && typeof draft.layout === "string"
+        && Object.hasOwn(draft.layouts, draft.layout) ? draft.layouts[draft.layout] : null;
+      if (mapped && typeof mapped === "object") {
+        for (const key of ["layout", "group", "sort", "dir", "date"]) {
+          if (typeof mapped[key] === "string" && mapped[key]) config[key] = mapped[key];
+        }
+      }
+      const definitions = new Set((VIEWS().find(plugins, pluginId, config.query)?.view.filters || []).map((filter) => filter.param));
+      const filters = {};
+      for (const [key, value] of Object.entries(draft.filters && typeof draft.filters === "object" ? draft.filters : {})) {
+        if (definitions.has(key) && value != null && value !== "" && ["string", "number", "boolean"].includes(typeof value)) filters[key] = value;
+      }
+      config.filters = JSON.stringify(filters);
+      return config;
+    }
+    async function startDraft(draft) {
+      const ok = await setDraft(configFromDraft(draft), null);
+      if (disposed) return false;
+      if (typeof draft.title === "string" && !titleInput.value) titleInput.value = draft.title.slice(0, 40);
+      summary.textContent = "New view · Name it, then Save as new to keep it.";
+      return ok;
+    }
     async function refresh() {
       if (disposed) return false;
       if (!plugin) { setError(`Plugin “${pluginId || "(missing)"}” is unavailable.`); return false; }
@@ -461,6 +544,25 @@
         savedSelect.replaceChildren();
         option(savedSelect, "", "Choose a saved view");
         for (const record of own) option(savedSelect, String(record.id), record.title || "Untitled view");
+        if (opts.localEditor && !initialized && opts.config?.saved_view) {
+          const requestedId = String(opts.config.saved_view);
+          if (!own.some(record => String(record.id) === requestedId)) {
+            selectedId = requestedId;
+            selectedAvailable = false;
+            currentRecord = { id: requestedId, title: "Unavailable shared view" };
+            reuseShared = true;
+            initialized = true;
+            option(savedSelect, requestedId, `Unavailable view · ${requestedId}`);
+            savedSelect.value = requestedId;
+            saveButton.disabled = true;
+            removeButton.disabled = true;
+            newButton.disabled = true;
+            saveAsButton.disabled = true;
+            if (reuseButton) reuseButton.disabled = true;
+            setError(unavailableMessage());
+            return false;
+          }
+        }
         const selectedRecord = own.find((record) => String(record.id) === String(selectedId));
         if (selectedId && !selectedRecord) {
           selectedAvailable = false;
@@ -484,7 +586,10 @@
           return preview?.refresh ? preview.refresh().then(() => true) : true;
         }
         if (initialized) return preview?.refresh ? preview.refresh().then(() => true) : true;
-        if (opts.snapshot?.config && !initialized) {
+        if (draftOnOpen) return startDraft(draftOnOpen);
+        const snapshotFits = !selectedOnOpen || opts.snapshot?.selectedId === selectedOnOpen;
+        if (selectedOnOpen && !snapshotFits) return loadRecord(selectedOnOpen);
+        if (opts.snapshot?.config && !initialized && snapshotFits) {
           const snapshot = opts.snapshot;
           const record = own.find(record => record.id === snapshot.selectedId) || (snapshot.selectedId ? { id: snapshot.selectedId, title: snapshot.title, config: snapshot.config } : null);
           await setDraft(snapshot.config, record, snapshot.appliedConfig || snapshot.config);
@@ -498,6 +603,16 @@
           if (snapshot.dirty) changed();
           return true;
         }
+        if (opts.localEditor && opts.config?.saved_view) {
+          const record = own.find(item => String(item.id) === String(opts.config.saved_view));
+          if (record) {
+            const ok = await setDraft(record.config, record);
+            reuseShared = Boolean(ok);
+            return ok;
+          }
+          setError(unavailableMessage());
+        }
+        if (opts.localEditor && opts.config && !opts.config.saved_view) return setDraft(opts.config, null);
         return setDraft(defaultConfig(), null);
       } catch (e) {
         if (!disposed && request === refreshRequest) setError(String(e?.message || e));
@@ -511,7 +626,12 @@
         if (parsed.error) throw new Error(parsed.error);
         draftConfig = config;
         const ok = await renderPreview(config);
-        if (ok) { summary.textContent = "Previewing changes · Save changes or Save as new to keep them."; editor.open = false; }
+        if (ok) {
+          summary.textContent = opts.localEditor
+            ? "Previewing local changes · Press Apply to save them to this page."
+            : "Previewing changes · Save changes or Save as new to keep them.";
+          editor.open = false;
+        }
         return ok;
       } catch (e) { setError(String(e?.message || e)); return false; }
     }
@@ -533,6 +653,15 @@
         });
         if (disposed) return false;
         bridge.changed?.();
+        if (opts.localEditor) {
+          selectedId = record.id;
+          currentRecord = record;
+          selectedAvailable = true;
+          reuseShared = false;
+          await refresh();
+          toast("Saved as shared view", "ok");
+          return true;
+        }
         currentRecord = record;
         selectedId = record.id;
         draftConfig = { ...record.config };
@@ -540,6 +669,7 @@
         savedSelect.value = selectedId;
         await setDraft(record.config, record);
         toast(updating ? "Updated shared view" : "Saved new view", "ok");
+        opts.onSaved?.(record);
         return true;
       } catch (e) { setError(String(e?.message || e)); editor.open = true; return false; }
       finally {
@@ -569,11 +699,29 @@
       if (!savedSelect.value) { savedSelect.value = selectedId; return; }
       loadRecord(savedSelect.value);
     });
-    newButton.addEventListener("click", () => { setDraft(defaultConfig(), null); });
+    newButton.addEventListener("click", () => {
+      if (opts.localEditor && selectedId && selectedAvailable) {
+        reuseShared = false;
+        summary.textContent = "Independent local copy · edits affect this page only.";
+        return;
+      }
+      setDraft(defaultConfig(), null);
+    });
+    reuseButton?.addEventListener("click", () => {
+      if (!selectedId || !selectedAvailable) return;
+      reuseButton.disabled = true;
+      setDraft(currentRecord.config, currentRecord).then(ok => {
+        if (!ok || disposed) { reuseButton.disabled = !selectedAvailable; return; }
+        reuseShared = true;
+        summary.textContent = `Using shared view · ${currentRecord?.title || "Saved view"}. Changes to it appear on every page that uses it.`;
+        reuseButton.disabled = false;
+      });
+    });
     resetButton.addEventListener("click", () => { setDraft(currentRecord?.config || defaultConfig(), currentRecord); });
     queryField.select.addEventListener("change", () => {
       const next = { ...defaultConfig(), query: queryField.select.value };
-      setDraft(next, currentRecord);
+      if (opts.localEditor) savedSelect.value = "";
+      setDraft(next, opts.localEditor ? null : currentRecord);
     });
     applyButton.addEventListener("click", apply);
     saveButton.addEventListener("click", () => save(false));
@@ -584,6 +732,12 @@
     return {
       ready,
       refresh,
+      select: (id) => {
+        if (disposed || !id || String(id) === String(selectedId)) return Promise.resolve(false);
+        return loadRecord(String(id));
+      },
+      config: () => opts.localEditor && reuseShared && selectedId ? { saved_view: selectedId } : configFromFields(),
+      validate: () => Boolean(validControls && (!reuseShared || selectedAvailable)),
       flush: async () => preview?.flush ? preview.flush() : true,
       snapshot: () => ({ selectedId, title: titleInput.value, config: validControls ? readControlConfig() : draftConfig, appliedConfig,
         open: editor.open, dirty: summary.textContent.startsWith("Unsaved") || summary.textContent.startsWith("Previewing") }),

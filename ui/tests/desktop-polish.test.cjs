@@ -66,7 +66,7 @@ test('input wording and new reminder defaults follow pointer type', async () => 
 });
 
 test('task toggles show completion or reopen feedback and only offer a note when requested', async () => {
-  const actions = walk(read('todo', 'ui/page-main.json')).filter(n => n.op === 'toggle' && n.followup);
+  const actions = walk(read('tasks', 'ui/page-main.json')).filter(n => n.op === 'toggle' && n.followup);
   assert.equal(actions.length, 4); // List, board, Eisenhower and task sheet.
   for (const action of actions) {
     const ui = rendererHarness(); const toasts = []; let askNote = true;
@@ -98,7 +98,7 @@ test('voice send offers Open in its destination and preserves the created ID', a
   const view = ui.renderer.mount(ui.root, {}, bridge({ action: async () => ({ id: 'new-task', message: 'Sent to To-do' }), toast: (message, kind, action) => { offer = action; }, openPluginItem: (...args) => opened.push(args) }));
   await view.ready; await view.act(action, { row: { id: 'capture' } });
   assert.equal(offer.label, 'Open'); await offer.run();
-  assert.deepEqual(opened, [['todo', 'new-task']]);
+  assert.deepEqual(opened, [['tasks', 'new-task']]);
   view.dispose();
 });
 

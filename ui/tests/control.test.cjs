@@ -31,7 +31,7 @@ function harness(responses = {}, confirmAnswer = true) {
     statusChip: status => ({ chip: status }),
     getSelection: () => ({ selectAllChildren() {} }),
     navigator: { clipboard: { writeText: async () => {} } },
-    window: { terrariumConfirm: async (text) => { confirms.push(text); return confirmAnswer; } },
+    window: { TerrariumPluginIds: require('../plugin-ids.js'), terrariumConfirm: async (text) => { confirms.push(text); return confirmAnswer; } },
     toast(text) { toasts.push(text); },
     currentSpace: 'personal',
     pluginList: { plugins: [{ id: 'todo', pages: [{ id: 'main' }] }] },
@@ -131,6 +131,13 @@ test('a link without a page opens the plugin first page', async () => {
   const h = harness();
   assert.equal(await h.context.controlUi({ action: 'open', plugin: 'todo' }), true);
   assert.deepEqual(JSON.parse(JSON.stringify(h.opened)), [{ plugin: 'todo', page: 'main', item: null }]);
+});
+
+test('a link naming a former plugin id opens the renamed plugin', async () => {
+  const h = harness();
+  h.context.pluginList.plugins = [{ id: 'tasks', former_ids: ['todo'], pages: [{ id: 'main' }] }];
+  assert.equal(await h.context.controlUi({ action: 'open', plugin: 'todo', item: 't1' }), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.opened)), [{ plugin: 'tasks', page: 'main', item: 't1' }]);
 });
 
 test('an unknown plugin is reported and not opened', async () => {

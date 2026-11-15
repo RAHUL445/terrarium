@@ -9,14 +9,28 @@
   const ARROWS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"];
   const MAX_PLACEMENTS = 40;
   const BUILT_IN = { id: "_host", name: "Built in", pages: [], widgets: [], icon: "layers", color: "#64748B" };
+  const DASHBOARD = "Dashboard";
+  const DASHBOARD_PIN_KEY = "pp-dashboard-pinned:";
+  // The system page was stored as "Home"; it now shows as the Dashboard
+  // unless the user gave it a title of their own. Nothing stored changes.
+  function navOrder(a, b) {
+    return Number(a?.position || 0) - Number(b?.position || 0) || String(a?.title || "").localeCompare(String(b?.title || "")) || String(a?.id || "").localeCompare(String(b?.id || ""));
+  }
+  function dashboard(page) {
+    if (!page?.system) return page;
+    return { ...page, title: !page.title || page.title === "Home" ? DASHBOARD : page.title, icon: page.icon || "grid" };
+  }
 
   window.TerrariumPages = class {
+    static dashboard(page) { return dashboard(page); }
+
     constructor(options) {
       this.o = options;
       this.el = options.el;
       this.grid = window.TerrariumGrid;
       this.space = null;
       this.pages = [];
+      this.folders = [];
       this.currentId = null;
       this.page = null;
       this.placements = [];
@@ -26,6 +40,9 @@
       this.cards = new Map();
       this.seq = 0;
       this.added = 0;
+      this.pinStates = new Map();
+      try { this.pinStorage = window.terrariumStorage || localStorage; }
+      catch (_) { this.pinStorage = { getItem: () => null, setItem: () => { throw Error("Unavailable"); } }; }
       this.narrow = matchMedia("(max-width: 760px)");
       this.narrow.addEventListener("change", () => { this.layout(); if (this.o.onChange) this.o.onChange(); else this.navigation(); });
       this.$("page-edit").addEventListener("click", () => this.edit());
@@ -37,6 +54,17 @@
       this.io = null;
       this.mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
       this.$("page-new").addEventListener("click", () => this.create());
+      this.$("page-weekly-review")?.addEventListener("click", () => this.createWeeklyReview());
+      this.$("page-period-mode")?.addEventListener("change", () => this.updatePeriodControls());
+      this.$("page-pin")?.addEventListener("click", () => this.togglePin({ kind: "page", id: this.page.id }));
+      this.$("page-pins-manage")?.addEventListener("click", () => this.managePins());
+      const pageMenu = this.$("page-menu");
+      pageMenu?.addEventListener("click", (event) => { if (event.target.closest?.("button")) pageMenu.removeAttribute("open"); });
+      pageMenu?.addEventListener("keydown", (event) => { if (event.key === "Escape" && pageMenu.open) { pageMenu.removeAttribute("open"); pageMenu.querySelector("summary")?.focus(); } });
+      this.$("page-pins-close")?.addEventListener("click", () => this.$("page-pins-dialog").close());
+      this.$("page-library-close")?.addEventListener("click", () => this.$("page-library-dialog").close());
+      this.$("page-library-dialog")?.addEventListener("close", () => { this.pageLibrary?.dispose(); this.pageLibrary = null; });
+      this.$("page-layout-mode")?.addEventListener("change", () => this.layout());
       document.querySelectorAll("[data-page-add]").forEach((button) => button.addEventListener("click", () => this.openCatalog()));
       this.$("page-add-close").addEventListener("click", () => this.$("page-add-dialog").close());
       this.$("page-config-cancel").addEventListener("click", () => this.$("page-config-dialog").close());
@@ -50,13 +78,15 @@
         });
       }
       this.$("page-focus-chip").addEventListener("click", () => { this.edit(); this.$("page-focus-input").focus(); });
-      // ⌘1–9 (Ctrl elsewhere) opens the page at that place in the tabs.
+      // ⌘1 (Ctrl elsewhere) opens Today; ⌘2–9 open the pins in tab order.
       document.addEventListener("keydown", (event) => {
         if (!(this.mac ? event.metaKey : event.ctrlKey) || event.altKey || event.shiftKey || !/^[1-9]$/.test(event.key)) return;
-        const page = this.pages[Number(event.key) - 1];
-        if (!page || document.querySelector("dialog[open]")) return;
+        if (document.querySelector("dialog[open]")) return;
+        if (event.key === "1" && this.o.today) { event.preventDefault(); this.o.today(); return; }
+        const pin = this.pins().pins[Number(event.key) - 2];
+        if (!pin) return;
         event.preventDefault();
-        this.o.show(page.id);
+        this.openPin(pin);
       });
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape" || !this.editing || document.querySelector("dialog[open]")) return;
@@ -74,8 +104,14 @@
     get editing() { return this.draft !== null; }
     get home() { return this.pages.find((page) => page.system) || null; }
     isHome() { return !this.page || this.page.system; }
-    title() { return this.page?.title || "Home"; }
+    isDashboard() { return this.isHome(); }
+    title() { return this.page?.title || DASHBOARD; }
     list() { return this.draft || this.placements; }
+    mode() {
+      const select = this.$("page-layout-mode");
+      return this.editing && select ? (select.value === "flow" ? "flow" : "grid")
+        : (this.page?.layout_mode === "flow" ? "flow" : "grid");
+    }
     mounted() { return [...this.views.values()]; }
     key(placement) { return `${placement.plugin}/${placement.widget}`; }
     sessionKey(id) { return `${this.space}/placement/${id}`; }
@@ -131,8 +167,11 @@
 
     reset() {
       this.seq++;
+      this.pageLibrary?.dispose(); this.pageLibrary = null;
+      this.$("page-library-dialog")?.close();
+      this.$("page-pins-dialog")?.close();
       this.unmount();
-      this.space = null; this.pages = []; this.page = null; this.placements = []; this.draft = null; this.currentId = null;
+      this.space = null; this.pages = []; this.folders = []; this.page = null; this.placements = []; this.draft = null; this.currentId = null;
     }
 
     unmount() {
@@ -178,8 +217,13 @@
         pages = await this.service("pages_list", { space });
       }
       if (seq !== this.seq) return false;
-      this.pages = pages;
-      if (!pages.some((page) => page.id === this.currentId)) this.currentId = this.home?.id || null;
+      const folders = await this.loadFolders(space);
+      if (seq !== this.seq) return false;
+      this.pages = pages.map(dashboard);
+      this.folders = folders || (this.foldersSpace === space ? this.folders : []);
+      this.foldersSpace = space;
+      this.pinDashboardOnce();
+      if (!this.pages.some((page) => page.id === this.currentId)) this.currentId = this.home?.id || null;
       return this.render(seq);
     }
 
@@ -209,11 +253,13 @@
     // Whether the draft differs from what is saved.
     dirty() {
       if (!this.editing) return false;
-      const shape = (list) => JSON.stringify(list.map((p) => [p.id, p.plugin, p.widget, p.x, p.y, p.w, p.h, p.config || {}, p.focus ?? null]).sort());
+      const shape = (list) => JSON.stringify(list.map((p) => [p.id, p.plugin, p.widget, p.x, p.y, p.w, p.h, p.flow_order ?? null, p.config || {}, p.focus ?? null]).sort());
       const title = this.$("page-title-input").value.trim();
       return shape(this.draft) !== shape(this.placements)
+        || this.mode() !== (this.page?.layout_mode === "flow" ? "flow" : "grid")
         || (title !== "" && title !== this.page?.title)
         || this.$("page-focus-input").value.trim() !== (this.page?.focus || "")
+        || JSON.stringify(this.readPeriod()) !== JSON.stringify(this.page?.period || null)
         || (this.draftIcon ?? null) !== (this.page?.icon ?? null);
     }
 
@@ -223,7 +269,12 @@
       const state = await this.service("page_get", { page: id });
       if (seq !== this.seq) return false;
       this.unmount();
-      this.page = state.page;
+      this.page = dashboard(state.page);
+      if (this.page.archived) {
+        this.placements = [];
+        this.$("widgets").replaceChildren(this.el("p", {}, "This page is in Trash. Restore it from Pages and folders."), this.el("button", { type: "button", onclick: () => this.browsePages() }, "Open Trash"));
+        this.navigation(); return false;
+      }
       // Edits merged from other devices may overlap or leave gaps.
       this.placements = this.grid.compact(state.placements.map((p) => this.grid.clamp(p, this.spec(p).size)));
       if (this.draft) this.draft = this.draft.filter((p) => p.id.startsWith("new-") || this.placements.some((q) => q.id === p.id));
@@ -282,6 +333,7 @@
       const tools = this.el("div", { class: "page-tools", role: "group", "aria-label": `${name} tools` },
         tool("page-up", `Move ${name} up`, "chevron-up", () => this.step(placement.id, -1)),
         tool("page-down", `Move ${name} down`, "chevron-down", () => this.step(placement.id, 1)),
+        tool("page-copy", `Duplicate ${name}`, "copy", () => this.duplicatePlacement(placement.id)),
         entry && (Object.keys(entry.template?.page?.config || {}).length || this.follows(entry)) ? tool("page-settings", `Settings for ${name}`, "sliders", () => this.openSettings(placement.id)) : "",
         tool("page-remove", `Remove ${name}`, "trash", () => this.removePlacement(placement.id)));
       head.prepend(move);
@@ -377,7 +429,7 @@
             const next = JSON.stringify(saved.config);
             if (inner && next === signature) return inner.refresh();
             inner?.dispose(); body.replaceChildren(); signature = next;
-            inner = this.viewWidget(body, placement, saved.config);
+            inner = this.viewWidget(body, placement, { ...saved.config, follow_page_period: config.follow_page_period });
             await inner.ready;
           } catch (error) {
             if (dead || revision !== seq) return;
@@ -406,6 +458,10 @@
       }
       const focus = this.focusOf(placement);
       const view = window.TerrariumViews.mount(body, { entry: found, config,
+        period: config.follow_page_period ? () => {
+          if (!this.page?.period) throw new Error("Choose a review period in page settings, or turn off Follow page period for this view.");
+          return window.TerrariumReviewPeriod.resolve(this.page.period);
+        } : null,
         bridge: this.o.bridge(found.plugin.id), focus, mount: this.o.mount,
         snapshot: this.o.session.get(this.sessionKey(placement.id)), size: this.grid.sizeClass(placement), pageTitle: this.page?.title || "" });
       view.sessionKey = this.sessionKey(placement.id);
@@ -452,9 +508,11 @@
       let update = () => {};
       let validate = () => true;
       let groups = [];
+      let settingsHandle = null;
       let initialFocus = "input:not([type=radio]):not([type=checkbox]), select, button.page-choice-chip, input:checked";
       if (entry.builtIn && placement.widget === "view") {
         const widget = this.viewSettings(placement, entry, summary, section);
+        settingsHandle = widget;
         read = widget.read;
         focus = widget.focus;
         update = widget.update;
@@ -491,6 +549,7 @@
       this.$("page-config-fields").replaceChildren(...groups);
       update();
       const dialog = this.$("page-config-dialog");
+      dialog.addEventListener("close", () => settingsHandle?.dispose?.(), { once: true });
       this.$("page-config-form").onsubmit = (event) => {
         event.preventDefault();
         if (!validate()) return;
@@ -508,252 +567,121 @@
     }
 
     viewSettings(placement, entry, summary, section) {
-      const rows = [];
       const fields = placement.config || {};
       const apps = window.TerrariumViews.viewsOf(this.plugins || [])
         .map((view) => view.plugin)
         .filter((plugin, index, list) => list.findIndex((item) => item.id === plugin.id) === index)
         .sort((a, b) => a.name.localeCompare(b.name));
-      const viewsFor = (pluginId) => window.TerrariumViews.viewsOf(this.plugins || [])
-        .filter((view) => view.plugin.id === pluginId)
-        .sort((left, right) => left.view.title.localeCompare(right.view.title));
-      const row = (name, label, control, help = "") => this.el("div", { class: "page-config-field" },
-        this.el("span", { class: "page-config-label", id: `pp-cfg-${name}` }, label), control, help || "");
-      const saved = this.el("select", { "aria-label": "Saved view" },
-        this.el("option", { value: "" }, "Custom view for this page"));
-      if (fields.saved_view) saved.append(this.el("option", { value: fields.saved_view, selected: true }, "Saved view"));
-      const savedHelp = this.el("p", { class: "page-config-help" }, "Choose a shared view created in the app's Saved views tab. Changes to that view appear on every page that uses it.");
-      this.service("views_list", { space: this.space }).then(views => {
-        const keep = saved.value;
-        saved.replaceChildren(this.el("option", { value: "" }, "Custom view for this page"),
-          ...views.map(view => this.el("option", { value: view.id }, view.title)));
-        if (keep && !views.some(view => view.id === keep)) saved.append(this.el("option", { value: keep }, "Unavailable saved view"));
-        saved.value = keep;
-      }).catch(error => { savedHelp.textContent = `Could not load saved views: ${String(error)}`; });
+      const app = document.createElement("select");
+      app.className = "pp-input";
+      app.setAttribute("aria-label", "App");
+      for (const plugin of apps) {
+        const option = document.createElement("option");
+        option.value = plugin.id;
+        option.textContent = plugin.name;
+        app.append(option);
+      }
+      app.value = fields.plugin || apps[0]?.id || "";
+      const appRow = this.el("div", { class: "page-config-field" }, this.el("span", { class: "page-config-label" }, "App"), app);
+      const editorNode = document.createElement("div");
+      editorNode.className = "pp-view-library";
+      let library = null;
+      let editorGeneration = 0;
+      let editorDisposed = false;
+      let queryConfig = fields;
+      let temporalAvailable = false;
+      let previewScopeDirty = false;
+      const periodInput = document.createElement("input");
+      periodInput.type = "checkbox";
+      periodInput.checked = Boolean(fields.follow_page_period);
+      periodInput.setAttribute("aria-label", "Follow page review period");
+      const periodRow = this.el("label", { class: "page-config-field" }, periodInput, this.el("span", {}, "Follow page review period"));
+      periodRow.hidden = true;
+      const focus = this.focusControls(placement, () => { previewScopeDirty = true; update(); });
+      let update = () => {};
 
-      const app = this.el("select", { "aria-labelledby": "pp-cfg-view-app" },
-        this.el("option", { value: "" }, "Choose an app"),
-        ...apps.map((plugin) => this.el("option", { value: plugin.id, selected: fields.plugin === plugin.id }, plugin.name)));
-      const data = this.el("select", { "aria-labelledby": "pp-cfg-view-data", disabled: true }, this.el("option", { value: "" }, "Choose data"));
-      const dataAlert = this.el("p", { class: "page-config-help", role: "alert", hidden: true }, "Pick the data to show.");
-
-      const layoutId = `pp-cfg-view-layout-${placement.id}`;
-      const layoutOptions = [
-        { value: "list", label: "List" },
-        { value: "table", label: "Table" },
-        { value: "board", label: "Board", help: "Board needs a column with fixed values." },
-        { value: "calendar", label: "Calendar", help: "Calendar needs a date column." },
-      ];
-      const layoutByValue = new Map();
-      const layoutHints = new Map();
-      const layoutRows = layoutOptions.map((option) => {
-        const input = this.el("input", {
-          type: "radio",
-          name: layoutId,
-          value: option.value,
-          checked: (fields.layout || "list") === option.value,
-        });
-        layoutByValue.set(option.value, input);
-        if (option.help) {
-          const id = `pp-cfg-view-${option.value}-hint-${placement.id}`;
-          const hint = this.el("span", { class: "page-config-help", id, hidden: true }, option.help);
-          layoutHints.set(option.value, { hint, id });
-        }
-        return this.el("label", {}, input, this.el("span", {}, option.label));
-      });
-      const layoutGroup = this.el("div", { class: "page-segmented", role: "radiogroup", "aria-labelledby": "pp-cfg-view-layout" }, ...layoutRows);
-
-      const sort = this.el("select", { "aria-labelledby": "pp-cfg-view-sort" }, this.el("option", { value: "" }, "Default order"));
-      const dirId = `pp-cfg-view-dir-${placement.id}`;
-      const dirByValue = new Map();
-      const dirGroup = this.el("div", { class: "page-segmented", role: "radiogroup", "aria-labelledby": "pp-cfg-view-dir" },
-        ...[
-          { value: "asc", label: "Ascending" },
-          { value: "desc", label: "Descending" },
-        ].map((option) => {
-          const input = this.el("input", {
-            type: "radio",
-            name: dirId,
-            value: option.value,
-            checked: (fields.dir || "asc") === option.value,
-          });
-          dirByValue.set(option.value, input);
-          return this.el("label", {}, input, this.el("span", {}, option.label));
-        }));
-      const group = this.el("select", { "aria-labelledby": "pp-cfg-view-group" });
-      const date = this.el("select", { "aria-labelledby": "pp-cfg-view-date" });
-      const groupLabel = this.el("span", { class: "page-config-label", id: "pp-cfg-view-group" }, "Group by");
-      const groupRow = this.el("div", { class: "page-config-field" }, groupLabel, group);
-      const dateRow = row("view-date", "Date", date);
-
-      const focus = this.focusControls(placement, () => update());
-
-      const readRaw = () => ({
-        plugin: app.value,
-        query: data.value,
-        layout: [...layoutByValue.values()].find((input) => input.checked)?.value || "list",
-        sort: sort.value,
-        dir: [...dirByValue.values()].find((input) => input.checked)?.value || "asc",
-        group: group.value,
-        date: date.value,
-      });
-      const clean = (config) => Object.fromEntries(Object.entries(config).filter(([, value]) => value !== ""));
-      const selected = () => window.TerrariumViews.find(this.plugins, app.value, data.value);
-      const layoutLabel = (name) => ({ list: "List", table: "Table", board: "Board", calendar: "Calendar" }[name] || "List");
-
-      const fillData = (reset) => {
-        const options = app.value ? viewsFor(app.value) : [];
-        const keep = reset ? "" : data.value;
-        data.replaceChildren(
-          this.el("option", { value: "" }, "Choose data"),
-          ...options.map((item) => this.el("option", { value: item.query, selected: item.query === keep || (!keep && fields.query === item.query) }, item.view.title)),
-        );
-        data.disabled = !app.value;
-        if (reset) data.value = "";
+      const setTemporal = (config) => {
+        const selected = config?.plugin && config?.query
+          ? window.TerrariumViews.find(this.plugins, config.plugin, config.query)
+          : null;
+        temporalAvailable = Boolean(selected?.view && Object.hasOwn(selected.view, "temporal") && selected.view.temporal != null);
+        periodRow.hidden = !temporalAvailable;
       };
-
-      const apply = () => {
-        const found = selected();
-        const config = readRaw();
-        const safe = found ? window.TerrariumViews.settings(found.view, config) : {
-          layout: config.layout || "list",
-          sort: config.sort || "",
-          dir: config.dir || "asc",
-          group: config.group || "",
-          date: config.date || "",
-        };
-        const allowed = found ? window.TerrariumViews.layouts(found.view) : [];
-        for (const [value, input] of layoutByValue) {
-          const available = allowed.includes(value);
-          input.disabled = !available;
-          const hint = layoutHints.get(value);
-          if (hint) {
-            hint.hint.hidden = available;
-            if (!available) input.setAttribute("aria-describedby", hint.id);
-            else input.removeAttribute("aria-describedby");
-          }
-        }
-        const chosenLayout = layoutByValue.get(safe.layout) || layoutByValue.get("list");
-        if (chosenLayout) chosenLayout.checked = true;
-
-        const columns = found?.view?.columns || [];
-        sort.disabled = !found;
-        const sortOptions = [this.el("option", { value: "" }, "Default order"),
-          ...columns.map((column) => this.el("option", { value: column.key }, column.label || column.key))];
-        sort.replaceChildren(...sortOptions);
-        sort.value = safe.sort || "";
-        for (const [value, input] of dirByValue) {
-          input.disabled = !found;
-          input.checked = value === safe.dir;
-        }
-
-        const enumColumns = columns.filter((column) => column.type === "enum");
-        const groupColumns = columns.filter((column) => column.type === "enum" || column.type === "string");
-        const dateColumns = columns.filter((column) => column.type === "date");
-        const board = safe.layout === "board";
-        const list = safe.layout === "list";
-        groupRow.hidden = !found || !(list || board);
-        if (!groupRow.hidden) {
-          groupLabel.textContent = board ? "Columns from" : "Group by";
-          const options = board
-            ? enumColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key))
-            : [this.el("option", { value: "" }, "No grouping"),
-              ...groupColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key))];
-          group.replaceChildren(...options);
-          group.value = safe.group || (board ? enumColumns[0]?.key || "" : "");
-        } else {
-          group.value = "";
-        }
-
-        dateRow.hidden = !found || safe.layout !== "calendar";
-        if (!dateRow.hidden) {
-          date.replaceChildren(...dateColumns.map((column) => this.el("option", { value: column.key }, column.label || column.key)));
-          date.value = safe.date || dateColumns[0]?.key || "";
-        } else {
-          date.value = "";
-        }
-      };
-
-      const update = () => {
-        apply();
-        for (const element of [app, data, sort, group, date, ...layoutByValue.values(), ...dirByValue.values()]) {
-          if (saved.value) element.disabled = true;
-        }
-        dataAlert.hidden = true;
-        const found = selected();
-        const parts = this.filterParts(entry, read(), focus.read());
-        if (found) summary.textContent = `${found.view.title} as ${layoutLabel(read().layout)}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
-        else summary.textContent = parts.length ? `Choose data to show · ${parts.join(" · ")}` : "Choose data to show";
-      };
-
-      const resetDisplay = () => {
-        (layoutByValue.get("list") || {}).checked = true;
-        sort.value = "";
-        group.value = "";
-        date.value = "";
-        (dirByValue.get("asc") || {}).checked = true;
-      };
-
-      fillData(false);
-      saved.addEventListener("change", () => {
-        app.disabled = false;
-        data.disabled = !app.value;
-        update();
-      });
-      app.addEventListener("change", () => {
-        fillData(true);
-        resetDisplay();
-        update();
-      });
-      data.addEventListener("change", update);
-      sort.addEventListener("change", update);
-      group.addEventListener("change", update);
-      date.addEventListener("change", update);
-      for (const input of layoutByValue.values()) input.addEventListener("change", update);
-      for (const input of dirByValue.values()) input.addEventListener("change", update);
-
-      rows.push(section("Saved view", [saved, savedHelp]), summary, section("Data", [
-        row("view-app", "App", app),
-        row("view-data", "Data", data),
-        dataAlert,
-      ]));
-      rows.push(section("Display", [
-        row("view-layout", "Show as", this.el("div", {}, layoutGroup, ...[...layoutHints.values()].map((item) => item.hint))),
-        row("view-sort", "Sort by", sort),
-        row("view-dir", "Order", dirGroup),
-        groupRow,
-        dateRow,
-      ]));
-      rows.push(section("Filters", focus.rows));
-
-      const read = () => {
-        if (saved.value) return { saved_view: saved.value };
-        const found = selected();
-        const raw = readRaw();
-        const safe = found ? window.TerrariumViews.settings(found.view, raw) : raw;
-        return clean({
-          plugin: raw.plugin,
-          query: raw.query,
-          layout: safe.layout || "list",
-          sort: safe.sort || "",
-          dir: safe.dir || "asc",
-          group: safe.group || "",
-          date: safe.date || "",
-          filters: raw.plugin === fields.plugin && raw.query === fields.query ? fields.filters : undefined,
-          fields: raw.plugin === fields.plugin && raw.query === fields.query ? fields.fields : undefined,
-          density: fields.density,
+      const mountEditor = (config) => {
+        editorGeneration++;
+        library?.dispose?.();
+        editorNode.replaceChildren();
+        const pluginId = app.value;
+        if (!pluginId) return;
+        const samePlugin = config?.plugin === pluginId;
+        queryConfig = samePlugin ? config : {};
+        setTemporal(queryConfig);
+        library = window.TerrariumViewLibrary.mount(editorNode, { query: queryConfig.query || "" }, {
+          plugin: pluginId,
+          plugins: this.plugins || [],
+          bridge: this.o.bridge(pluginId),
+          service: (name, args = {}) => this.service(name, { space: this.space, ...args }),
+          toast: (message, kind) => this.o.toast?.(message, kind),
+          localEditor: true,
+          config: samePlugin ? config : undefined,
+          focus: () => {
+            const selectedFocus = focus.read();
+            return selectedFocus === undefined ? this.page?.focus || "" : selectedFocus;
+          },
+          period: () => {
+            if (!periodInput.checked || !temporalAvailable) return null;
+            if (!this.page?.period) throw new Error("Choose a review period in page settings, or turn off Follow page review period for this view.");
+            return window.TerrariumReviewPeriod.resolve(this.page.period);
+          },
+          onPreview: () => { previewScopeDirty = false; update(); },
+          onConfigChange: (next) => { queryConfig = next; setTemporal(next); update(); },
         });
       };
-
-      const validate = () => {
-        if (saved.value) return true;
-        if (data.value) return true;
-        dataAlert.hidden = false;
-        data.focus();
-        return false;
+      periodInput.addEventListener("change", () => { previewScopeDirty = true; update(); });
+      app.addEventListener("change", () => { mountEditor({}); update(); });
+      update = () => {
+        try {
+          const config = library?.config?.() || queryConfig;
+          queryConfig = config?.saved_view ? queryConfig : config;
+          setTemporal(queryConfig);
+          const selected = queryConfig?.plugin && queryConfig?.query
+            ? window.TerrariumViews.find(this.plugins, queryConfig.plugin, queryConfig.query)
+            : null;
+          const parts = this.filterParts(entry, {}, focus.read());
+          const base = selected ? `${selected.view.title}${parts.length ? ` · ${parts.join(" · ")}` : ""}` : "Choose data to show";
+          summary.textContent = previewScopeDirty ? `${base} · Preview changes to refresh focus and review period.` : base;
+        } catch (_) { /* editor choices are still loading */ }
       };
-
-      return { read, focus, update, validate, groups: rows, initialFocus: "select" };
+      if (fields.saved_view && !fields.plugin) {
+        const request = ++editorGeneration;
+        editorNode.textContent = "Loading shared view…";
+        this.service("view_get", { space: this.space, id: fields.saved_view }).then(saved => {
+          if (editorDisposed || request !== editorGeneration) return;
+          const config = saved?.config?.plugin
+            ? { ...saved.config, saved_view: fields.saved_view, follow_page_period: fields.follow_page_period }
+            : fields;
+          if (config.plugin) app.value = config.plugin;
+          mountEditor(config);
+        }).catch(() => {
+          if (!editorDisposed && request === editorGeneration) mountEditor(fields);
+        });
+      } else mountEditor(fields);
+      const read = () => ({
+        ...(library?.config?.() || queryConfig || {}),
+        ...(temporalAvailable || Object.hasOwn(fields, "follow_page_period")
+          ? { follow_page_period: temporalAvailable ? Boolean(periodInput.checked) : Boolean(fields.follow_page_period) }
+          : {}),
+      });
+      const validate = () => Boolean(library?.validate?.());
+      return {
+        read,
+        focus,
+        update,
+        validate,
+        dispose: () => { editorDisposed = true; editorGeneration++; library?.dispose?.(); },
+        groups: [section("Data and view", [appRow, editorNode, periodRow]), section("Page focus", focus.rows)],
+        initialFocus: "select",
+      };
     }
 
     // Options a widget lists for a choice: rows of its own named query.
@@ -908,36 +836,57 @@
     layout() {
       const root = this.$("widgets");
       const list = this.list();
-      const order = new Map(this.grid.stack(list).map((p, index) => [p.id, index]));
+      const flow = this.mode() === "flow";
+      const sequence = flow ? window.TerrariumPageFlow.order(list) : this.grid.stack(list);
+      const order = new Map(sequence.map((p, index) => [p.id, index]));
       const last = list.length - 1;
-      for (const placement of list) {
+      for (const placement of sequence) {
         const card = this.cards.get(placement.id);
         if (!card) continue;
-        card.style.gridColumn = `${placement.x + 1} / span ${placement.w}`;
-        card.style.gridRow = `${placement.y + 1} / span ${placement.h}`;
-        card.style.order = String(order.get(placement.id));
-        card.dataset.size = this.grid.sizeClass(placement);
+        card.style.gridColumn = flow ? "" : `${placement.x + 1} / span ${placement.w}`;
+        card.style.gridRow = flow ? "" : `${placement.y + 1} / span ${placement.h}`;
+        card.style.order = flow ? "" : String(order.get(placement.id));
+        card.dataset.size = flow ? "full" : this.grid.sizeClass(placement);
         const dims = card.querySelector(".page-dims");
-        if (dims) dims.textContent = `${placement.w} × ${placement.h}`;
+        if (dims) dims.textContent = flow ? "Full width" : `${placement.w} × ${placement.h}`;
+        const name = card.getAttribute("aria-label") || placement.widget;
+        const move = card.querySelector(".page-move");
+        if (move) {
+          move.setAttribute("aria-label", flow
+            ? `Move ${name} up or down with the arrow keys or Move up and Move down buttons.`
+            : `Move ${name}. Drag, or use arrow keys; Shift with arrows resizes.`);
+          move.title = flow ? "Use ↑/↓ or Move up/Move down buttons" : "Drag to move · arrows move · Shift+arrows resize";
+        }
+        const resize = card.querySelector(".page-resize");
+        if (resize) {
+          resize.setAttribute("aria-label", flow ? `Resize ${name} is unavailable in flow layout.` : `Resize ${name}. Drag, or use arrow keys.`);
+          resize.title = flow ? "Resize is available in grid layout" : "Drag to resize";
+        }
         const up = card.querySelector(".page-up");
         const down = card.querySelector(".page-down");
         if (up) up.disabled = order.get(placement.id) === 0;
         if (down) down.disabled = order.get(placement.id) === last;
+        if (card.parentNode === root) root.append(card); // Reorder existing nodes without remounting their widgets.
       }
       root.classList.toggle("editing", this.editing);
+      root.classList.toggle("flow-mode", flow);
       this.pack();
       // Spare rows below the last widget give room to drag into.
-      root.style.minHeight = this.editing && list.length ? `${(this.grid.bottom(list) + 2) * (ROW + GAP) - GAP}px` : "";
+      root.style.minHeight = !flow && this.editing && list.length ? `${(this.grid.bottom(list) + 2) * (ROW + GAP) - GAP}px` : "";
       const empty = list.length === 0;
       this.$("home-layout-empty").hidden = !empty;
-      this.$("home-layout-hint").hidden = !this.editing || empty;
+      const hint = this.$("home-layout-hint");
+      hint.hidden = !this.editing || empty;
+      hint.textContent = flow
+        ? "Use Move up/Move down or focus a block handle and press ↑/↓ to reorder. Escape cancels; Enter in the name saves."
+        : "Drag a widget by its header to move it and by its corner to resize it. On a focused handle, arrows move and Shift+arrows resize. Escape cancels; Enter in the name saves.";
     }
 
     // Viewing on a wide screen: each card takes its content height and the
     // next card in its columns starts right below it (no row-aligned gaps).
     pack() {
       const root = this.$("widgets");
-      const on = !this.editing && !this.narrow.matches;
+      const on = this.mode() !== "flow" && !this.editing && !this.narrow.matches;
       root.classList.toggle("packed", on);
       if (!this.packer && typeof ResizeObserver === "function") {
         this.packer = new ResizeObserver(() => this.spans());
@@ -967,7 +916,7 @@
       this.$("page-order").hidden = this.isHome() || order.length < 2;
       this.$("page-move-left").disabled = index <= 0;
       this.$("page-move-right").disabled = index < 0 || index >= order.length - 1;
-      this.$("page-icon").replaceChildren(this.o.icon((editing ? this.draftIcon : this.page?.icon) || (this.isHome() ? "home" : "layers")));
+      this.$("page-icon").replaceChildren(this.o.icon((editing ? this.draftIcon : this.page?.icon) || (this.isHome() ? "grid" : "layers")));
       this.$("page-icon").hidden = this.isHome();
       const chip = this.$("page-focus-chip");
       chip.hidden = editing || !this.page?.focus;
@@ -976,23 +925,218 @@
         chip.title = "Widgets that support it show only items matching this. Click to change.";
       }
       if (!editing) this.toggleIcons(false);
+      const periodLabel = this.$("page-period-label");
+      if (periodLabel) {
+        periodLabel.hidden = !this.page?.period || editing;
+        if (this.page?.period) {
+          try { periodLabel.textContent = window.TerrariumReviewPeriod.resolve(this.page.period).label; }
+          catch (error) { periodLabel.textContent = String(error); }
+        }
+      }
 
       this.o.onChange?.();
     }
 
+    pins() {
+      if (!this.pinStates.has(this.space)) this.pinStates.set(this.space, window.TerrariumPins.read(this.pinStorage, this.space));
+      return this.pinStates.get(this.space);
+    }
+
+    isPinned(pin) { return this.pins().pins.some(item => window.TerrariumPins.key(item) === window.TerrariumPins.key(pin)); }
+
+    savePins(state) {
+      this.pinStates.set(this.space, state);
+      if (!window.TerrariumPins.write(this.pinStorage, this.space, state)) this.o.toast("Pins changed for this session; device storage is unavailable.", "error");
+      this.navigation(); this.o.onPinsChange?.();
+    }
+
+    togglePin(pin) { this.savePins(window.TerrariumPins.toggle(this.pins(), pin)); }
+
+    // The Dashboard replaced the Home rail entry, so it is pinned once per
+    // space on this device; a later unpin sticks.
+    pinDashboardOnce() {
+      const home = this.home;
+      if (!home || !this.space) return false;
+      const key = DASHBOARD_PIN_KEY + this.space;
+      try { if (this.pinStorage?.getItem(key)) return false; } catch (_) { return false; }
+      const pin = { kind: "page", id: home.id };
+      if (!this.isPinned(pin)) this.savePins(window.TerrariumPins.toggle(this.pins(), pin));
+      try { this.pinStorage.setItem(key, "1"); } catch (_) {}
+      return true;
+    }
+
+    pinTarget(pin) {
+      if (pin.kind === "folder") return this.liveFolders().find(folder => String(folder.id) === pin.id);
+      return pin.kind === "page" ? this.pages.find(page => page.id === pin.id && !page.archived)
+        : (this.plugins || []).find(plugin => plugin.id === pin.id && plugin.pages?.length);
+    }
+
+    // A folder pin toggles in the expanded rail; the icon rail (and the
+    // phone, which has no rail) opens the page library at that folder.
+    openPin(pin) {
+      const target = this.pinTarget(pin);
+      if (!target) { this.o.toast("This pinned item is unavailable. Browse pages to restore it, or remove its pin.", "error"); this.managePins(); return; }
+      if (pin.kind === "folder") { if (this.railCollapsed()) this.browsePages({ folder: pin.id }); else this.toggleFolder(pin.id); return; }
+      if (pin.kind === "page") this.o.show(pin.id); else this.o.openApp(target);
+    }
+
+    // Folders come from the same service the page library uses. A failed
+    // list returns null so callers keep the folders already known.
+    async loadFolders(space) {
+      try {
+        const list = await this.service("folders_list", { space });
+        return Array.isArray(list) ? list.filter(folder => folder?.id && !folder.archived && (folder.space == null || folder.space === space)) : [];
+      } catch (_) { return null; }
+    }
+
+    liveFolders() { return (this.folders || []).filter(folder => folder?.id && !folder.archived); }
+
+    folderPath(id) {
+      const byId = new Map(this.liveFolders().map(folder => [String(folder.id), folder])), labels = [], seen = new Set();
+      for (let at = id == null ? null : String(id); at && byId.has(at) && !seen.has(at); at = byId.get(at).parent_id == null ? null : String(byId.get(at).parent_id)) {
+        seen.add(at); labels.unshift(String(byId.get(at).title || "Untitled folder"));
+      }
+      return labels.join(" / ");
+    }
+
+    railCollapsed() {
+      if (this.narrow?.matches) return true;
+      return typeof document !== "undefined" && document.documentElement?.dataset?.sidebar === "fixed";
+    }
+
+    // Which rail folders are open, per space on this device.
+    openFolders() {
+      this.folderOpen ||= new Map();
+      if (!this.folderOpen.has(this.space)) {
+        let ids = [];
+        try {
+          const raw = JSON.parse(this.pinStorage.getItem(`pp-rail-folders:${this.space}`) || "[]");
+          if (Array.isArray(raw)) ids = raw.filter(id => typeof id === "string").slice(0, 200);
+        } catch (_) {}
+        this.folderOpen.set(this.space, new Set(ids));
+      }
+      return this.folderOpen.get(this.space);
+    }
+
+    setFolderOpen(id, open) {
+      const ids = this.openFolders();
+      if (open) ids.add(String(id)); else ids.delete(String(id));
+      try { this.pinStorage.setItem(`pp-rail-folders:${this.space}`, JSON.stringify([...ids].slice(-200))); } catch (_) {}
+    }
+
+    toggleFolder(id, path, refocus) {
+      this.setFolderOpen(id, !this.openFolders().has(String(id)));
+      this.navigation();
+      if (refocus) this.folderToggles?.get(path || String(id))?.focus?.();
+    }
+
+    // The folders holding the current page open once each time it changes,
+    // so a later collapse sticks while the page stays the same.
+    expandCurrentFolder() {
+      const at = this.currentId ? `${this.space}/${this.currentId}` : null;
+      if (!at || this.expandedFor === at) return;
+      const page = this.pages.find(item => item.id === this.currentId);
+      if (!page) return;
+      this.expandedFor = at;
+      const byId = new Map(this.liveFolders().map(folder => [String(folder.id), folder])), chain = [];
+      for (let id = page.folder_id == null ? null : String(page.folder_id); id && byId.has(id) && !chain.includes(id); id = byId.get(id).parent_id == null ? null : String(byId.get(id).parent_id)) chain.push(id);
+      if (!chain.some(id => this.isPinned({ kind: "folder", id }))) return;
+      for (const id of chain) if (!this.openFolders().has(id)) this.setFolderOpen(id, true);
+    }
+
+    pageNavItem(page, onclick, child) {
+      return this.el("button", { type: "button", class: child ? "nav-item nav-child" : "nav-item", "data-user-page": page.id, title: page.title, "aria-label": page.title, onclick }, this.o.icon(page.icon || "layers"), this.el("span", {}, page.title));
+    }
+
+    // A rail folder: a toggle, then its direct pages and subfolders.
+    folderNav(folder, path, pinned) {
+      const id = String(folder.id), name = folder.title || "Untitled folder";
+      const open = this.openFolders().has(id);
+      const listId = `page-nav-folder-${++this.navSeq}`;
+      const chevron = this.o.icon("chevron-right");
+      chevron.classList?.add("nav-folder-chevron");
+      const toggle = this.el("button", {
+        type: "button", class: pinned ? "nav-item nav-folder-toggle" : "nav-item nav-child nav-folder-toggle",
+        [pinned ? "data-folder-pin" : "data-folder"]: id, "aria-expanded": String(open), "aria-controls": listId, title: name, "aria-label": name,
+        onclick: (event) => {
+          if (pinned && this.railCollapsed()) { this.browsePages({ folder: id }); return; }
+          const active = typeof document !== "undefined" ? document.activeElement : null;
+          this.toggleFolder(id, path, event?.detail === 0 || active === toggle);
+        },
+      }, this.o.icon("folder"), this.el("span", {}, name), chevron);
+      this.folderToggles.set(path, toggle);
+      const children = this.el("div", { class: "nav-folder-children", id: listId, role: "group", "aria-label": name, hidden: !open });
+      if (open) {
+        const seen = new Set(path.split("/"));
+        const subfolders = this.liveFolders().filter(item => item.parent_id != null && String(item.parent_id) === id && !seen.has(String(item.id))).sort(navOrder);
+        const pages = this.pages.filter(page => !page.archived && page.folder_id != null && String(page.folder_id) === id).sort(navOrder);
+        children.append(...subfolders.map(item => this.folderNav(item, `${path}/${item.id}`, false)), ...pages.map(page => this.pageNavItem(page, () => this.o.show(page.id), true)));
+        if (!subfolders.length && !pages.length) children.append(this.el("p", { class: "nav-folder-empty" }, "No pages"));
+      }
+      return this.el("div", { class: "nav-folder" }, toggle, children);
+    }
+
+    managePins() {
+      const root = this.$("page-pins-content");
+      const draw = () => {
+        const current = this.pins().pins;
+        const rows = current.map((pin, index) => {
+          const target = this.pinTarget(pin), name = (pin.kind === "folder" && target ? this.folderPath(target.id) : "") || target?.title || target?.name || `${pin.id} (unavailable)`;
+          return this.el("div", { class: "pin-manager-row" }, this.el("span", {}, name),
+            this.el("button", { type: "button", disabled: index === 0, "aria-label": `Move ${name} earlier`, onclick: () => { this.savePins(window.TerrariumPins.move(this.pins(), pin, -1)); draw(); } }, "Up"),
+            this.el("button", { type: "button", disabled: index === current.length - 1, "aria-label": `Move ${name} later`, onclick: () => { this.savePins(window.TerrariumPins.move(this.pins(), pin, 1)); draw(); } }, "Down"),
+            this.el("button", { type: "button", "aria-label": `Unpin ${name}`, onclick: () => { this.togglePin(pin); draw(); } }, "Unpin"));
+        });
+        const folders = this.liveFolders().map(folder => ({ kind: "folder", id: String(folder.id), name: this.folderPath(folder.id) || folder.title || "Untitled folder" })).sort((a, b) => a.name.localeCompare(b.name));
+        const choices = [...this.pages.map(page => ({ kind: "page", id: page.id, name: page.title })), ...folders, ...(this.plugins || []).filter(p => p.pages?.length).map(p => ({ kind: "app", id: p.id, name: p.name }))];
+        root.replaceChildren(this.el("h3", {}, "Pinned"), ...rows,
+          ...(!rows.length ? [this.el("p", { class: "muted" }, "No pins yet. Choose a page, folder or app below.")] : []),
+          this.el("h3", {}, "Available pages, folders and apps"), ...choices.filter(pin => !this.isPinned(pin)).map(pin => this.el("button", { type: "button", class: "pin-choice", onclick: () => { this.togglePin(pin); draw(); } }, `Pin ${pin.name} (${pin.kind})`)),
+          this.el("button", { type: "button", onclick: () => { this.$("page-pins-dialog").close(); this.browsePages(); } }, "Browse pages and Trash"));
+      };
+      draw(); this.$("page-pins-dialog").showModal();
+    }
+
+    async browsePages(options) {
+      if (!this.space || (this.editing && !(await this.confirmLeave()))) return;
+      const focusFolder = typeof options?.folder === "string" ? options.folder : null;
+      const space = this.space;
+      this.pageLibrary?.dispose();
+      this.pageLibrary = window.TerrariumPageLibrary.mount(this.$("page-library-content"), {
+        space, pages: this.pages, service: (name, args = {}) => {
+          if (this.space !== space) return Promise.reject(new Error("Space changed. Reopen the page browser."));
+          return this.service(name, { ...args, space });
+        }, toast: this.o.toast,
+        focusFolder,
+        isPinned: id => this.space === space && this.isPinned({ kind: "folder", id: String(id) }),
+        onTogglePin: id => { if (this.space === space) this.togglePin({ kind: "folder", id: String(id) }); },
+        onOpen: id => { this.$("page-library-dialog").close(); this.o.show(id); },
+        onChanged: async () => {
+          if (this.space !== space) return;
+          const [pages, folders] = await Promise.all([this.service("pages_list", { space }), this.loadFolders(space)]);
+          if (this.space !== space) return;
+          this.pages = pages.map(dashboard);
+          if (folders) this.folders = folders;
+          this.navigation();
+          if (this.currentId && !this.pages.some(p => p.id === this.currentId)) await this.leave();
+        },
+      });
+      this.$("page-library-dialog").showModal();
+      await this.pageLibrary.ready;
+    }
+
     navigation() {
-      const items = this.pages.filter((page) => !page.system).map((page) => this.el("button", {
-        type: "button", class: "nav-item", "data-user-page": page.id, title: page.title, "aria-label": page.title,
-        onclick: () => this.o.show(page.id),
-      }, this.o.icon(page.icon || "layers"), this.el("span", {}, page.title)));
-      this.$("page-nav").replaceChildren(...items);
-      const tabs = this.pages.map((page, index) => this.el("button", {
-        type: "button", class: "page-tab", "data-user-page": page.id, onclick: () => this.o.show(page.id),
-        title: index < 9 ? `${page.title} (${this.mac ? "⌘" : "Ctrl+"}${index + 1})` : page.title,
-      }, this.o.icon(page.icon || (page.system ? "home" : "layers")), this.el("span", {}, page.title)));
-      tabs.push(this.el("button", { type: "button", class: "page-tab page-tab-new", "aria-label": "New page", title: "New page", onclick: () => this.create() }, this.o.icon("plus")));
-      this.$("page-tabs").replaceChildren(...tabs);
-      this.$("page-tabs").hidden = this.pages.length < 2 && !this.narrow.matches;
+      const pinned = this.pins().pins;
+      this.expandCurrentFolder();
+      this.folderToggles = new Map(); this.navSeq = 0;
+      // Unavailable page and folder pins stay out of the rail; the pin
+      // manager still lists them so they can be removed.
+      const pageButtons = pinned.filter(pin => pin.kind !== "app" && this.pinTarget(pin)).map(pin => pin.kind === "folder"
+        ? this.folderNav(this.pinTarget(pin), pin.id, true)
+        : this.pageNavItem(this.pinTarget(pin), () => this.openPin(pin)));
+      this.$("page-nav").replaceChildren(this.el("button", { type: "button", class: "nav-item", title: "Browse pages and folders", "aria-label": "Browse pages and folders", onclick: () => this.browsePages() }, this.o.icon("folder"), this.el("span", {}, "Pages & folders")), ...pageButtons);
+      const pagePin = this.$("page-pin");
+      if (pagePin && this.page) { const pinned = this.isPinned({ kind: "page", id: this.page.id }); pagePin.textContent = pinned ? "Unpin page" : "Pin page"; pagePin.setAttribute("aria-pressed", String(pinned)); }
     }
 
     edit() {
@@ -1001,6 +1145,9 @@
       this.draftIcon = this.page?.icon ?? null;
       this.$("page-title-input").value = this.page?.title || "";
       this.$("page-focus-input").value = this.page?.focus || "";
+      const layoutMode = this.$("page-layout-mode");
+      if (layoutMode) layoutMode.value = this.page?.layout_mode === "flow" ? "flow" : "grid";
+      this.writePeriod(this.page?.period);
       this.layout();
       this.chrome();
       this.$("page-title-input").focus();
@@ -1008,10 +1155,26 @@
 
     cancel() {
       if (!this.editing) return;
+      const changed = this.placements.filter((saved) => {
+        const draft = this.draft.find((p) => p.id === saved.id);
+        return draft && ((draft.focus ?? null) !== (saved.focus ?? null) || JSON.stringify(draft.config || {}) !== JSON.stringify(saved.config || {}));
+      });
       for (const p of this.draft) if (p.id.startsWith("new-")) this.drop(p.id);
       for (const p of this.placements) if (!this.cards.has(p.id)) this.$("widgets").append(this.card(p));
       this.draft = null;
       this.draftIcon = null;
+      const layoutMode = this.$("page-layout-mode");
+      if (layoutMode) layoutMode.value = this.page?.layout_mode === "flow" ? "flow" : "grid";
+      for (const placement of changed) {
+        const old = this.cards.get(placement.id);
+        if (!old) continue;
+        this.views.get(placement.id)?.dispose();
+        this.views.delete(placement.id);
+        this.pending.delete(placement.id);
+        this.io?.unobserve(old);
+        const next = this.card(placement);
+        old.replaceWith(next);
+      }
       this.layout();
       this.chrome();
     }
@@ -1035,12 +1198,18 @@
         if (!this.isHome() && (this.draftIcon ?? null) !== (this.page.icon ?? null)) meta.icon = this.draftIcon;
         const focus = this.$("page-focus-input").value.trim();
         if (focus !== (this.page.focus || "")) meta.focus = focus;
-        if (Object.keys(meta).length) await this.service("page_update", { page, ...meta });
+        const period = this.readPeriod();
+        if (period) window.TerrariumReviewPeriod.resolve(period);
+        if (JSON.stringify(period) !== JSON.stringify(this.page.period || null)) meta.period = period;
+        const layoutMode = this.mode();
+        const layoutChanged = layoutMode !== (this.page.layout_mode === "flow" ? "flow" : "grid");
         if (!(await this.flush())) return;
+        if (Object.keys(meta).length) await this.service("page_update", { page, ...meta });
         const placements = this.draft.map((p) => ({ ...p, id: p.id.startsWith("new-") ? "" : p.id }));
         await this.service("page_save", { page, placements });
+        if (layoutChanged) await this.service("page_layout", { page, mode: layoutMode });
         this.draft = null;
-        this.pages = await this.service("pages_list", { space: this.space });
+        this.pages = (await this.service("pages_list", { space: this.space })).map(dashboard);
         await this.render();
         this.o.toast("Page saved");
       } catch (error) {
@@ -1051,17 +1220,18 @@
     removePlacement(id) {
       if (!this.editing) return;
       const order = this.grid.stack(this.draft);
-      const index = order.findIndex((p) => p.id === id);
+      const visualOrder = this.mode() === "flow" ? window.TerrariumPageFlow.order(this.draft) : order;
+      const index = visualOrder.findIndex((p) => p.id === id);
       const removed = this.draft.find((p) => p.id === id);
       if (!removed) return;
       const name = this.catalog.get(this.key(removed))?.widget.title || removed.widget;
       const page = this.page?.id;
       this.draft = this.draft.filter((p) => p.id !== id);
       this.drop(id);
-      this.draft = this.grid.compact(this.draft);
+      if (this.mode() !== "flow") this.draft = this.grid.compact(this.draft);
       this.layout();
       // Keep keyboard focus on the page: the next widget, or Add widget.
-      const next = order[index + 1] || order[index - 1];
+      const next = visualOrder[index + 1] || visualOrder[index - 1];
       (next ? this.cards.get(next.id)?.querySelector(".page-move") : this.$("page-editbar").querySelector("[data-page-add]"))?.focus({ preventScroll: true });
       this.o.toast(`Removed “${name}”`, "ok", { label: "Undo", run: () => this.restorePlacement(page, removed) });
     }
@@ -1074,7 +1244,11 @@
       }
       if (this.draft.some((p) => p.id === placement.id)) return true;
       if (this.draft.length >= MAX_PLACEMENTS) { this.o.toast(`A page holds up to ${MAX_PLACEMENTS} widgets.`, "error"); return true; }
-      this.draft = this.grid.place([...this.draft, { ...placement }], placement.id, { x: placement.x, y: placement.y, w: placement.w, h: placement.h }, this.size(placement.id) ?? this.spec(placement).size);
+      const restored = { ...placement };
+      if (this.mode() === "flow" && !Number.isInteger(restored.flow_order)) restored.flow_order = window.TerrariumPageFlow.order(this.draft).length;
+      this.draft = this.mode() === "flow"
+        ? [...this.draft, restored]
+        : this.grid.place([...this.draft, restored], restored.id, { x: restored.x, y: restored.y, w: restored.w, h: restored.h }, this.size(restored.id) ?? this.spec(restored).size);
       this.$("widgets").append(this.card(placement));
       this.layout();
       this.cards.get(placement.id)?.querySelector(".page-move")?.focus({ preventScroll: true });
@@ -1084,6 +1258,18 @@
     // Phones show one column: move a widget before or after its neighbour.
     step(id, direction) {
       if (!this.editing) return;
+      if (this.mode() === "flow") {
+        const order = window.TerrariumPageFlow.order(this.draft);
+        const index = order.findIndex((p) => p.id === id);
+        if (index < 0 || index + Math.sign(direction) < 0 || index + Math.sign(direction) >= order.length) return;
+        this.draft = window.TerrariumPageFlow.move(this.draft, id, direction);
+        this.layout();
+        const card = this.cards.get(id);
+        const same = card?.querySelector(direction < 0 ? ".page-up" : ".page-down");
+        (same?.disabled ? card.querySelector(direction < 0 ? ".page-down" : ".page-up") : same)?.focus({ preventScroll: true });
+        card?.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const order = this.grid.stack(this.draft);
       const index = order.findIndex((p) => p.id === id);
       const other = order[index + direction];
@@ -1121,7 +1307,7 @@
       [order[index], order[target]] = [order[target], order[index]];
       try {
         await Promise.all(order.map((page, i) => page.position === i + 1 ? null : this.service("page_update", { page: page.id, position: i + 1 })));
-        this.pages = await this.service("pages_list", { space: this.space });
+        this.pages = (await this.service("pages_list", { space: this.space })).map(dashboard);
         this.chrome();
         this.$(direction < 0 ? "page-move-left" : "page-move-right").focus();
       } catch (error) {
@@ -1134,15 +1320,41 @@
       if (!entry) return;
       if (!this.editing) this.edit();
       const lim = this.grid.limits(entry.template?.page?.size);
-      const placement = { id: `new-${++this.added}`, plugin: entry.plugin.id, widget: entry.widget.id, ...this.grid.firstFit(this.draft, lim.default[0], lim.default[1]), config: {} };
-      this.draft.push(placement);
-      this.$("widgets").append(this.card(placement));
-      this.layout();
-      this.cards.get(placement.id)?.classList.add("page-new-widget");
-      this.cards.get(placement.id)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      this.cards.get(placement.id)?.querySelector(".page-move")?.focus({ preventScroll: true });
+      const spot = this.grid.firstFit(this.draft, lim.default[0], lim.default[1]);
+      const placement = { id: `new-${++this.added}`, plugin: entry.plugin.id, widget: entry.widget.id, ...spot, config: {} };
+      this.addPlacement(placement);
       // Widgets that can filter ask which items to show right away.
       if (this.filterable(entry)) this.openSettings(placement.id);
+    }
+
+    // Adds a private draft placement and gives flow pages an append position.
+    addPlacement(placement) {
+      if (!this.editing) this.edit();
+      if (this.draft.length >= MAX_PLACEMENTS) { this.o.toast(`A page holds up to ${MAX_PLACEMENTS} widgets.`, "error"); return false; }
+      const next = { ...placement, config: { ...(placement.config || {}) } };
+      if (this.mode() === "flow") next.flow_order = window.TerrariumPageFlow.order(this.draft).length;
+      this.draft = [...this.draft, next];
+      this.$("widgets").append(this.card(next));
+      this.layout();
+      this.cards.get(next.id)?.classList.add("page-new-widget");
+      this.cards.get(next.id)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      this.cards.get(next.id)?.querySelector(".page-move")?.focus({ preventScroll: true });
+      return true;
+    }
+
+    // Duplicate a block as a new draft row; configuration is copied by value,
+    // while references inside it (such as a saved-view id) remain shared.
+    duplicatePlacement(id) {
+      if (!this.editing) this.edit();
+      const source = this.draft.find((placement) => placement.id === id);
+      if (!source) return false;
+      if (this.draft.length >= MAX_PLACEMENTS) { this.o.toast(`A page holds up to ${MAX_PLACEMENTS} widgets.`, "error"); return false; }
+      const copy = { ...source, id: `new-${++this.added}`, config: JSON.parse(JSON.stringify(source.config || {})) };
+      if (this.mode() === "flow") copy.flow_order = window.TerrariumPageFlow.order(this.draft).length;
+      const bounds = this.grid.limits(this.spec(copy).size);
+      const spot = this.grid.firstFit(this.draft, Math.min(source.w, bounds.max[0]), Math.min(source.h, bounds.max[1]));
+      Object.assign(copy, spot);
+      return this.addPlacement(copy);
     }
 
     openCatalog() {
@@ -1197,12 +1409,82 @@
       if (none) none.hidden = shown > 0;
     }
 
+    readPeriod() {
+      const mode = this.$("page-period-mode");
+      if (!mode) return this.page?.period || null;
+      if (!mode.value) return null;
+      return { mode: mode.value, timezone: this.$("page-period-timezone").value.trim(),
+        ...(mode.value === "custom" ? { start: this.$("page-period-start").value, end: this.$("page-period-end").value } : {}) };
+    }
+
+    writePeriod(period) {
+      const mode = this.$("page-period-mode");
+      if (!mode) return;
+      mode.value = period?.mode || "";
+      this.$("page-period-timezone").value = period?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+      this.$("page-period-start").value = period?.start || "";
+      this.$("page-period-end").value = period?.end || "";
+      this.updatePeriodControls();
+    }
+
+    updatePeriodControls() {
+      const mode = this.$("page-period-mode")?.value;
+      for (const name of ["start", "end"]) {
+        const input = this.$(`page-period-${name}`);
+        if (input) { input.disabled = mode !== "custom"; input.parentElement.hidden = mode !== "custom"; }
+      }
+      const timezone = this.$("page-period-timezone");
+      if (timezone) { timezone.disabled = !mode; timezone.parentElement.hidden = !mode; }
+    }
+
+    async createWeeklyReview() {
+      if (!this.space || this.creatingReview) return;
+      if (this.editing && !(await this.confirmLeave())) return;
+      if (!window.TerrariumViews.find(this.plugins, "tasks", "review_tasks")?.view?.temporal || !window.TerrariumViews.find(this.plugins, "notes", "review_notes")?.view?.temporal) {
+        this.o.toast("Weekly review needs the updated Tasks and Notes apps in this space.", "error"); return;
+      }
+      this.creatingReview = true;
+      const space = this.space;
+      let page;
+      try {
+        const period = { mode: "previous_week", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+        window.TerrariumReviewPeriod.resolve(period);
+        page = await this.service("page_create", { space, title: "Weekly review", icon: "calendar", period });
+        const placements = [
+          { plugin: "_host", widget: "view", x: 0, y: 0, w: 6, h: 5, config: { plugin: "tasks", query: "review_tasks", layout: "list", sort: "completed_at", dir: "desc", follow_page_period: true } },
+          { plugin: "_host", widget: "view", x: 6, y: 0, w: 6, h: 5, config: { plugin: "notes", query: "review_notes", layout: "list", sort: "updated_at", dir: "desc", follow_page_period: true } },
+          { plugin: "_host", widget: "text", x: 0, y: 5, w: 8, h: 3, config: { text: "## Reflection\n\nWhat went well?\n\nWhat needs attention?\n\nWhat will I focus on next week?" } },
+          { plugin: "tasks", widget: "quick-add", x: 8, y: 5, w: 4, h: 3, config: {} },
+        ];
+        await this.service("page_save", { page: page.id, placements });
+        if (this.space !== space) return;
+        this.pages = (await this.service("pages_list", { space })).map(dashboard);
+        await this.o.show(page.id);
+        this.o.toast("Weekly review created. Edit the page to change its period or reflection.", "ok");
+      } catch (error) {
+        if (page) {
+          try { await this.service("page_remove", { page: page.id }); }
+          catch (_) { this.o.toast("Review setup failed. The incomplete page is available for editing.", "error"); }
+        }
+        this.o.toast(String(error), "error");
+      } finally { this.creatingReview = false; }
+    }
+
+    // When the open page goes away, the app falls back to Today (the home);
+    // the hidden page view is reset to the Dashboard for next time.
+    async leave() {
+      this.currentId = this.home?.id || null;
+      if (!this.o.today) return this.o.show(this.currentId);
+      this.o.today();
+      return this.currentId ? this.render() : false;
+    }
+
     async create() {
       if (!this.space) return;
       if (this.editing && !(await this.confirmLeave())) return;
       try {
         const page = await this.service("page_create", { space: this.space, title: "New page" });
-        this.pages = await this.service("pages_list", { space: this.space });
+        this.pages = (await this.service("pages_list", { space: this.space })).map(dashboard);
         await this.o.show(page.id);
         this.edit();
         this.$("page-title-input").focus();
@@ -1212,28 +1494,27 @@
           await this.service("page_remove", { page: page.id });
           if (this.space !== space) return;
           if (this.page?.id === page.id) this.draft = null;
-          this.pages = await this.service("pages_list", { space });
-          await this.o.show(this.home?.id);
+          this.pages = (await this.service("pages_list", { space })).map(dashboard);
+          await this.leave();
         } });
       } catch (error) {
         this.o.toast(String(error), "error");
       }
     }
 
-    // Deleting is undoable for a few seconds instead of asking first: the
-    // saved page and its layout are kept and recreated on Undo.
+    // Trash preserves identity, placements and pins; Undo restores the same page.
     async removePage() {
       if (!this.page || this.page.system) return;
       const title = this.page.title;
       try {
         const saved = await this.service("page_get", { page: this.page.id });
         const space = this.space;
-        await this.service("page_remove", { page: this.page.id });
+        await this.service("page_trash", { page: this.page.id });
         this.draft = null;
         this.draftIcon = null;
-        this.pages = await this.service("pages_list", { space });
-        await this.o.show(this.home?.id);
-        this.o.toast(`Deleted “${title}”`, "ok", { label: "Undo", run: () => this.restorePage(space, saved) });
+        this.pages = (await this.service("pages_list", { space })).map(dashboard);
+        await this.leave();
+        this.o.toast(`Moved “${title}” to Trash`, "ok", { label: "Undo", run: () => this.restorePage(space, saved) });
       } catch (error) {
         this.o.toast(String(error), "error");
       }
@@ -1241,10 +1522,9 @@
 
     async restorePage(space, saved) {
       try {
-        const page = await this.copyPage(space, saved, saved.page.title);
-        await this.service("page_update", { page: page.id, position: saved.page.position });
+        const page = await this.service("page_restore", { page: saved.page.id });
         if (this.space !== space) { this.o.toast(`Restored “${saved.page.title}”`); return true; }
-        this.pages = await this.service("pages_list", { space });
+        this.pages = (await this.service("pages_list", { space })).map(dashboard);
         await this.o.show(page.id);
         this.o.toast(`Restored “${saved.page.title}”`);
         return true;
@@ -1256,9 +1536,11 @@
 
     // A new page with the same icon, layout and widget settings.
     async copyPage(space, saved, title) {
-      const page = await this.service("page_create", { space, title, icon: saved.page.icon || null, ...(saved.page.focus ? { focus: saved.page.focus } : {}) });
-      const placements = saved.placements.map(({ plugin, widget, x, y, w, h, config, focus }) => ({ id: "", plugin, widget, x, y, w, h, config: config || {}, focus: focus ?? null }));
+      const page = await this.service("page_create", { space, title, icon: saved.page.icon || null, ...(saved.page.focus ? { focus: saved.page.focus } : {}), ...(saved.page.period ? { period: saved.page.period } : {}) });
+      const placements = saved.placements.map(({ plugin, widget, x, y, w, h, config, focus, flow_order }) => ({ id: "", plugin, widget, x, y, w, h, config: config || {}, focus: focus ?? null, ...(Number.isInteger(flow_order) ? { flow_order } : {}) }));
       if (placements.length) await this.service("page_save", { page: page.id, placements });
+      const mode = saved.page.layout_mode === "flow" ? "flow" : "grid";
+      if (mode !== "grid") await this.service("page_layout", { page: page.id, mode });
       return page;
     }
 
@@ -1271,7 +1553,7 @@
         const saved = await this.service("page_get", { page: this.page.id });
         const title = `${saved.page.title} copy`.slice(0, 40);
         const page = await this.copyPage(space, saved, title);
-        this.pages = await this.service("pages_list", { space });
+        this.pages = (await this.service("pages_list", { space })).map(dashboard);
         await this.o.show(page.id);
         this.edit();
         this.$("page-title-input").select();
@@ -1285,7 +1567,7 @@
     drag(handle, id, resize) {
       let start = null;
       handle.addEventListener("pointerdown", (event) => {
-        if (!this.editing || event.button !== 0 || this.narrow.matches) return;
+        if (!this.editing || this.mode() === "flow" || event.button !== 0 || this.narrow.matches) return;
         // The header drags too, but its own buttons stay buttons.
         const control = event.target.closest("button, a, input, select, textarea");
         if (control && control !== handle) return;
@@ -1319,6 +1601,12 @@
       handle.addEventListener("pointercancel", end);
       handle.addEventListener("keydown", (event) => {
         if (!this.editing || !ARROWS.includes(event.key)) return;
+        if (this.mode() === "flow") {
+          if (resize) return;
+          event.preventDefault();
+          this.step(id, event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1 : 1);
+          return;
+        }
         event.preventDefault();
         this.draft = this.grid.nudge(this.draft, id, event.key, resize || event.shiftKey, this.size(id));
         this.layout();

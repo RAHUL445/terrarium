@@ -23,8 +23,8 @@ const USAGE: &str = "usage: terrarium <command> [options]
   logout                        forget the saved token
   status                        the app, this client, spaces and plugins
   commands [prefix]             commands this client can run
-  query <id> [--param value]... run a query, e.g. terrarium query todo.tasks --filter upcoming
-  run <id> [--param value]...   run an action, e.g. terrarium run todo.create --title 'Buy milk'
+  query <id> [--param value]... run a query, e.g. terrarium query tasks.tasks --filter upcoming
+  run <id> [--param value]...   run an action, e.g. terrarium run tasks.create --title 'Buy milk'
   run <id> --ids a,b | --where <query> [--where-params json]   run a bulk action on many items (at most 500)
   search <text>                 search every plugin (--all-spaces, --plugin <id>, --limit <n>)
   export [--out file.zip] [--include-trash]   save this space's data as a ZIP (not encrypted)
@@ -1138,7 +1138,14 @@ fn cmd_import(o: &Options) -> Outcome {
     let listing = conn.invoke(o, "query", "plugin.list", json!({}), false)?;
     let format = listing["result"]
         .as_array()
-        .and_then(|plugins| plugins.iter().find(|p| p["id"] == plugin))
+        .and_then(|plugins| {
+            plugins.iter().find(|p| {
+                p["id"] == plugin
+                    || p["former_ids"]
+                        .as_array()
+                        .is_some_and(|ids| ids.iter().any(|id| id == plugin))
+            })
+        })
         .and_then(|p| p["imports"].as_array())
         .and_then(|imports| imports.iter().find(|i| i["id"] == importer))
         .and_then(|i| i["format"].as_str())
@@ -1258,7 +1265,7 @@ fn run(args: &[String]) -> Outcome {
         "page" => cmd_page(&o),
         "space" => cmd_space(&o),
         "open" | "notify" => {
-            // `open todo` is `ui.open` with the plugin first.
+            // `open tasks` is `ui.open` with the plugin first.
             let mut o = o;
             o.words.insert(0, command.clone());
             if command == "open" {

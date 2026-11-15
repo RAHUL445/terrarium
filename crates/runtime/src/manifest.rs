@@ -54,6 +54,11 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "Kind::is_wasm")]
     pub kind: Kind,
     pub id: String,
+    /// Ids this plugin was published under before. The first one stays its
+    /// storage and sync id forever (see [`Manifest::storage_id`]); every
+    /// former id is accepted wherever a plugin is named.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_ids: Vec<String>,
     pub name: String,
     pub version: String,
     pub api: String,
@@ -101,6 +106,10 @@ pub struct Manifest {
     /// which the user consents to at install: `speech`.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Host feature gates required by this package. Older strict hosts reject
+    /// this field rather than silently installing an incompatible package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
     /// Public HTTPS host patterns allowed for deferred HTTP requests.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<String>,
@@ -142,6 +151,10 @@ pub struct Manifest {
     /// File formats this plugin can import, each mapped to an operation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub import: Vec<ImportDef>,
+    /// `today-v1` sources, kept raw so one invalid entry can be dropped
+    /// without rejecting the plugin; see [`crate::today::today_sources`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub today: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -490,6 +503,9 @@ pub struct QueryDef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryView {
+    /// Capability schema version. Missing retains the original view contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
     /// Shown when people pick data for a view, e.g. "Tasks".
     pub title: String,
     /// The column used as each row's title. Defaults to `title`.
@@ -505,6 +521,19 @@ pub struct QueryView {
     /// User-editable query parameters; filtering remains in plugin SQL.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<ViewFilter>,
+    /// Query-side pagination using declared integer query parameters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pagination: Option<ViewPagination>,
+    /// Optional half-open timestamp window [start, end), in milliseconds since epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<ViewTemporal>,
+    /// Allowed values for SQL-declared sort bindings. SQL remains static and
+    /// must provide a deterministic order, including a stable tie-breaker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sorts: Vec<ViewSort>,
+    /// Operation the host may offer for each row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_action: Option<ViewRowAction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -512,6 +541,10 @@ pub struct QueryView {
 pub struct ViewFilter {
     pub param: String,
     pub label: String,
+    /// Optional input kind for v1 host controls: `string`, `number`, `date`,
+    /// `boolean`, or `enum`.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub ty: Option<String>,
     #[serde(default)]
     pub multiple: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -520,6 +553,79 @@ pub struct ViewFilter {
     pub values: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewPagination {
+    pub page_size_param: String,
+    pub offset_param: String,
+    #[serde(default = "default_view_page_size")]
+    pub default_page_size: u32,
+    #[serde(default = "default_view_max_page_size")]
+    pub max_page_size: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewTemporal {
+    pub start_param: String,
+    pub end_param: String,
+}
+
+fn default_view_page_size() -> u32 {
+    100
+}
+fn default_view_max_page_size() -> u32 {
+    1000
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewSort {
+    pub param: String,
+    pub values: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction_param: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub directions: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewRowAction {
+    #[serde(default = "default_row_action_label")]
+    pub label: String,
+    pub action: ViewAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup: Option<ViewActionFollowup>,
+}
+
+fn default_row_action_label() -> String {
+    "Run".into()
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewAction {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+    #[serde(default)]
+    pub args: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub navigate: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ViewActionFollowup {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "if")]
+    pub if_value: Option<serde_json::Value>,
+    pub action: ViewAction,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -542,6 +648,11 @@ pub struct ViewColumn {
     /// (board drag and drop). `args` may bind `{{row.*}}` and `{{value}}`.
     #[serde(default, rename = "move", skip_serializing_if = "Option::is_none")]
     pub move_op: Option<MoveDef>,
+    /// How a board grouped by this enum column draws its lanes: `"lanes"`
+    /// (default, side by side) or `"matrix"` (exactly four fixed values,
+    /// drawn as a 2×2 grid in value order, e.g. an Eisenhower matrix).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -619,6 +730,9 @@ impl Default for Limits {
     }
 }
 
+/// How many earlier ids a plugin may keep answering to.
+pub const MAX_FORMER_IDS: usize = 4;
+
 const MAX_FUEL: u64 = 2_000_000_000;
 const MAX_MEMORY_MB: u32 = 128;
 const MAX_TIMEOUT_MS: u64 = 10_000;
@@ -663,15 +777,27 @@ impl Manifest {
         Ok(manifest)
     }
 
+    /// The id this plugin's data is stored and synced under: its first
+    /// former id when it was renamed, otherwise its id.
+    pub fn storage_id(&self) -> &str {
+        self.former_ids.first().unwrap_or(&self.id)
+    }
+
+    /// Whether `id` names this plugin: its id or one of its former ids.
+    pub fn answers_to(&self, id: &str) -> bool {
+        self.id == id || self.former_ids.iter().any(|f| f == id)
+    }
+
     fn validate(&self) -> Result<()> {
         let bad = |m: String| Err(RuntimeError::Manifest(m));
-        let id_ok = self.id.len() <= 63
-            && self.id.starts_with(|c: char| c.is_ascii_lowercase())
-            && self
-                .id
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-        if !id_ok {
+        let valid_id = |id: &str| {
+            id.len() <= 63
+                && id.starts_with(|c: char| c.is_ascii_lowercase())
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        };
+        if !valid_id(&self.id) {
             return bad(format!(
                 "id `{}` must use a-z, 0-9 and - and start with a letter",
                 self.id
@@ -679,6 +805,27 @@ impl Manifest {
         }
         if crate::commands::HOST_NAMESPACES.contains(&self.id.as_str()) {
             return bad(format!("id `{}` is reserved for the host", self.id));
+        }
+        if self.former_ids.len() > MAX_FORMER_IDS {
+            return bad(format!(
+                "former_ids: at most {MAX_FORMER_IDS} former ids are allowed"
+            ));
+        }
+        for (i, former) in self.former_ids.iter().enumerate() {
+            if !valid_id(former) {
+                return bad(format!(
+                    "former_ids: `{former}` must use a-z, 0-9 and - and start with a letter"
+                ));
+            }
+            if crate::commands::HOST_NAMESPACES.contains(&former.as_str()) {
+                return bad(format!("former_ids: `{former}` is reserved for the host"));
+            }
+            if *former == self.id {
+                return bad(format!("former_ids: `{former}` is the plugin's own id"));
+            }
+            if self.former_ids[..i].contains(former) {
+                return bad(format!("former_ids: `{former}` is repeated"));
+            }
         }
         let expected = match self.kind {
             Kind::Wasm => API_VERSION,
@@ -815,6 +962,12 @@ impl Manifest {
                 PERMISSIONS.join(", ")
             ));
         }
+        if let Some(requirement) = self.requires.iter().find(|requirement| {
+            !["data-views-v1", crate::today::TODAY_REQUIREMENT].contains(&requirement.as_str())
+        }) {
+            return bad(format!("unknown host requirement `{requirement}`"));
+        }
+        crate::today::validate_declaration(self).map_err(RuntimeError::Manifest)?;
         if self.permissions.iter().any(|p| p == "http") {
             terrarium_net::HostRules::new(&self.hosts)
                 .map_err(|e| RuntimeError::Manifest(e.message))?;
@@ -1053,7 +1206,7 @@ impl Manifest {
                     return bad(format!(
                         "share_target: `{}` is not a declared operation",
                         target.op
-                    ))
+                    ));
                 }
             };
             if op.effect_of(&target.op) == Effect::Destructive {
@@ -1135,6 +1288,29 @@ impl Manifest {
                     .map_err(RuntimeError::Manifest)?;
             }
             if let Some(view) = &query.view {
+                let has_v1_capability = view.version.is_some()
+                    || view.pagination.is_some()
+                    || view.temporal.is_some()
+                    || !view.sorts.is_empty()
+                    || view.row_action.is_some()
+                    || view.filters.iter().any(|filter| filter.ty.is_some());
+                if has_v1_capability && !self.requires.iter().any(|r| r == "data-views-v1") {
+                    return bad(format!(
+                        "query `{name}`: v1 view capabilities require `requires: [\"data-views-v1\"]`"
+                    ));
+                }
+                if let Some(version) = view.version {
+                    if version != 1 {
+                        return bad(format!(
+                            "query `{name}`: unsupported view capability version `{version}`"
+                        ));
+                    }
+                }
+                if has_v1_capability && view.version != Some(1) {
+                    return bad(format!(
+                        "query `{name}`: v1 view capabilities require `version: 1`"
+                    ));
+                }
                 let title_len = view.title.trim().chars().count();
                 if !(1..=40).contains(&title_len) {
                     return bad(format!(
@@ -1148,7 +1324,8 @@ impl Manifest {
                 if view.filters.len() > 16 {
                     return bad(format!("query `{name}`: at most 16 view filters"));
                 }
-                let valid_choices = |id: &str| self.queries.get(id).is_some_and(|q| q.params.is_empty());
+                let valid_choices =
+                    |id: &str| self.queries.get(id).is_some_and(|q| q.params.is_empty());
                 let mut filter_names = BTreeSet::new();
                 for filter in &view.filters {
                     if !query.params.contains(&filter.param)
@@ -1157,9 +1334,197 @@ impl Manifest {
                         || !(1..=40).contains(&filter.label.trim().chars().count())
                         || filter.values.len() > 40
                         || (!filter.labels.is_empty() && filter.labels.len() != filter.values.len())
-                        || filter.choices_query.as_ref().is_some_and(|q| !valid_choices(q))
+                        || filter
+                            .choices_query
+                            .as_ref()
+                            .is_some_and(|q| !valid_choices(q))
                     {
-                        return bad(format!("query `{name}`: invalid view filter `{}`", filter.param));
+                        return bad(format!(
+                            "query `{name}`: invalid view filter `{}`",
+                            filter.param
+                        ));
+                    }
+                    if filter.ty.as_ref().is_some_and(|ty| {
+                        !["string", "number", "date", "boolean", "enum"].contains(&ty.as_str())
+                    }) {
+                        return bad(format!(
+                            "query `{name}`: view filter `{}` has an unsupported type",
+                            filter.param
+                        ));
+                    }
+                    if filter.ty.as_deref() == Some("enum")
+                        && filter.values.is_empty()
+                        && filter.choices_query.is_none()
+                    {
+                        return bad(format!(
+                            "query `{name}`: enum filter `{}` needs values or choices_query",
+                            filter.param
+                        ));
+                    }
+                    if let Some(ty) = filter.ty.as_deref() {
+                        let matches_param =
+                            query.types.get(&filter.param).is_some_and(|spec| match ty {
+                                "string" => matches!(spec.ty, ParamType::String | ParamType::Text),
+                                "number" => {
+                                    matches!(spec.ty, ParamType::Integer | ParamType::Number)
+                                }
+                                "date" => spec.ty == ParamType::Date,
+                                "boolean" => spec.ty == ParamType::Boolean,
+                                "enum" => spec.ty == ParamType::Enum,
+                                _ => false,
+                            });
+                        if !matches_param {
+                            return bad(format!(
+                                "query `{name}`: filter `{}` type does not match its typed query param",
+                                filter.param
+                            ));
+                        }
+                    }
+                }
+                if let Some(pagination) = &view.pagination {
+                    let integer_param = |param: &str| {
+                        query.params.contains(&param.to_string())
+                            && !CONTEXT_PARAMS.contains(&param)
+                            && query
+                                .types
+                                .get(param)
+                                .is_some_and(|spec| spec.ty == ParamType::Integer && !spec.required)
+                    };
+                    if pagination.page_size_param == pagination.offset_param
+                        || !integer_param(&pagination.page_size_param)
+                        || !integer_param(&pagination.offset_param)
+                        || !(1..=1000).contains(&pagination.default_page_size)
+                        || !(pagination.default_page_size..=1000)
+                            .contains(&pagination.max_page_size)
+                    {
+                        return bad(format!(
+                            "query `{name}`: pagination needs distinct optional integer params and page sizes 1..=1000"
+                        ));
+                    }
+                }
+                if let Some(temporal) = &view.temporal {
+                    let integer_param = |param: &str| {
+                        query.params.contains(&param.to_string())
+                            && !CONTEXT_PARAMS.contains(&param)
+                            && query
+                                .types
+                                .get(param)
+                                .is_some_and(|spec| spec.ty == ParamType::Integer && !spec.required)
+                    };
+                    if temporal.start_param == temporal.end_param
+                        || !integer_param(&temporal.start_param)
+                        || !integer_param(&temporal.end_param)
+                    {
+                        return bad(format!(
+                            "query `{name}`: temporal bounds need distinct optional integer query params"
+                        ));
+                    }
+                }
+                let mut sort_params = BTreeSet::new();
+                for sort in &view.sorts {
+                    let valid_values = !sort.values.is_empty()
+                        && sort.values.len() <= 32
+                        && sort.values.iter().all(|v| !v.is_empty() && v.len() <= 64)
+                        && sort.values.iter().collect::<BTreeSet<_>>().len() == sort.values.len();
+                    let valid_param = |param: &str| {
+                        query.params.iter().any(|p| p == param) && !CONTEXT_PARAMS.contains(&param)
+                    };
+                    let valid_directions = sort.direction_param.as_ref().is_some_and(|param| {
+                        valid_param(param)
+                            && sort.directions.iter().all(|d| d == "asc" || d == "desc")
+                            && !sort.directions.is_empty()
+                            && sort.directions.iter().collect::<BTreeSet<_>>().len()
+                                == sort.directions.len()
+                    }) || (sort.direction_param.is_none()
+                        && sort.directions.is_empty());
+                    if !valid_values
+                        || !valid_param(&sort.param)
+                        || !sort_params.insert(&sort.param)
+                        || !valid_directions
+                        || sort
+                            .direction_param
+                            .as_ref()
+                            .is_some_and(|p| p == &sort.param || !sort_params.insert(p))
+                    {
+                        return bad(format!("query `{name}`: invalid view sort binding"));
+                    }
+                }
+                if let Some(action) = &view.row_action {
+                    let validate_action = |spec: &ViewAction,
+                                           allow_navigate: bool|
+                     -> std::result::Result<(), String> {
+                        match (spec.op.as_deref(), spec.navigate.as_ref()) {
+                            (Some(op), None) => {
+                                let Some(operation) = self.operations.get(op) else {
+                                    return Err(format!("`{op}` is not a declared operation"));
+                                };
+                                if operation.effect_of(op) == Effect::Destructive {
+                                    return Err(format!("`{op}` must not be destructive"));
+                                }
+                                if let Some(params) = &operation.params {
+                                    if let Some(unknown) =
+                                        spec.args.keys().find(|key| !params.contains_key(*key))
+                                    {
+                                        return Err(format!(
+                                            "`{op}` action argument `{unknown}` is not declared"
+                                        ));
+                                    }
+                                    if let Some(missing) = params.iter().find(|(key, value)| {
+                                        value.required && !spec.args.contains_key(*key)
+                                    }) {
+                                        return Err(format!(
+                                            "`{op}` action needs argument `{}`",
+                                            missing.0
+                                        ));
+                                    }
+                                }
+                                Ok(())
+                            }
+                            (None, Some(navigate)) if allow_navigate => {
+                                let item = navigate.get("item").and_then(serde_json::Value::as_str);
+                                let plugin = navigate.get("plugin");
+                                if item.is_none_or(str::is_empty)
+                                    || navigate.keys().any(|key| key != "item" && key != "plugin")
+                                    || plugin.is_some_and(|value| !value.is_string())
+                                    || !spec.args.is_empty()
+                                {
+                                    Err("navigate followup needs an item and optional plugin"
+                                        .into())
+                                } else {
+                                    Ok(())
+                                }
+                            }
+                            _ => {
+                                Err("must declare exactly one operation or navigate action".into())
+                            }
+                        }
+                    };
+                    validate_action(&action.action, false).map_err(|message| {
+                        RuntimeError::Manifest(format!("query `{name}`: row action {message}"))
+                    })?;
+                    if action.label.trim().is_empty() || action.label.chars().count() > 40 {
+                        return bad(format!(
+                            "query `{name}`: row action label must be 1-40 characters"
+                        ));
+                    }
+                    if let Some(success) = &action.success {
+                        if success.chars().count() > 100 {
+                            return bad(format!(
+                                "query `{name}`: row action success exceeds 100 characters"
+                            ));
+                        }
+                    }
+                    if let Some(followup) = &action.followup {
+                        if followup.label.trim().is_empty() || followup.label.chars().count() > 40 {
+                            return bad(format!(
+                                "query `{name}`: row action followup label must be 1-40 characters"
+                            ));
+                        }
+                        validate_action(&followup.action, true).map_err(|message| {
+                            RuntimeError::Manifest(format!(
+                                "query `{name}`: row action followup {message}"
+                            ))
+                        })?;
                     }
                 }
                 for column in &view.columns {
@@ -1212,6 +1577,19 @@ impl Manifest {
                             "query `{name}`: view column `{}`: labels must match values",
                             column.key
                         ));
+                    }
+                    match column.board.as_deref() {
+                        None | Some("lanes") => {}
+                        Some("matrix")
+                            if column.ty == ParamType::Enum
+                                && column.choices_query.is_none()
+                                && column.values.len() == 4 => {}
+                        Some(_) => {
+                            return bad(format!(
+                                "query `{name}`: view column `{}`: board must be \"lanes\", or \"matrix\" on an enum with exactly 4 values",
+                                column.key
+                            ));
+                        }
                     }
                     if let Some(move_op) = &column.move_op {
                         if column.ty != ParamType::Enum {
@@ -1274,13 +1652,13 @@ impl Manifest {
                     return bad(format!(
                         "reminders query `{}` must take exactly `now_ms`",
                         reminders.query
-                    ))
+                    ));
                 }
                 None => {
                     return bad(format!(
                         "reminders query `{}` is not declared",
                         reminders.query
-                    ))
+                    ));
                 }
             }
         }
@@ -1307,6 +1685,36 @@ mod tests {
         m["operations"] = json!({"create": {"params": {"title": {"type": "string"}}}, "read": {"effect": "read"}});
         m["import"] = json!([{"id":"csv", "label":"Tasks from CSV", "format":"csv", "op":"create", "fields":{"title":"Title"}}]);
         m
+    }
+
+    #[test]
+    fn former_ids_set_the_storage_id_and_are_validated() {
+        let plain = Manifest::parse(&serde_json::to_vec(&minimal()).unwrap()).unwrap();
+        assert_eq!(plain.storage_id(), "test");
+        assert!(serde_json::to_value(&plain)
+            .unwrap()
+            .get("former_ids")
+            .is_none());
+        let mut m = minimal();
+        m["former_ids"] = json!(["old-test", "older"]);
+        let renamed = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap();
+        assert_eq!(renamed.storage_id(), "old-test");
+        assert!(renamed.answers_to("test") && renamed.answers_to("older"));
+        assert!(!renamed.answers_to("other"));
+        Manifest::parse(&serde_json::to_vec(&renamed).unwrap()).unwrap();
+        for (bad, message) in [
+            (json!(["Bad"]), "must use a-z"),
+            (json!(["test"]), "own id"),
+            (json!(["a", "a"]), "repeated"),
+            (json!(["_pages"]), "must use a-z"),
+            (json!(["page"]), "reserved"),
+            (json!(["a", "b", "c", "d", "e"]), "at most 4"),
+        ] {
+            let mut m = minimal();
+            m["former_ids"] = bad;
+            let e = Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap_err();
+            assert!(e.to_string().contains(message), "{e}");
+        }
     }
 
     #[test]
@@ -1781,9 +2189,12 @@ mod tests {
     fn view_filters_and_dynamic_choices_are_declared_queries() {
         let mut value = with_view(valid_view());
         value["queries"]["all"]["params"] = json!(["lists"]);
-        value["queries"]["choices"] = json!({"sql":"SELECT 'a' AS value, 'A' AS label", "params":[]});
-        value["queries"]["all"]["view"]["filters"] = json!([{"param":"lists", "label":"Lists", "multiple":true,"choices_query":"choices"}]);
-        value["queries"]["all"]["view"]["columns"][1] = json!({"key":"state", "label":"State", "type":"enum", "choices_query":"choices"});
+        value["queries"]["choices"] =
+            json!({"sql":"SELECT 'a' AS value, 'A' AS label", "params":[]});
+        value["queries"]["all"]["view"]["filters"] =
+            json!([{"param":"lists", "label":"Lists", "multiple":true,"choices_query":"choices"}]);
+        value["queries"]["all"]["view"]["columns"][1] =
+            json!({"key":"state", "label":"State", "type":"enum", "choices_query":"choices"});
         assert!(Manifest::parse(&serde_json::to_vec(&value).unwrap()).is_ok());
         value["queries"]["choices"]["params"] = json!(["scope"]);
         assert!(Manifest::parse(&serde_json::to_vec(&value).unwrap()).is_err());
@@ -1897,6 +2308,22 @@ mod tests {
             |manifest| {
                 manifest["queries"]["all"]["view"] = json!({
                     "title": "Notes",
+                    "title_column": "state",
+                    "columns": [{
+                        "key": "state",
+                        "label": "State",
+                        "type": "enum",
+                        "values": ["a", "b"],
+                        "board": "matrix"
+                    }]
+                });
+            },
+            "view column `state`: board must be",
+        );
+        expect_error(
+            |manifest| {
+                manifest["queries"]["all"]["view"] = json!({
+                    "title": "Notes",
                     "title_column": "note",
                     "columns": [{
                         "key": "note",
@@ -1984,6 +2411,87 @@ mod tests {
             },
             "unknown field `extra`",
         );
+    }
+
+    #[test]
+    fn v1_capabilities_require_gate_and_supported_version() {
+        let view = json!({
+            "version": 1,
+            "title": "Notes",
+            "columns": [{"key":"note", "label":"Note", "type":"string"}],
+            "filters": [{"param":"from", "label":"From", "type":"date"}]
+        });
+        let mut manifest = fixture();
+        manifest["queries"]["all"]["params"] = json!(["from"]);
+        manifest["queries"]["all"]["types"] = json!({"from":{"type":"date"}});
+        manifest["queries"]["all"]["view"] = view.clone();
+        let error = Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("data-views-v1"), "{error}");
+
+        manifest["requires"] = json!(["data-views-v1"]);
+        manifest["queries"]["all"]["view"]["version"] = json!(2);
+        let error = Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported view capability version `2`"));
+
+        manifest["requires"] = json!(["future-feature"]);
+        let error = Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown host requirement `future-feature`"));
+    }
+
+    #[test]
+    fn v1_temporal_pagination_sort_and_action_are_declared() {
+        let mut manifest = fixture();
+        manifest["requires"] = json!(["data-views-v1"]);
+        manifest["queries"]["all"]["sql"] = json!("SELECT id FROM items");
+        manifest["queries"]["all"]["params"] = json!([
+            "start_ms",
+            "end_ms",
+            "page_size",
+            "offset",
+            "sort",
+            "direction"
+        ]);
+        manifest["queries"]["all"]["types"] = json!({
+            "start_ms":{"type":"integer"}, "end_ms":{"type":"integer"},
+            "page_size":{"type":"integer"}, "offset":{"type":"integer"},
+            "sort":{"type":"string"}, "direction":{"type":"string"}
+        });
+        manifest["queries"]["all"]["view"] = json!({
+            "version": 1,
+            "title":"Notes",
+            "title_column":"note",
+            "columns":[{"key":"note", "label":"Note", "type":"string"}],
+            "temporal":{"start_param":"start_ms", "end_param":"end_ms"},
+            "pagination":{"page_size_param":"page_size", "offset_param":"offset"},
+            "sorts":[{"param":"sort", "values":["title"], "direction_param":"direction", "directions":["asc", "desc"]}],
+            "row_action":{"action":{"op":"ok", "args":{"id":"{{row.id}}"}}, "success":"Saved",
+                "followup":{"label":"Open", "if":"{{result.id}}", "action":{"navigate":{"plugin":"sample", "item":"{{result.id}}"}}}}
+        });
+        manifest["operations"]["ok"]["params"] = json!({
+            "id":{"type":"string", "required":true}
+        });
+        let parsed = Manifest::parse(&serde_json::to_vec(&manifest).unwrap());
+        assert!(parsed.is_ok(), "{parsed:?}");
+
+        manifest["queries"]["all"]["view"]["row_action"]["action"]["args"]["unknown"] =
+            json!("{{row.id}}");
+        let error = Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("action argument `unknown` is not declared"));
+
+        manifest["queries"]["all"]["view"]["row_action"]["action"]["args"] =
+            json!({"id":"{{row.id}}"});
+
+        manifest["queries"]["all"]["view"]["pagination"]["page_size_param"] = json!("unknown");
+        let error = Manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("pagination needs distinct optional integer params"));
     }
 
     #[test]

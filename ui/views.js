@@ -105,7 +105,7 @@
     return labels[index] || String(value);
   }
 
-  function prepareRows(rows, view, config, focus) {
+  function prepareRows(rows, view, config, focus, timezone) {
     const s = settings(view, config);
     const allColumns = view?.columns || [];
     const byKey = new Map(allColumns.map((column) => [column.key, column]));
@@ -115,6 +115,22 @@
     let out = (Array.isArray(rows) ? rows : []).map((row) => {
       const next = { ...(row || {}) };
       for (const column of enumColumns) next[`${column.key}__label`] = enumLabel(column, next[column.key]);
+      for (const column of columns(view, ["date"])) {
+        const value = next[column.key];
+        let label = value ?? "", day = value ?? "";
+        if (typeof value === "number" || (typeof value === "string" && /^\d{4}-\d\d-\d\dT/.test(value))) {
+          const date = new Date(value);
+          if (Number.isFinite(date.getTime())) {
+            const options = timezone ? { timeZone: timezone } : {};
+            label = new Intl.DateTimeFormat(undefined, { ...options, dateStyle: "medium", timeStyle: "short" }).format(date);
+            const parts = new Intl.DateTimeFormat("en-CA", { ...options, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+            const part = kind => parts.find(p => p.type === kind).value;
+            day = `${part("year")}-${part("month")}-${part("day")}`;
+          } else { label = "Invalid date"; day = ""; }
+        }
+        next[`${column.key}__label`] = label;
+        next[`${column.key}__day`] = day;
+      }
       return next;
     });
     if (needle) {
@@ -129,7 +145,7 @@
         return false;
       });
     }
-    if (s.sort) {
+    if (s.sort && !view.pagination) {
       const type = byKey.get(s.sort)?.type || "string";
       out = sortRows(out, s.sort, type, s.dir);
     }
@@ -147,26 +163,28 @@
     const titleColumn = typeof view.title_column === "string" && view.title_column ? view.title_column : "title";
     const title = `{{row.${titleColumn}}}`;
     const open = { navigate: { item: "{{row.id}}" } };
+    const rowAction = view.row_action ? { ...view.row_action.action, label: view.row_action.label, success: view.row_action.success, followup: view.row_action.followup } : null;
     const shown = visibleColumns(view, config);
     const explicitFields = typeof config?.fields === "string";
     const dateColumn = shown.find(column => column.type === "date");
     const enumColumns = columns(view, ["enum"]);
     const chips = shown.filter(column => column.type === "enum" || (explicitFields && column.key !== titleColumn && column !== dateColumn))
-      .map(column => ({ text: column.type === "enum" ? `{{row.${column.key}__label}}` : `{{row.${column.key}}}` }));
+      .map(column => ({ text: ["enum", "date"].includes(column.type) ? `{{row.${column.key}__label}}` : `{{row.${column.key}}}` }));
     const item = {
       type: "item",
       title,
-      ...(dateColumn ? { subtitle: `{{row.${dateColumn.key}}}` } : {}),
+      ...(dateColumn ? { subtitle: `{{row.${dateColumn.key}__label}}` } : {}),
       ...(chips.length ? { chips } : {}),
       action: open,
+      ...(rowAction ? { row_action: rowAction } : {}),
     };
     if (s.layout === "table") {
       const tableColumns = shown.map((column) => ({
-        key: column.type === "enum" ? `${column.key}__label` : column.key,
+        key: ["enum", "date"].includes(column.type) ? `${column.key}__label` : column.key,
         label: column.label,
         type: column.type === "enum" ? "string" : column.type,
       }));
-      const sort = s.sort && (view.columns || []).find((column) => column.key === s.sort)?.type === "enum" ? `${s.sort}__label` : s.sort;
+      const sort = s.sort && ["enum", "date"].includes((view.columns || []).find((column) => column.key === s.sort)?.type) ? `${s.sort}__label` : s.sort;
       return {
         state: {},
         body: {
@@ -177,6 +195,8 @@
           columns: tableColumns,
           sort,
           dir: s.dir,
+          server_sorted: Boolean(view.pagination),
+          ...(rowAction ? { row_action: rowAction } : {}),
           empty: "No items match this view. Adjust its filters or capture a new item.",
           empty_focus: "Nothing matches “{{$page.focus}}”.",
           action: open,
@@ -189,11 +209,14 @@
         value,
         label: groupColumn?.labels?.[index] || value,
       }));
+      // A column marked `board: "matrix"` (four values) draws as a 2×2
+      // grid, so a saved Eisenhower view reopens as the matrix.
+      const matrix = groupColumn?.board === "matrix" && boardColumns.length === 4;
       return {
         state: {},
         body: {
           type: "list",
-          layout: "board",
+          layout: matrix ? "matrix" : "board",
           query: entry.query,
           params,
           label: view.title,
@@ -212,9 +235,10 @@
           query: entry.query,
           params,
           label: view.title,
-          date: s.date,
+          date: `${s.date}__day`,
           title: titleColumn,
           empty: "Nothing this month.",
+          ...(rowAction ? { row_action: rowAction } : {}),
           action: open,
         },
       };
@@ -233,15 +257,45 @@
     };
   }
 
-  function wrapBridge(base, entry, config, focus) {
+  function wrapBridge(base, entry, config, focus, paging, period) {
     return Object.assign({}, base, {
       query: async (name, params) => {
         if (name !== entry.query) return base.query(name, params);
         const values = filterParams(entry.view, config);
         const scoped = Object.assign({}, params, values);
+        let timezone;
         const queryFocus = Object.hasOwn(entry.view.params || {}, "page_focus");
         if (queryFocus) scoped.page_focus = String(focus || "");
-        return prepareRows(await base.query(name, scoped), entry.view, config, queryFocus ? "" : focus);
+        if (period) {
+          const bounds = typeof period === "function" ? period() : period;
+          if (bounds) {
+            if (!entry.view.temporal) throw new Error("This data source cannot follow a page review period.");
+            timezone = bounds.timezone;
+            scoped[entry.view.temporal.start_param] = bounds.start_ms;
+            scoped[entry.view.temporal.end_param] = bounds.end_ms;
+          }
+        }
+        if (entry.view.pagination) {
+          if (focus && !queryFocus) throw new Error("This paged source does not support page focus. Clear this widget's focus to show it.");
+          const s = settings(entry.view, config);
+          if (s.sort && !(entry.view.sorts || []).length) throw new Error("This view now uses query-side sorting. Customize it and use its Sort filter instead.");
+          for (const sort of entry.view.sorts || []) {
+            if (s.sort) {
+              if (!sort.values.includes(s.sort)) throw new Error("This sort is unavailable. Customize this view to choose a supported sort.");
+              scoped[sort.param] = s.sort;
+            }
+            if (sort.direction_param) scoped[sort.direction_param] = s.dir;
+          }
+          const p = entry.view.pagination;
+          const size = paging?.size || p.default_page_size || 100;
+          scoped[p.page_size_param] = size + 1;
+          scoped[p.offset_param] = paging?.offset || 0;
+          const rows = await base.query(name, scoped);
+          if (!Array.isArray(rows)) throw new Error("The data source returned invalid rows.");
+          if (paging) { paging.more = rows.length > size; paging.count = Math.min(rows.length, size); paging.changed?.(); }
+          return prepareRows(rows.slice(0, size), entry.view, config, "", timezone);
+        }
+        return prepareRows(await base.query(name, scoped), entry.view, config, queryFocus ? "" : focus, timezone);
       },
     });
   }
@@ -249,12 +303,27 @@
   function filterParams(view, config) {
     let filters = {};
     if (config?.filters) {
-      try { filters = JSON.parse(config.filters); } catch (_) { throw new Error("Saved filters are invalid. Edit this view to repair them."); }
+      if (typeof config.filters === "string") {
+        try { filters = JSON.parse(config.filters); } catch (_) { throw new Error("Saved filters are invalid. Edit this view to repair them."); }
+      } else if (config.filters && typeof config.filters === "object" && !Array.isArray(config.filters)) {
+        filters = { ...config.filters };
+      } else {
+        throw new Error("Saved filters are invalid. Edit this view to repair them.");
+      }
     }
     if (!filters || typeof filters !== "object" || Array.isArray(filters)) throw new Error("View filters must be an object.");
     const allowed = new Set((view.filters || []).map(f => f.param));
     for (const [key, value] of Object.entries(filters)) {
       if (!allowed.has(key) || (value !== null && typeof value === "object")) throw new Error(`Filter ${key} is no longer available. Edit this view to repair it.`);
+      const definition = (view.filters || []).find(f => f.param === key);
+      if (definition?.type === "number" && value !== "" && value != null) {
+        if (!Number.isFinite(Number(value))) throw new Error(`${definition.label} must be a number.`);
+        filters[key] = Number(value);
+      }
+      if (definition?.type === "boolean" && value !== "" && value != null) {
+        if (![true, false, "true", "false"].includes(value)) throw new Error(`${definition.label} must be true or false.`);
+        filters[key] = value === true || value === "true";
+      }
     }
     return filters;
   }
@@ -291,7 +360,20 @@
     body.classList.add("pp-data-view");
     body.dataset.density = options.config?.density === "compact" ? "compact" : "comfortable";
     let child = null, dead = false, revision = 0, signature = "";
-    const load = async () => {
+    const pagination = options.entry.view.pagination;
+    const paging = pagination ? { size: pagination.default_page_size || 100, offset: 0, more: false, count: 0 } : null;
+    let previous, nextButton, count, busy = false;
+    const updatePager = () => {
+      if (!paging || !previous) return;
+      previous.disabled = busy || paging.offset === 0;
+      nextButton.disabled = busy || !paging.more;
+      count.textContent = paging.count ? `Items ${paging.offset + 1}–${paging.offset + paging.count}${paging.more ? " · more available" : ""}` : "No items on this page";
+      if (["board", "calendar"].includes(options.config?.layout)) count.textContent += " · showing this batch only";
+    };
+    if (paging) paging.changed = updatePager;
+    const load = async (reset = true) => {
+      if (paging && reset) paging.offset = 0;
+      busy = true; updatePager();
       const seq = ++revision;
       try {
         await validateChoices(options.entry.view, options.config, options.bridge);
@@ -300,8 +382,19 @@
         const next = JSON.stringify(entry.view);
         if (child && signature === next) { await child.refresh(); return; }
         child?.dispose(); body.replaceChildren(); signature = next;
-        child = (options.mount || root.TerrariumRenderer.mount)(body, template(entry, options.config, options.size),
-          wrapBridge(options.bridge, entry, options.config, options.focus), { snapshot: options.snapshot, size: options.size,
+        let content = body;
+        if (paging) {
+          content = document.createElement("div"); body.append(content);
+          const controls = document.createElement("nav"); controls.className = "pp-view-pagination"; controls.setAttribute("aria-label", "View result pages");
+          previous = document.createElement("button"); previous.type = "button"; previous.textContent = "Previous";
+          nextButton = document.createElement("button"); nextButton.type = "button"; nextButton.textContent = "Next";
+          count = document.createElement("span"); count.setAttribute("aria-live", "polite");
+          previous.addEventListener("click", () => { if (busy || !paging.offset) return; paging.offset = Math.max(0, paging.offset - paging.size); return load(false); });
+          nextButton.addEventListener("click", () => { if (busy || !paging.more) return; paging.offset += paging.size; return load(false); });
+          controls.append(previous, count, nextButton); body.append(controls); updatePager();
+        }
+        child = (options.mount || root.TerrariumRenderer.mount)(content, template(entry, options.config, options.size),
+          wrapBridge(options.bridge, entry, options.config, options.focus, paging, options.period), { snapshot: options.snapshot, size: options.size,
             page: { focus: options.focus || "", title: options.pageTitle || "" } });
         await child.ready;
       } catch (error) {
@@ -309,6 +402,8 @@
         child?.dispose(); child = null; signature = "";
         const message = document.createElement("p"); message.className = "pp-error";
         message.textContent = String(error); body.replaceChildren(message);
+      } finally {
+        if (seq === revision) { busy = false; updatePager(); }
       }
     };
     const handle = { refresh: load, flush: async (...args) => child ? child.flush(...args) : true,

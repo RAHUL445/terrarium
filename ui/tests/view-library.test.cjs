@@ -122,3 +122,84 @@ test('a restored draft keeps unapplied filters separate from the preview and sav
   assert.equal(previews.at(-1).filters, '{"q":"unapplied"}');
   library.dispose();
 });
+
+function embeddedLibrary(spec, records, opts = {}) {
+  const { root: base } = rendererHarness();
+  class Node extends base.constructor {
+    get tagName() { return this.tag.toUpperCase(); }
+    get options() { return this.children.filter(child => child.tag === 'option'); }
+  }
+  const previews = [], writes = [], gets = [];
+  const view = opts.view || { title: 'Tasks', title_column: 'title', params: { q: '', lists: '' },
+    columns: [{ key: 'title', label: 'Task', type: 'string' }],
+    filters: [{ param: 'q', label: 'Search' }, { param: 'lists', label: 'Lists', multiple: true }] };
+  const window = { TerrariumViews: { ...require('../views.js'), mount: (body, options) => {
+    previews.push(options.config);
+    return { ready: Promise.resolve(), refresh: async () => {}, dispose() {} };
+  } } };
+  vm.runInNewContext(readFileSync(require.resolve('../view-library.js'), 'utf8'), {
+    window, document: { createElement: tag => new Node(tag) },
+  });
+  const root = new Node('root');
+  const library = window.TerrariumViewLibrary.mount(root, spec, {
+    plugin: 'todo', plugins: [{ id: 'todo', views: { tasks: view } }], bridge: { changed() {} }, ...opts,
+    service: async (name, args) => {
+      if (name === 'views_list') return records;
+      if (name === 'view_get') { gets.push(args.id); return records.find(record => record.id === args.id); }
+      if (name === 'view_save') { writes.push(args); return { id: 'new-1', ...args }; }
+      throw new Error(name);
+    },
+  });
+  const flatten = node => [node, ...node.children.filter(n => typeof n !== 'string').flatMap(flatten)];
+  return { root, library, previews, writes, gets, flatten };
+}
+
+test('an embedded library opens the selected view, ignores another view snapshot, and switches on select', async () => {
+  const records = ['v1', 'v2'].map(id => ({ id, title: id.toUpperCase(), config: { plugin: 'todo', query: 'tasks', layout: 'list', filters: `{"q":"${id}"}` } }));
+  const { root, library, previews, gets, flatten } = embeddedLibrary({ query: 'tasks', selected: 'v2' }, records, {
+    snapshot: { selectedId: 'v1', title: 'Old', open: true, dirty: true, config: records[0].config, appliedConfig: records[0].config },
+  });
+  await library.ready;
+  assert.deepEqual(gets, ['v2']);
+  assert.equal(previews.at(-1).filters, '{"q":"v2"}');
+  const picker = flatten(root).find(node => node.tag === 'select' && node.attrs['aria-label'] === 'Saved view');
+  assert.equal(picker.parent.hidden, true, 'the page lists saved views, so the picker is hidden');
+  await library.select('v1');
+  assert.equal(previews.at(-1).filters, '{"q":"v1"}');
+  library.dispose();
+});
+
+test('a draft from page state keeps declared filters only and reports the saved record', async () => {
+  const saved = [];
+  const { root, library, previews, writes, flatten } = embeddedLibrary({ query: 'tasks', draft: {
+    title: 'Inbox', layout: 'list', sort: 'title', density: 'compact',
+    filters: { q: 'brief', lists: 'l1', filter: 'inbox', tags: '' },
+  } }, [], { onSaved: record => saved.push(record) });
+  await library.ready;
+  assert.equal(previews.at(-1).filters, '{"q":"brief","lists":"l1"}');
+  assert.equal(previews.at(-1).density, 'compact');
+  assert.equal(flatten(root).find(node => node.tag === 'input' && node.maxLength === 40).value, 'Inbox');
+  await flatten(root).find(node => node.tag === 'button' && node.textContent === 'Save as new').fire('click');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].id, undefined);
+  assert.equal(writes[0].title, 'Inbox');
+  assert.equal(saved[0].id, 'new-1');
+  library.dispose();
+});
+
+test('a draft maps a page layout to view settings so a board layout is kept', async () => {
+  const view = { title: 'Tasks', title_column: 'title', params: { q: '' },
+    columns: [{ key: 'title', label: 'Task', type: 'string' }, { key: 'board_lane', label: 'Stage', type: 'enum', values: ['todo', 'doing', 'done'] }],
+    filters: [{ param: 'q', label: 'Search' }] };
+  const layouts = { kanban: { layout: 'board', group: 'board_lane' } };
+  const { library, previews } = embeddedLibrary({ query: 'tasks', draft: { title: 'Board', layout: 'kanban', layouts, filters: {} } }, [], { view });
+  await library.ready;
+  assert.equal(previews.at(-1).layout, 'board');
+  assert.equal(previews.at(-1).group, 'board_lane');
+  library.dispose();
+  const plain = embeddedLibrary({ query: 'tasks', draft: { title: 'List', layout: 'list', layouts, filters: {} } }, [], { view });
+  await plain.library.ready;
+  assert.equal(plain.previews.at(-1).layout, 'list');
+  plain.library.dispose();
+});

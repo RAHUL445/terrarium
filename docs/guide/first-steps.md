@@ -4,11 +4,19 @@ Terrarium is organised around **spaces**, **apps** (plugins) and **pages**.
 Everything below works the same on desktop and Android; on a phone the side
 navigation becomes a bottom bar.
 
-## Home and pages
+## Today, the Dashboard and pages
 
-**Home** is a page of widgets from your apps, such as today's tasks, a quick
-voice capture, habit check-ins and recent notes. You can add more pages from
-the sidebar with **New page**.
+**Today** is the home: Terrarium always opens on it, and ⌘1 / Ctrl+1 returns
+to it. It lists what needs attention today from your apps in one column.
+
+The **Dashboard** is a page of widgets from your apps, such as today's tasks, a
+quick voice capture, habit check-ins and recent notes. It is pinned in the
+sidebar; unpin it if you don't need it, and find it again under **Pages &
+folders**. You can add more pages from the sidebar with **New page**.
+
+You can pin pages, folders and apps to the sidebar. Pin a folder with **Pin to
+rail** in **Pages & folders**; in the sidebar it opens in place to show its
+pages and subfolders. ⌘2–⌘9 / Ctrl+2–9 open the pins in order.
 
 To change a page, choose **Edit page**:
 
@@ -26,7 +34,7 @@ To change a page, choose **Edit page**:
 
 See [Views on pages](views.md) for table, calendar and board settings.
 
-**Quick add** on Home creates an item in an app without opening it.
+**Quick add** on a page creates an item in an app without opening it.
 
 ## Apps
 

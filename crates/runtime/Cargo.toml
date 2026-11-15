@@ -92,3 +92,8 @@ required-features = ["plugin-integration"]
 name = "refs"
 path = "tests/refs.rs"
 required-features = ["plugin-integration"]
+
+[[test]]
+name = "renames"
+path = "tests/renames.rs"
+required-features = ["plugin-integration"]

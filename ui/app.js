@@ -155,8 +155,16 @@ async function refresh() {
 const views = { page: null, get widgets() { return pages ? pages.mounted() : []; } };
 let pages = null;
 let rails = null;
+let today = null;
+// Item details beside the list on wide windows (see detail-dock.js). The page
+// renderer docks its item sheet itself; Today opens one through `detail`.
+const detailDock = window.TerrariumDock.create(document.getElementById("detail-dock"), {
+  onChange: () => today?.selected?.(),
+});
+let detail = null; // Today's docked item: {plugin, bind, view, host}
+let detailSeq = 0;
 let pluginList = { plugins: [], removed: [], errors: [], dev: false };
-let currentView = "home";
+let currentView = "today";
 let settingsSection = "spaces";
 let spaces = [];
 let currentSpace = "personal";
@@ -181,7 +189,7 @@ async function restoreWorkspace(location) {
   if (location.settings && ["spaces", "devices", "backups", "appearance", "ai", "scheduled", "automations", "plugins", "developer"].includes(location.settings)) settingsSection = location.settings;
   const plugin = pluginList.plugins.find(p => p.id === location.plugin);
   if (location.view === "plugin" && plugin?.pages.some(p => p.id === location.page)) await openPage(location.plugin, location.page, { item: location.item || null });
-  else await showView(location.view === "plugin" ? "home" : location.view);
+  else await showView(["plugin", "home", "today"].includes(location.view) ? startView() : location.view);
   requestAnimationFrame(() => { window.scrollTo(0, location.scroll); $("content").scrollTop = location.scroll; });
 }
 window.addEventListener("pagehide", rememberWorkspace);
@@ -229,6 +237,7 @@ const ICONS = {
   copy: ["M9 9h11v11H9z", "M5 15H4V4h11v1"],
   trash: ["M4 7h16", "M10 11v6M14 11v6", "M6 7l1 13h10l1-13", "M9 7V4h6v3"],
   grip: ["M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01"],
+  more: ["M5 12h.01M12 12h.01M19 12h.01"],
   sync: ["M20 11a8 8 0 0 0-14.9-3M4 13a8 8 0 0 0 14.9 3", "M5 3v5h5M19 21v-5h-5"],
   archive: ["M3 4h18v5H3z", "M5 9v10h14V9M10 13h4"],
   code: ["m8 8-4 4 4 4M16 8l4 4-4 4"],
@@ -236,6 +245,10 @@ const ICONS = {
   bolt: ["M13 3 5 14h6l-1 7 8-11h-6z"],
   sparkle: ["M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z", "M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"],
   palette: ["M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.3 0-1.1.9-2 2-2h2.3A4.7 4.7 0 0 0 21 9.7C21 6 17 3 12 3z", "M7.5 11.5h.01M10 7.5h.01M15 7.5h.01"],
+  sun: ["M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8", "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"],
+  moon: ["M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"],
+  rss: ["M5 5a14 14 0 0 1 14 14", "M5 11a8 8 0 0 1 8 8", "M5.5 18.5h.01"],
+  more: ["M5 12h.01M12 12h.01M19 12h.01"],
 };
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -298,6 +311,11 @@ function localWeekday() {
   return (new Date().getDay() + 6) % 7;
 }
 
+/** The view the app lands on: Today is the home. */
+function startView() {
+  return "today";
+}
+
 function toast(message, kind = "ok", action = null) {
   const box = el("div", { class: `toast toast-${kind}` }, el("span", {}, message));
   if (action) box.append(el("button", {
@@ -344,6 +362,10 @@ function bridge(plugin) {
   const desktopSave = Boolean(window.__TAURI__ && !/Android/.test(navigator.userAgent) && !/^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname));
   const api = {
     plugin,
+    // Item refs keep a renamed plugin's storage id, so older builds resolve them.
+    get refPlugin() {
+      return window.TerrariumPluginIds.refId(pluginList.plugins.find((item) => item.id === plugin)) || plugin;
+    },
     mountViewLibrary: (node, spec, state) => window.TerrariumViewLibrary.mount(node, spec, {
       ...state,
       plugin,
@@ -355,6 +377,25 @@ function bridge(plugin) {
       },
       toast,
     }),
+    listViews: async () => {
+      if (space !== currentSpace) return [];
+      const records = await call("service", { name: "views_list", args: { space } });
+      const icons = { board: "board", table: "table", calendar: "calendar" };
+      return (Array.isArray(records) ? records : []).filter((record) => record?.config?.plugin === plugin)
+        .map((record) => ({ id: String(record.id), title: record.title || "Untitled view", icon: icons[record.config.layout] || "list" }));
+    },
+    mountDataView: (node, spec, state) => {
+      const owner = pluginList.plugins.find((item) => item.id === plugin);
+      const query = typeof spec?.query === "string" ? spec.query : "";
+      const entry = owner && window.TerrariumViews.find([owner], plugin, query);
+      if (!entry) {
+        node.textContent = "This app no longer offers the selected data.";
+        return { snapshot: () => state?.snapshot, refresh() {}, flush: async () => true, dispose() {} };
+      }
+      return window.TerrariumViews.mount(node, { entry, config: spec.config || {}, bridge: api,
+        snapshot: state?.snapshot, mount: (root, template, viewBridge, options) =>
+          window.TerrariumRenderer.mount(root, template, viewBridge, options) });
+    },
     command: (kind, id, args) => HOST_BRIDGE_COMMANDS.has(id)
       ? call("command", { kind, id, space, args }) : Promise.reject(new Error("Not allowed")),
     openRef: (hit) => {
@@ -547,7 +588,9 @@ async function openHistory(plugin, space, { table, id, title }) {
 
 function refreshPluginViews() {
   if (views.page) views.page.refresh();
+  detail?.view.refresh();
   for (const view of views.widgets) view.refresh();
+  today?.refresh();
   rails?.refresh();
   loadBadges();
 }
@@ -576,6 +619,7 @@ async function loadBadges() {
 
 // Desktop chrome reuses manifest quick actions and the host command palette.
 function renderWorkspace() {
+  renderAppMenu();
   const plugin = currentView === "plugin" ? pluginList.plugins.find(p => p.id === currentPage?.plugin) : null;
   const page = plugin?.pages.find(p => p.id === currentPage.page);
   const desktopTitle = !!plugin || currentView === "apps";
@@ -586,14 +630,17 @@ function renderWorkspace() {
     $("workspace-context").removeAttribute("role");
     $("workspace-context").removeAttribute("aria-level");
   }
-  $("workspace-context").textContent = plugin ? `${plugin.name}${plugin.pages.length > 1 && page ? ` / ${page.title}` : ""}` : currentView === "home" ? pages?.title() || "Home" : currentView === "settings" ? `Settings / ${({ ai: "AI", devices: "Devices and sync" })[settingsSection] || settingsSection[0].toUpperCase() + settingsSection.slice(1)}` : "Apps";
+  $("workspace-context").textContent = plugin ? `${plugin.name}${plugin.pages.length > 1 && page ? ` / ${page.title}` : ""}` : currentView === "today" ? "Home" : currentView === "home" ? pages?.title() || "Dashboard" : currentView === "settings" ? `Settings / ${({ ai: "AI", devices: "Devices and sync" })[settingsSection] || settingsSection[0].toUpperCase() + settingsSection.slice(1)}` : "Apps";
   const actions = plugin?.quick_actions || [];
-  const make = (action, primary) => el("button", { type: "button", class: primary ? "workspace-primary" : "", onclick: () => {
+  const make = (action, primary) => el("button", { type: "button", class: primary ? "workspace-primary" : "", role: primary ? null : "menuitem", onclick: () => {
     $("workspace-actions").querySelector("details")?.removeAttribute("open");
     openPalette({ action: { plugin, action } });
   } }, action.label);
-  const nodes = actions.length ? [make(actions[0], true)] : currentView === "home" ? [el("button", { type: "button", class: "workspace-primary", onclick: () => openPalette({ mode: "add" }) }, icon("plus"), "Quick add")] : [];
-  if (actions.length > 1) nodes.push(el("details", { class: "workspace-overflow" }, el("summary", { "aria-label": "More page actions" }, "More"), el("div", {}, ...actions.slice(1).map(a => make(a, false)))));
+  const nodes = actions.length ? [make(actions[0], true)] : [];
+  const closeOverflow = () => $("workspace-actions").querySelector("details")?.removeAttribute("open");
+  const pinItems = plugin ? pinMenuItems({ kind: "app", id: plugin.id }, "app", closeOverflow) : [];
+  const overflow = [...actions.slice(1).map(a => make(a, false)), ...pinItems];
+  if (overflow.length) nodes.push(el("details", { class: "workspace-overflow" }, el("summary", { class: "icon-button", "aria-label": "More page actions", title: "More page actions" }, icon("more")), el("div", { role: "menu" }, ...overflow)));
   $("workspace-actions").replaceChildren(...nodes);
   updateWorkspaceStatus();
 }
@@ -645,6 +692,67 @@ function openApp(plugin) {
   else toast(`${plugin.name} has no page`, "error");
 }
 
+function pinMenuItems(pin, name, close) {
+  if (!pages?.space || !pin) return [];
+  const pinned = pages.isPinned(pin);
+  return [
+    el("button", { type: "button", role: "menuitem", "aria-pressed": String(pinned), onclick: () => { close(); pages.togglePin(pin); } }, `${pinned ? "Unpin" : "Pin"} ${name}`),
+    el("button", { type: "button", role: "menuitem", onclick: () => { close(); pages.managePins(); } }, "Manage pins…"),
+  ];
+}
+
+function renderAppMenu() {
+  const menu = $("app-menu");
+  const items = currentView === "plugin" && currentPage ? pinMenuItems({ kind: "app", id: currentPage.plugin }, "app", () => menu.removeAttribute("open")) : [];
+  $("app-menu-items").replaceChildren(...items);
+  menu.hidden = !items.length;
+  if (!items.length) menu.removeAttribute("open");
+}
+
+// Pages, folders and apps in the rail pin from their context menu.
+const railMenu = el("div", { class: "rail-context-menu", role: "menu", "aria-label": "Pin actions" });
+railMenu.hidden = true;
+document.body.append(railMenu);
+let railMenuReturn = null;
+function closeRailMenu(restoreFocus) {
+  if (railMenu.hidden) return;
+  railMenu.hidden = true;
+  if (restoreFocus) railMenuReturn?.focus?.();
+  railMenuReturn = null;
+}
+document.addEventListener("contextmenu", (event) => {
+  const target = event.target.closest?.("#app-nav [data-plugin], #page-nav [data-user-page], #page-nav [data-folder-pin]");
+  if (!target || !pages?.space) return;
+  const pin = target.dataset.userPage ? { kind: "page", id: target.dataset.userPage }
+    : target.dataset.folderPin ? { kind: "folder", id: target.dataset.folderPin } : { kind: "app", id: target.dataset.plugin };
+  const items = pinMenuItems(pin, pin.kind, () => closeRailMenu(true));
+  if (!items.length) return;
+  event.preventDefault();
+  railMenuReturn = target;
+  railMenu.replaceChildren(...items);
+  railMenu.hidden = false;
+  const box = target.getBoundingClientRect();
+  const x = event.clientX || box.right, y = event.clientY || box.top;
+  railMenu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - railMenu.offsetWidth - 8))}px`;
+  railMenu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - railMenu.offsetHeight - 8))}px`;
+  items[0].focus();
+});
+document.addEventListener("pointerdown", (event) => { if (!railMenu.contains(event.target)) closeRailMenu(false); }, true);
+window.addEventListener("blur", () => closeRailMenu(false));
+window.addEventListener("resize", () => closeRailMenu(false));
+railMenu.addEventListener("keydown", (event) => {
+  const items = [...railMenu.querySelectorAll("button")];
+  const index = items.indexOf(document.activeElement);
+  if (event.key === "Escape" || event.key === "Tab") { event.preventDefault(); closeRailMenu(true); }
+  else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    items[(index + (event.key === "ArrowDown" ? 1 : items.length - 1)) % items.length]?.focus();
+  }
+});
+$("app-menu").addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("app-menu").open) { $("app-menu").removeAttribute("open"); $("app-menu").querySelector("summary").focus(); }
+});
+
 function renderAppNav() {
   $("app-nav").replaceChildren(...(rails ? rails.navigation(pluginList.plugins) : pluginList.plugins.filter((p) => p.pages.length)).map((p) => {
     const count = badges[p.id];
@@ -672,9 +780,26 @@ function renderApps() {
 
 }
 
+// Keys this device's storage holds, without the profile prefix.
+function deviceStorageKeys() {
+  try {
+    const prefix = window.terrariumProfileId ? `${window.terrariumProfileId}:` : "";
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(prefix)) keys.push(key.slice(prefix.length));
+    }
+    return keys;
+  } catch (_) { return []; }
+}
+
 async function loadPlugins() {
   templateCache.clear();
   pluginList = await call("plugins");
+  // A renamed plugin (e.g. To-do → Task manager) keeps this device's pins,
+  // layout and last place under its new id.
+  try { window.TerrariumPluginIds.migrate(window.terrariumStorage || localStorage, deviceStorageKeys(), pluginList.plugins); } catch (_) {}
+  if (currentPage) currentPage = { ...currentPage, plugin: window.TerrariumPluginIds.canonical(pluginList.plugins, currentPage.plugin) };
   const errors = $("load-errors");
   errors.replaceChildren(
     ...pluginList.errors.map((e) =>
@@ -687,6 +812,7 @@ async function loadPlugins() {
   renderAppNav();
   renderApps();
   loadBadges();
+  today?.refresh();
   await renderHome();
   await rails?.update(pluginList.plugins);
   if (currentView === "settings" && settingsSection === "plugins") renderInstalled();
@@ -694,7 +820,7 @@ async function loadPlugins() {
     await openPage(currentPage.plugin, currentPage.page, { keepView: currentView !== "plugin" });
   } else {
     currentPage = null;
-    if (currentView === "plugin") showView("home");
+    if (currentView === "plugin") showView(startView());
   }
   markNav();
   renderWorkspace();
@@ -702,15 +828,9 @@ async function loadPlugins() {
 }
 
 function renderGreeting() {
-  if (pages && !pages.isHome()) {
-    $("home-greeting").textContent = pages.title();
-    $("home-date").textContent = "";
-    return;
-  }
-  const now = new Date();
-  const hour = now.getHours();
-  $("home-greeting").textContent = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
-  $("home-date").textContent = now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" });
+  // Today greets; every user page, the Dashboard included, shows its title.
+  $("home-greeting").textContent = pages?.title() || "Dashboard";
+  $("home-date").textContent = "";
 }
 
 let homeSeq = 0;
@@ -742,11 +862,76 @@ async function showUserPage(id) {
   $("content").scrollTop = 0;
 }
 
-async function openPage(pluginId, pageId, { keepView = false, item = null, fromSearch = false } = {}) {
-  return profile.measure(`navigation/${pluginId}/${pageId}`, () => renderPage(pluginId, pageId, { keepView, item, fromSearch }));
+async function openPage(pluginId, pageId, { keepView = false, item = null, fromSearch = false, state = null } = {}) {
+  return profile.measure(`navigation/${pluginId}/${pageId}`, () => renderPage(pluginId, pageId, { keepView, item, fromSearch, state }));
 }
 
-async function renderPage(pluginId, pageId, { keepView = false, item = null, fromSearch = false } = {}) {
+// Opens a plugin's first page from Today: `item` opens a record, `state`
+// sets declared page state (e.g. a filter) over the remembered view.
+function openPluginTarget(pluginId, target = {}) {
+  const plugin = pluginList.plugins.find((p) => p.id === pluginId);
+  const page = plugin?.pages[0];
+  if (!page) { toast(`${plugin?.name || "This app"} has no page`, "error"); return false; }
+  navigated = true;
+  const state = target.state && typeof target.state === "object" ? target.state : null;
+  return openPage(pluginId, page.id, { item: target.item != null && target.item !== "" ? String(target.item) : null, state });
+}
+
+// Opens a record from Today in the dock, keeping Today in view. The plugin's
+// first page provides the sheet; only its sheets are mounted.
+async function openDetail(pluginId, item) {
+  const plugin = pluginList.plugins.find((p) => p.id === pluginId);
+  const page = plugin?.pages[0];
+  if (!page) return openPluginTarget(pluginId, { item });
+  navigated = true;
+  if (detail?.plugin === pluginId && !detail.view.disposed) {
+    detail.view.setState(detail.bind, String(item));
+    today?.selected?.();
+    return true;
+  }
+  if (!await closeDetail()) return false;
+  const seq = ++detailSeq;
+  let template;
+  try {
+    template = await call("view_template", { plugin: pluginId, kind: "page", id: page.id });
+  } catch (e) {
+    toast(String(e), "error");
+    return false;
+  }
+  if (seq !== detailSeq || currentView !== "today") return false;
+  const sheets = window.TerrariumDock.detailTemplate(template);
+  if (!sheets) return openPluginTarget(pluginId, { item });
+  const host = el("div", { class: "detail-host" });
+  $("view-today").append(host);
+  const view = window.TerrariumRenderer.mount(host, sheets, bridge(pluginId), { item: String(item), dock: detailDock.handle("today") });
+  detail = { plugin: pluginId, bind: template.entry.bind, view, host };
+  await view.ready;
+  today?.selected?.();
+  return true;
+}
+
+// The record Today shows in the dock, if any: {plugin, item}.
+function detailItem() {
+  if (!detail || detail.view.disposed || !detailDock.isOpen("today")) return null;
+  const key = detail.bind.replace(/^state\./, "");
+  const item = detail.view.state[key];
+  return item ? { plugin: detail.plugin, item: String(item) } : null;
+}
+
+// Saves and removes Today's detail view (leaving Today, switching plugin).
+async function closeDetail() {
+  const current = detail;
+  if (!current) return true;
+  if (await current.view.flush({ unmount: true }) === false) return false;
+  if (detail !== current) return true;
+  detail = null;
+  current.view.dispose();
+  current.host.remove();
+  today?.selected?.();
+  return true;
+}
+
+async function renderPage(pluginId, pageId, { keepView = false, item = null, fromSearch = false, state = null } = {}) {
   const seq = ++pageSeq;
   if (!await flushPage() || seq !== pageSeq) return;
   rememberWorkspace();
@@ -777,9 +962,12 @@ async function renderPage(pluginId, pageId, { keepView = false, item = null, fro
     if (!keepView) await showView("plugin");
     if (seq !== pageSeq) return;
     currentPage = { plugin: pluginId, page: pageId };
+    renderWorkspace();
     markNav(); // showView ran before currentPage changed.
     await profile.measure("navigation/mount", async () => {
-      const mounted = window.TerrariumRenderer.mount(body, template, bridge(pluginId), { hideTitle: true, item, snapshot: workspaceSession.get(locationKey(pluginId, pageId)) });
+      const remembered = workspaceSession.get(locationKey(pluginId, pageId));
+      const snapshot = state ? { ...(remembered || {}), state: { ...(remembered?.state || {}), ...state } } : remembered;
+      const mounted = window.TerrariumRenderer.mount(body, template, bridge(pluginId), { hideTitle: true, item, snapshot, dock: detailDock.handle("page"), location: locationKey(pluginId, pageId) });
       views.page = mounted;
       await mounted.ready;
       if (seq !== pageSeq) mounted.dispose();
@@ -1985,7 +2173,7 @@ async function autoMutate(action) {
 }
 
 const AUTO_ACTION_LABELS = {
-  "todo.create": "Create a task", "notes.create": "Create a note",
+  "tasks.create": "Create a task", "todo.create": "Create a task", "notes.create": "Create a note",
   "bookmarks.create": "Save a link", "voice.capture_text": "Save a thought",
   "habits.checkin": "Record a check-in", "habits.sleep_save": "Log sleep",
   "feeds.add": "Add a feed", "feeds.refresh": "Refresh feeds",
@@ -1995,7 +2183,7 @@ function autoActionLabel(operation) {
   return AUTO_ACTION_LABELS[`${operation.plugin}.${operation.operation}`];
 }
 function autoEventLabel(event) {
-  return ({ "todo.task_done": "A task is marked done", "habits.checked_in": "A habit is checked in" })[`${event.plugin}.${event.event}`] || String(event.description || event.event).trim().replace(/\.+$/, "");
+  return ({ "tasks.task_done": "A task is marked done", "todo.task_done": "A task is marked done", "habits.checked_in": "A habit is checked in" })[`${event.plugin}.${event.event}`] || String(event.description || event.event).trim().replace(/\.+$/, "");
 }
 function autoHasPicker(operation, param) {
   return operation?.plugin === "habits" && operation.operation === "checkin" && param === "id";
@@ -2601,7 +2789,8 @@ async function setSpace(id, { reload = true } = {}) {
   if (!await flushPage({ unmountWidgets: true }) || seq !== spaceSeq) return false;
   rememberWorkspace();
   const location = workspaceSession.read(id);
-  pageSeq++; viewSeq++; homeSeq++; badgeSeq++;
+  pageSeq++; viewSeq++; homeSeq++; badgeSeq++; detailSeq++;
+  await closeDetail();
   views.page?.dispose();
   pages.reset();
   views.page = null; currentPage = null;
@@ -2617,8 +2806,8 @@ async function setSpace(id, { reload = true } = {}) {
   if (reload) {
     renderSpaceChrome();
     updateTitleStatus();
-    currentView = "home";
-    await showView("home");
+    currentView = startView();
+    await showView(currentView);
     try {
       await loadPlugins();
       if (seq !== spaceSeq) return false;
@@ -2689,7 +2878,7 @@ $("space-form").addEventListener("submit", async (e) => {
     await setSpace(created.id);
     await loadSpaces();
     navigated = true;
-    showView("home");
+    showView(startView());
   }
 });
 
@@ -2845,7 +3034,7 @@ async function updatePalette() {
     });
   } else {
     const lower = q.toLowerCase();
-    for (const p of pluginList.plugins.slice().sort((a, b) => Number(b.id === "todo") - Number(a.id === "todo"))) {
+    for (const p of pluginList.plugins.slice().sort((a, b) => Number(b.id === "tasks") - Number(a.id === "tasks"))) {
       for (const a of p.quick_actions) {
         items.push({
           group: "Add", label: q ? `${a.label} “${q}”` : a.label, sub: p.name, tile: appTile(p, "xs"),
@@ -2954,6 +3143,12 @@ document.addEventListener("keydown", (e) => {
       (e.shiftKey ? last : first).focus();
     }
   }
+  // ⌘\ / Ctrl+\: the visible plugin page's sidebar (ignored while typing).
+  if (currentView === "plugin" && $("palette").hidden && !document.querySelector("dialog[open]")
+    && window.TerrariumRenderer.sidebarShortcut(e, views.page)) {
+    e.preventDefault();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     if (document.querySelector("dialog[open]")) return;
@@ -2973,11 +3168,10 @@ for (const button of document.querySelectorAll("[data-open-search]")) {
 // ---- Navigation ----------------------------------------------------------
 
 function markNav() {
-  for (const item of document.querySelectorAll(".nav-item, .tab, .page-tab")) {
+  for (const item of document.querySelectorAll(".nav-item, .tab")) {
     let active = false;
     if (item.dataset.settings) active = currentView === "settings" && settingsSection === item.dataset.settings;
     else if (item.dataset.userPage) active = currentView === "home" && pages?.currentId === item.dataset.userPage;
-    else if (item.dataset.view === "home") active = currentView === "home" && pages?.isHome() !== false;
     else if (item.dataset.view === "plugin") active = currentView === "plugin" && currentPage?.plugin === item.dataset.plugin;
     else if (item.dataset.view === "apps") active = currentView === "apps" || (currentView === "plugin" && phoneLayout());
     else if (item.dataset.view) active = item.dataset.view === currentView && !(item.dataset.view === "settings" && settingsSection === "plugins" && !phoneLayout());
@@ -2990,7 +3184,7 @@ function markNav() {
 const LEGACY = { devices: "devices", plugins: "plugins", inspector: "developer" };
 
 async function flushPage({ unmountWidgets = false } = {}) {
-  const saved = (await profile.measure("navigation/flush", () => Promise.all([views.page?.flush({ unmount: true }), rails?.flush({ unmount: unmountWidgets }), ...views.widgets.map(view => view.flush({ unmount: unmountWidgets }))]))).every((ok) => ok !== false);
+  const saved = (await profile.measure("navigation/flush", () => Promise.all([views.page?.flush({ unmount: true }), detail?.view.flush({ unmount: true }), today?.flush({ unmount: true }), rails?.flush({ unmount: unmountWidgets }), ...views.widgets.map(view => view.flush({ unmount: unmountWidgets }))]))).every((ok) => ok !== false);
   if (!saved) toast(document.querySelector('.pp-recorder[data-state="recording"], .pp-recorder[data-state="saving"]') ? "Stop and save your recording before leaving." : "Your changes are not saved yet. Keep the editor open and choose Retry save.", "error");
   return saved;
 }
@@ -3006,10 +3200,14 @@ async function showView(name) {
   currentView = name;
   for (const view of document.querySelectorAll(".view")) view.hidden = view.id !== `view-${name}`;
   document.body.dataset.view = name;
+  // Each view keeps its own docked item; Today's goes when Today does.
+  if (name !== "today") closeDetail();
+  detailDock.setActive(name === "today" ? "today" : name === "plugin" ? "page" : null);
   const plugin = pluginList.plugins.find((p) => p.id === currentPage?.plugin);
   $("workspace-context").textContent = `${current().name} / ${name === "plugin" ? plugin?.name || "App" : name[0].toUpperCase() + name.slice(1)}`;
   renderWorkspace();
   if (name === "settings") showSection(settingsSection);
+  if (name === "today") today?.refresh();
   markNav();
   $("content").scrollTop = 0;
   window.scrollTo(0, 0);
@@ -3120,7 +3318,8 @@ async function controlUi(event) {
     return true;
   }
   if (event.action !== "open") return false;
-  const plugin = pluginList.plugins.find((p) => p.id === event.plugin);
+  // Links made before a rename still name the plugin's former id.
+  const plugin = window.TerrariumPluginIds.find(pluginList.plugins, event.plugin);
   if (!plugin) return false;
   const page = event.page || plugin.pages[0]?.id;
   if (!page || !plugin.pages.some((p) => p.id === page)) return false;
@@ -3158,7 +3357,7 @@ function showShare(link) {
   const type = String(link?.type || "text/plain");
   let last = null;
   try {
-    last = (window.terrariumStorage || localStorage).getItem("share-target");
+    last = window.TerrariumPluginIds.canonical(pluginList.plugins, (window.terrariumStorage || localStorage).getItem("share-target"));
   } catch (_) {}
   const targets = shareTargets(pluginList.plugins, type, last);
   $("share-error").hidden = true;
@@ -3291,7 +3490,6 @@ function showSection(section) {
 for (const item of document.querySelectorAll("[data-view]:not([data-view='plugin'])")) {
   item.addEventListener("click", async () => {
     navigated = true;
-    if (item.dataset.view === "home" && pages.home && !pages.isHome()) return showUserPage(pages.home.id);
     showView(item.dataset.view);
   });
 }
@@ -3351,7 +3549,7 @@ async function start() {
       if (waitingLinks.length) drainLinks();
       await loadImporters();
       registryView.load(false);
-      if (!navigated && currentView !== "home") showView("home");
+      if (!navigated && currentView !== startView()) showView(startView());
     });
   }
   if (window.__TAURI__?.event) {
@@ -3371,7 +3569,7 @@ async function start() {
     await window.__TAURI__.event.listen("deep-link", () => drainLinks());
   }
   const location = workspaceSession.read(currentSpace);
-  await showView("home");
+  await showView(startView());
   await loadSpaces();
   await loadPlugins();
   registryView.load(false);
@@ -3394,20 +3592,51 @@ pages = new window.TerrariumPages({
   mount: (root, template, viewBridge, options) => window.TerrariumRenderer.mount(root, template, viewBridge, options),
   openApp,
   show: showUserPage,
+  today: () => { navigated = true; showView("today"); },
   legacyHome: () => ({ home: rails?.layout.home ?? null, homeWide: rails?.layout.homeWide || [] }),
   onChange: () => { renderGreeting(); pages.navigation(); markNav(); renderWorkspace(); },
+  onPinsChange: () => { renderWorkspace(); markNav(); },
 });
 
 rails = new window.TerrariumRails({
   el, call, icon, appTile, bridge, toast,
   onHomeLayout: () => renderHome(),
   flushLayout: flushPage,
-  openHome: () => showView("home"),
+  openHome: () => (pages.home ? showUserPage(pages.home.id) : showView(startView())),
   onNavigation: renderAppNav,
   openPlugin: (id) => { const plugin = pluginList.plugins.find((p) => p.id === id); if (plugin) openApp(plugin); },
   quickAction: (plugin, action) => openPalette({ action: { plugin, action }, mode: "add" }),
   settings: (section) => { rails.closeDrawer(); showSettings(section); },
 });
+
+today = window.TerrariumToday.mount($("view-today"), {
+  el, icon, toast,
+  plugins: () => pluginList.plugins,
+  space: () => currentSpace,
+  storage: sessionStorageSafe,
+  visible: () => currentView === "today",
+  query: (plugin, name, params) => call("run_query", { space: currentSpace, plugin, name, params }),
+  action: (plugin, op, args) => call("run_action", { space: currentSpace, plugin, op, args }),
+  // Wide windows show a record beside Today; otherwise its page opens.
+  open: (plugin, target) => (target?.item != null && target.item !== "" && detailDock.available()
+    ? openDetail(plugin, String(target.item)) : openPluginTarget(plugin, target)),
+  detail: detailItem,
+  closeDetail: () => detailDock.close("today"),
+  openExternal: (url) => call("open_external", { url }).catch((e) => toast(String(e), "error")),
+  changed: () => refreshPluginViews(),
+  recorder: (node) => window.TerrariumRenderer.mount(node, { state: {}, body: {
+    type: "audio-recorder", label: "{{$gesture}} to record", hint: "Saved to Voice for review", max_seconds: 180,
+    action: { op: "capture_audio", args: { audio: "{{value.audio}}", mime: "{{value.mime}}", duration_ms: "{{value.duration_ms}}" }, success: "Saved recording" },
+  } }, bridge("voice")),
+  menu: {
+    openDashboard: () => (pages.home ? showUserPage(pages.home.id) : undefined),
+    pinned: () => !!pages.home && pages.isPinned({ kind: "page", id: pages.home.id }),
+    togglePin: () => { if (pages.home) pages.togglePin({ kind: "page", id: pages.home.id }); },
+    weeklyReview: async () => { if (!pages.home) return; await showUserPage(pages.home.id); if (currentView === "home") pages.createWeeklyReview(); },
+    editHome: async () => { if (!pages.home) return; await showUserPage(pages.home.id); if (currentView === "home") pages.edit(); },
+  },
+});
+
 
 profile.measure("startup/ready", start).catch((e) => {
   $("space-status").textContent = "Could not open space";

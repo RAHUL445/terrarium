@@ -19,7 +19,7 @@ use crate::error::{Result, RuntimeError};
 use crate::events::{EventLog, EventRecord, EVENTS_STORE_ID, EVENT_RETENTION_MS};
 use crate::host::{CallContext, Execution, HostState, PluginPre, Runtime, ScheduleChange};
 use crate::links::{Links, LINKS_STORE_ID};
-use crate::manifest::{Kind, Manifest, RunOn, Schedule};
+use crate::manifest::{Kind, Manifest, ParamType, QueryDef, RunOn, Schedule};
 use crate::packages::{Packages, STORE_ID};
 use crate::pages::{Pages, PAGES_STORE_ID};
 use crate::rules::{RuleInfo, Rules, RULES_STORE_ID};
@@ -29,6 +29,163 @@ use crate::spaces::{split_store_id, store_id, Spaces, DEFAULT_SPACE, SPACES_STOR
 pub const SEARCH_CATCH_UP_ROWS: usize = 2_000;
 /// Rows one background step indexes in total.
 pub const INDEX_STEP_ROWS: usize = 1_000;
+const MAX_VIEW_OFFSET: u64 = 1_000_000;
+
+/// Apply v1 defaults and validate caller-controlled values before they can
+/// reach SQLite. Legacy queries continue to use the original binding path.
+fn validate_view_query_values(
+    query: &QueryDef,
+    input: &Map<String, Value>,
+) -> Result<Map<String, Value>> {
+    let view = query.view.as_ref().expect("v1 query view");
+    for key in input.keys() {
+        if !query.params.iter().any(|param| param == key) {
+            return Err(RuntimeError::Manifest(format!(
+                "query input `{key}` is not a declared parameter"
+            )));
+        }
+    }
+    let mut values = view.params.clone();
+    values.extend(
+        input
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+
+    if let Some(paging) = &view.pagination {
+        if values
+            .get(&paging.page_size_param)
+            .is_none_or(Value::is_null)
+        {
+            values.insert(
+                paging.page_size_param.clone(),
+                Value::from(paging.default_page_size),
+            );
+        }
+        if values.get(&paging.offset_param).is_none_or(Value::is_null) {
+            values.insert(paging.offset_param.clone(), Value::from(0));
+        }
+        let page_size = values[&paging.page_size_param]
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| RuntimeError::Manifest("page_size must be a positive integer".into()))?;
+        // UI overfetches one row to tell whether another page exists.
+        if page_size > u64::from(paging.max_page_size) + 1 {
+            return Err(RuntimeError::Manifest(format!(
+                "page_size exceeds the declared maximum of {} plus one overfetch row",
+                paging.max_page_size
+            )));
+        }
+        let offset = values[&paging.offset_param].as_u64().ok_or_else(|| {
+            RuntimeError::Manifest("offset must be a non-negative integer".into())
+        })?;
+        if offset > MAX_VIEW_OFFSET {
+            return Err(RuntimeError::Manifest(format!(
+                "offset exceeds the maximum of {MAX_VIEW_OFFSET}"
+            )));
+        }
+    }
+
+    if let Some(temporal) = &view.temporal {
+        let start = values.get(&temporal.start_param).filter(|v| !v.is_null());
+        let end = values.get(&temporal.end_param).filter(|v| !v.is_null());
+        match (start, end) {
+            (None, None) => {}
+            (Some(start), Some(end)) => {
+                let start = start.as_i64().ok_or_else(|| {
+                    RuntimeError::Manifest(
+                        "temporal start bound must be an integer timestamp".into(),
+                    )
+                })?;
+                let end = end.as_i64().ok_or_else(|| {
+                    RuntimeError::Manifest("temporal end bound must be an integer timestamp".into())
+                })?;
+                if start > end {
+                    return Err(RuntimeError::Manifest(
+                        "temporal start bound must not exceed end bound".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(RuntimeError::Manifest(
+                    "temporal start and end bounds must be provided together".into(),
+                ));
+            }
+        }
+    }
+
+    for sort in &view.sorts {
+        if let Some(value) = values.get(&sort.param).filter(|value| !value.is_null()) {
+            let value = value.as_str().ok_or_else(|| {
+                RuntimeError::Manifest(format!("sort parameter `{}` must be a string", sort.param))
+            })?;
+            if !sort.values.iter().any(|allowed| allowed == value) {
+                return Err(RuntimeError::Manifest(format!(
+                    "unsupported sort value `{value}` for `{}`",
+                    sort.param
+                )));
+            }
+        }
+        if let Some(param) = &sort.direction_param {
+            if let Some(value) = values.get(param).filter(|value| !value.is_null()) {
+                let value = value.as_str().ok_or_else(|| {
+                    RuntimeError::Manifest(format!("sort direction `{param}` must be a string"))
+                })?;
+                if !sort.directions.iter().any(|allowed| allowed == value) {
+                    return Err(RuntimeError::Manifest(format!(
+                        "unsupported sort direction `{value}` for `{param}`"
+                    )));
+                }
+            }
+        }
+    }
+
+    for param in &query.params {
+        if crate::manifest::CONTEXT_PARAMS.contains(&param.as_str()) {
+            continue;
+        }
+        let value = values.get(param).unwrap_or(&Value::Null);
+        if value.is_null() {
+            if query.types.get(param).is_some_and(|spec| spec.required) {
+                return Err(RuntimeError::Manifest(format!(
+                    "required query parameter `{param}` is missing"
+                )));
+            }
+            continue;
+        }
+        if let Some(spec) = query.types.get(param) {
+            let valid = match spec.ty {
+                ParamType::String | ParamType::Text | ParamType::Id => value.is_string(),
+                ParamType::Integer => value.as_i64().is_some(),
+                ParamType::Number => value.as_f64().is_some(),
+                ParamType::Boolean => value.is_boolean(),
+                ParamType::Date => value.as_str().is_some_and(|v| crate::time::date(v).is_ok()),
+                ParamType::Time => value.as_str().is_some_and(|v| crate::time::time(v).is_ok()),
+                ParamType::Enum => value
+                    .as_str()
+                    .is_some_and(|v| spec.values.iter().any(|allowed| allowed == v)),
+                ParamType::Json => true,
+            };
+            if !valid {
+                return Err(RuntimeError::Manifest(format!(
+                    "query parameter `{param}` has the wrong type or value"
+                )));
+            }
+            if matches!(spec.ty, ParamType::Integer | ParamType::Number) {
+                if let Some(number) = value.as_f64() {
+                    if spec.min.is_some_and(|min| number < min)
+                        || spec.max.is_some_and(|max| number > max)
+                    {
+                        return Err(RuntimeError::Manifest(format!(
+                            "query parameter `{param}` is outside its declared range"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(values)
+}
 
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -260,8 +417,7 @@ impl PluginHost {
         }
         for event in snapshot {
             let definition = self
-                .plugins
-                .get(&event.plugin)
+                .loaded(&event.plugin)
                 .and_then(|p| p.manifest.events.get(&event.name));
             if !definition.is_some_and(|d| {
                 crate::events::contract(d) == event.contract
@@ -279,7 +435,7 @@ impl PluginHost {
                 let rule = self.rule_info(rule)?;
                 if rule.approved
                     && rule.problem.is_none()
-                    && rule.trigger.plugin == event.plugin
+                    && self.same_plugin(&rule.trigger.plugin, &event.plugin)
                     && rule.trigger.event == event.name
                     && self.automation.granted(&rule, event.emitted_ms)?
                     && rules::matches(&rule.filter, &event.payload)
@@ -346,8 +502,11 @@ impl PluginHost {
                     .claim(&id, &rule, now, stop.is_none(), &row, &summary)?;
                 if stop.is_none() {
                     let args = rules::map_args(&rule.action.args, &event);
-                    let op = &self.plugins[&rule.action.plugin].manifest.operations
-                        [&rule.action.operation];
+                    let op = &self
+                        .loaded(&rule.action.plugin)
+                        .expect("validated rule")
+                        .manifest
+                        .operations[&rule.action.operation];
                     let validation = crate::commands::check_args(
                         op.params.as_ref().expect("validated rule"),
                         &[],
@@ -455,13 +614,11 @@ impl PluginHost {
             rule.problem = crate::rules::check(self, &rule.input()).err();
         }
         rule.source_package = self
-            .plugins
-            .get(&rule.trigger.plugin)
+            .loaded(&rule.trigger.plugin)
             .map(|p| p.identity.clone())
             .unwrap_or(Value::Null);
         rule.target_package = self
-            .plugins
-            .get(&rule.action.plugin)
+            .loaded(&rule.action.plugin)
             .map(|p| p.identity.clone())
             .unwrap_or(Value::Null);
         rule.approved = rule.problem.is_none() && self.rules.is_approved(&rule)?;
@@ -478,7 +635,7 @@ impl PluginHost {
                 .iter()
                 .filter(|e| {
                     e.space == rule.space
-                        && e.plugin == rule.trigger.plugin
+                        && self.same_plugin(&e.plugin, &rule.trigger.plugin)
                         && e.name == rule.trigger.event
                 })
                 .count() as u64;
@@ -533,14 +690,15 @@ impl PluginHost {
     fn open_store(&self, space: &str, manifest: &Manifest) -> Result<CoreStore> {
         let dir = self.space_dir(space);
         std::fs::create_dir_all(&dir).map_err(|e| RuntimeError::io(&dir, e))?;
-        let db = dir.join(format!("{}.db", manifest.id));
+        // A renamed plugin keeps its first id's database and sync id.
+        let db = dir.join(format!("{}.db", manifest.storage_id()));
         // After a rollback the database may be ahead of this version's
         // schema. Migrations only add, so keep the newer schema.
         let schema = match CoreStore::stored_schema(&db)? {
             Some(stored) if stored.version > manifest.storage.version => stored,
             _ => manifest.storage.clone(),
         };
-        let cfg = store_config(&self.cfg, &store_id(space, &manifest.id));
+        let cfg = store_config(&self.cfg, &store_id(space, manifest.storage_id()));
         Ok(CoreStore::open(db, cfg, schema, Box::new(SystemTime))?)
     }
 
@@ -622,10 +780,11 @@ impl PluginHost {
 
     /// Stops running a plugin. Its data stays on disk.
     pub fn unload(&mut self, plugin: &str) -> bool {
+        // Exact id only: unloading a former id never stops its successor.
+        let removed = self.plugins.remove(plugin).is_some();
         if let Some(net) = self.net_mut() {
             net.clear(Some(plugin));
         }
-        let removed = self.plugins.remove(plugin).is_some();
         for space in self.open_spaces.clone() {
             if let Err(e) = self
                 .index
@@ -678,8 +837,36 @@ impl PluginHost {
             }
         }
 
-        // Release the previous connections before migrating the same files.
+        // A plugin may not take another loaded plugin's id or storage: only
+        // a successor (naming it in `former_ids`) replaces it.
+        for (other_id, other) in &self.plugins {
+            if *other_id == manifest.id || manifest.former_ids.contains(other_id) {
+                continue;
+            }
+            if other.manifest.answers_to(&manifest.id) {
+                return Err(RuntimeError::Manifest(format!(
+                    "`{}` was renamed to `{other_id}`, which is already loaded",
+                    manifest.id
+                )));
+            }
+            if let Some(clash) = manifest
+                .former_ids
+                .iter()
+                .find(|f| other.manifest.former_ids.contains(f))
+            {
+                return Err(RuntimeError::Manifest(format!(
+                    "former id `{clash}` is also a former id of `{other_id}`"
+                )));
+            }
+        }
+        // Release the previous connections before migrating the same files,
+        // including a predecessor this plugin was renamed from.
         self.unload(&manifest.id);
+        for former in manifest.former_ids.clone() {
+            if self.plugins.contains_key(&former) {
+                self.unload(&former);
+            }
+        }
         let mut stores = BTreeMap::new();
         for space in &self.open_spaces {
             stores.insert(space.clone(), Some(self.open_store(space, &manifest)?));
@@ -773,7 +960,8 @@ impl PluginHost {
 
     /// `(item, kind)` of every indexed row of `plugin` in `space`.
     pub fn indexed_items(&mut self, space: &str, plugin: &str) -> Result<Vec<(String, String)>> {
-        self.with_index(|index, _| index.items(space, plugin))
+        let plugin = self.canonical(plugin).to_string();
+        self.with_index(|index, _| index.items(space, &plugin))
     }
 
     /// The user's IANA timezone.
@@ -791,7 +979,7 @@ impl PluginHost {
     }
 
     pub fn package_dir(&self, plugin: &str) -> Option<&Path> {
-        self.plugins.get(plugin).map(|p| p.dir.as_path())
+        self.loaded(plugin).map(|p| p.dir.as_path())
     }
 
     pub fn template(&self, plugin: &str, kind: ViewKind, id: &str) -> Result<&Value> {
@@ -837,6 +1025,17 @@ impl PluginHost {
                 kind: "query",
                 name: name.into(),
             })?;
+        let checked_values;
+        let values = if query
+            .view
+            .as_ref()
+            .is_some_and(|view| view.version == Some(1))
+        {
+            checked_values = validate_view_query_values(query, values)?;
+            &checked_values
+        } else {
+            values
+        };
         let params: Vec<Value> = query
             .params
             .iter()
@@ -928,7 +1127,10 @@ impl PluginHost {
             event_root,
             device: self.cfg.device.0.clone(),
         };
-        let (peers, result) = invoke(peers, plugin, operation, args, 0);
+        let plugin = resolve(&peers.plugins, plugin)
+            .unwrap_or(plugin)
+            .to_string();
+        let (peers, result) = invoke(peers, &plugin, operation, args, 0);
         self.plugins = peers.plugins;
         self.ai = peers.ai;
         self.net = peers.net;
@@ -949,8 +1151,7 @@ impl PluginHost {
         let mut valid = Vec::new();
         for event in self.events.pending(usize::MAX)? {
             let definition = self
-                .plugins
-                .get(&event.plugin)
+                .loaded(&event.plugin)
                 .and_then(|p| p.manifest.events.get(&event.name));
             if definition.is_some_and(|definition| {
                 crate::events::contract(definition) == event.contract
@@ -992,7 +1193,7 @@ impl PluginHost {
         Ok(())
     }
     fn http_identity(&self, job: &terrarium_net::Job) -> bool {
-        let Some(loaded) = self.plugins.get(&job.plugin) else {
+        let Some(loaded) = self.loaded(&job.plugin) else {
             return false;
         };
         if !self.open_spaces.contains(&job.space)
@@ -1009,13 +1210,17 @@ impl PluginHost {
         self.http_package_approved(&job.plugin)
     }
     fn http_package_approved(&self, plugin: &str) -> bool {
-        let Some(loaded) = self.plugins.get(plugin) else {
+        let Some(loaded) = self.loaded(plugin) else {
             return false;
         };
         let Ok(installed) = self.packages.installed() else {
             return false;
         };
-        if let Some(current) = installed.iter().find(|p| p.id == plugin) {
+        let record = installed
+            .iter()
+            .find(|p| p.id == loaded.manifest.id)
+            .or_else(|| installed.iter().find(|p| loaded.manifest.answers_to(&p.id)));
+        if let Some(current) = record {
             if current.removed {
                 return false;
             }
@@ -1051,35 +1256,35 @@ impl PluginHost {
             let mut job = self.net_mut()?.take()?;
             if self.http_identity(&job) {
                 let auth = if let Some(auth) = &job.request.auth {
-                    let result =
-                        (|| {
-                            let error = || terrarium_net::NetError {
-                                code: "unavailable".into(),
-                                message: vault_unavailable(),
-                                temporary: false,
-                            };
-                            let (rules, signer) =
-                                self.vault_authority(&job.plugin).map_err(|_| error())?;
-                            let host = url_host(&job.request.url).map_err(|_| error())?;
-                            let lease = self.vaults.get(&job.space).ok_or_else(error)?.lease(
-                                &job.plugin,
-                                &auth.account,
-                                &host,
-                                &rules,
-                                &signer,
-                            )?;
-                            if lease.is_oauth() && lease.provider().is_none() {
+                    let result = (|| {
+                        let error = || terrarium_net::NetError {
+                            code: "unavailable".into(),
+                            message: vault_unavailable(),
+                            temporary: false,
+                        };
+                        let (rules, signer) =
+                            self.vault_authority(&job.plugin).map_err(|_| error())?;
+                        let host = url_host(&job.request.url).map_err(|_| error())?;
+                        let lease = self.vaults.get(&job.space).ok_or_else(error)?.lease(
+                            &job.plugin,
+                            &auth.account,
+                            &host,
+                            &rules,
+                            &signer,
+                        )?;
+                        if lease.is_oauth() && lease.provider().is_none() {
+                            return Err(error());
+                        }
+                        if let Some(provider) = lease.provider() {
+                            if !self
+                                .loaded(&job.plugin)
+                                .is_some_and(|p| p.manifest.oauth.values().any(|d| d == provider))
+                            {
                                 return Err(error());
                             }
-                            if let Some(provider) = lease.provider() {
-                                if !self.plugins.get(&job.plugin).is_some_and(|p| {
-                                    p.manifest.oauth.values().any(|d| d == provider)
-                                }) {
-                                    return Err(error());
-                                }
-                            }
-                            Ok(lease)
-                        })();
+                        }
+                        Ok(lease)
+                    })();
                     match result {
                         Ok(lease) => Some(lease),
                         Err(error) => {
@@ -1196,10 +1401,7 @@ impl PluginHost {
         if !self.http_package_approved(plugin) {
             return Err("This plugin needs local approval.".into());
         }
-        let loaded = self
-            .plugins
-            .get(plugin)
-            .ok_or("This plugin is unavailable.")?;
+        let loaded = self.loaded(plugin).ok_or("This plugin is unavailable.")?;
         if !loaded.manifest.permissions.iter().any(|p| p == "http") {
             return Err("This plugin has no network access.".into());
         }
@@ -1297,7 +1499,7 @@ impl PluginHost {
         let (rules, current_signer) = self.vault_authority(plugin)?;
         if !self.open_spaces.contains(space)
             || signer != current_signer
-            || !self.plugins.get(plugin).is_some_and(|p| {
+            || !self.loaded(plugin).is_some_and(|p| {
                 p.manifest
                     .oauth
                     .values()
@@ -1665,9 +1867,9 @@ impl PluginHost {
             .unwrap()
             .clone();
         let rows = self
-            .query_in(space, "todo", "tasks", &params)
+            .query_in(space, "tasks", "tasks", &params)
             .map_err(|_| {
-                "To-do is unavailable in this space. Uncheck today's tasks and try again."
+                "Task manager is unavailable in this space. Uncheck today's tasks and try again."
                     .to_string()
             })?;
         let tasks: Vec<Value> = rows
@@ -1721,8 +1923,7 @@ impl PluginHost {
     /// Declarative v1 deliberately excludes background execution.
     pub(crate) fn validate_schedule_target(&self, plugin: &str) -> Result<()> {
         if self
-            .plugins
-            .get(plugin)
+            .loaded(plugin)
             .is_some_and(|p| p.manifest.kind == Kind::Declarative)
         {
             return Err(RuntimeError::Plugin {
@@ -1735,9 +1936,12 @@ impl PluginHost {
 
     /// Makes the manifest's jobs schedules of `plugin` in `space`.
     fn sync_jobs(&mut self, space: &str, plugin: &str) {
-        let Some(loaded) = self.plugins.get(plugin) else {
+        let Some(loaded) = self.loaded(plugin) else {
             return;
         };
+        // Schedules are synced rows: keyed by the storage id.
+        let plugin = loaded.manifest.storage_id().to_string();
+        let plugin = plugin.as_str();
         let jobs: Vec<(String, ScheduleInput)> = loaded
             .manifest
             .jobs
@@ -1761,7 +1965,13 @@ impl PluginHost {
         let loaded: BTreeSet<(String, String)> = self
             .open_spaces
             .iter()
-            .flat_map(|s| self.plugins.keys().map(move |p| (s.clone(), p.clone())))
+            .flat_map(|s| {
+                self.plugins.values().flat_map(move |p| {
+                    std::iter::once(&p.manifest.id)
+                        .chain(&p.manifest.former_ids)
+                        .map(move |id| (s.clone(), id.clone()))
+                })
+            })
             .collect();
         let plans = self.scheduler().due(now, desktop, |s| {
             loaded.contains(&(s.space.clone(), s.plugin.clone()))
@@ -1824,7 +2034,7 @@ impl PluginHost {
     }
 
     /// Rows of every plugin's reminders query in every open space, as
-    /// `(space, plugin, row)`.
+    /// `(space, plugin storage id, row)`.
     pub fn reminders(&self, now_ms: u64) -> Vec<(String, String, Map<String, Value>)> {
         let mut out = Vec::new();
         for space in &self.open_spaces {
@@ -1834,9 +2044,11 @@ impl PluginHost {
                 };
                 let mut values = Map::new();
                 values.insert("now_ms".into(), Value::from(now_ms));
+                // Reminder keys stay stable across a rename.
+                let key = loaded.manifest.storage_id().to_string();
                 match self.query_in(space, id, &def.query, &values) {
                     Ok(rows) => {
-                        out.extend(rows.into_iter().map(|r| (space.clone(), id.clone(), r)))
+                        out.extend(rows.into_iter().map(|r| (space.clone(), key.clone(), r)))
                     }
                     Err(e) => eprintln!("reminders query of {id} in {space} failed: {e}"),
                 }
@@ -1860,9 +2072,55 @@ impl PluginHost {
     }
 
     fn get(&self, plugin: &str) -> Result<&LoadedPlugin> {
-        self.plugins
-            .get(plugin)
+        self.loaded(plugin)
             .ok_or_else(|| RuntimeError::UnknownPlugin(plugin.into()))
+    }
+
+    /// The loaded plugin named `id` or, after a rename, one of its former ids.
+    fn loaded(&self, id: &str) -> Option<&LoadedPlugin> {
+        resolve(&self.plugins, id).map(|key| &self.plugins[key])
+    }
+
+    /// The current id of the plugin `id` names: `id` itself unless it is a
+    /// former id of a loaded plugin.
+    pub fn canonical<'a>(&'a self, id: &'a str) -> &'a str {
+        resolve(&self.plugins, id).unwrap_or(id)
+    }
+
+    /// The manifest of the plugin `id` names (current or former id).
+    pub fn manifest(&self, id: &str) -> Option<&Manifest> {
+        self.loaded(id).map(|p| &p.manifest)
+    }
+
+    /// The id the plugin `id` names stores and syncs under: its first former
+    /// id after a rename. Unknown ids are returned unchanged.
+    pub fn storage_plugin_id<'a>(&'a self, id: &'a str) -> &'a str {
+        self.manifest(id).map_or(id, Manifest::storage_id)
+    }
+
+    /// Whether `a` and `b` name the same plugin.
+    pub fn same_plugin(&self, a: &str, b: &str) -> bool {
+        a == b || self.canonical(a) == self.canonical(b)
+    }
+
+    /// Every spelling of the item ref `text`: as given first, then with the
+    /// plugin's current, storage and former ids. Text that is not a ref, or
+    /// names no loaded plugin, is returned alone.
+    pub fn ref_forms(&self, text: &str) -> Vec<String> {
+        let mut out = vec![text.to_string()];
+        let Some(item) = crate::ItemRef::parse(text) else {
+            return out;
+        };
+        let Some(m) = self.manifest(&item.plugin) else {
+            return out;
+        };
+        for id in std::iter::once(&m.id).chain(&m.former_ids) {
+            let form = format!("{id}/{}/{}", item.table, item.id);
+            if !out.contains(&form) {
+                out.push(form);
+            }
+        }
+        out
     }
 
     fn data_root(&self) -> PathBuf {
@@ -2023,6 +2281,17 @@ impl Peers {
     }
 }
 
+/// The key in `plugins` of the plugin `id` names: its id, or a former id.
+fn resolve<'a>(plugins: &'a BTreeMap<String, LoadedPlugin>, id: &str) -> Option<&'a str> {
+    if let Some((key, _)) = plugins.get_key_value(id) {
+        return Some(key);
+    }
+    plugins
+        .iter()
+        .find(|(_, p)| p.manifest.former_ids.iter().any(|f| f == id))
+        .map(|(key, _)| key.as_str())
+}
+
 /// Runs `operation` of `id`, which is moved out of `peers` for the call.
 fn invoke(
     mut peers: Peers,
@@ -2060,9 +2329,11 @@ fn invoke(
         return fail(peers, loaded, RuntimeError::Wasm("no runtime".into()));
     };
     let timezone = peers.timezone.clone();
+    let storage_id = loaded.manifest.storage_id().to_string();
     let uses = loaded.manifest.uses.clone();
     let ctx = CallContext {
         plugin_id: id,
+        storage_id: &storage_id,
         timezone: &timezone,
         limits: loaded.manifest.limits,
         uses: &uses,
@@ -2203,7 +2474,8 @@ impl terrarium_core::StoreSet for PluginHost {
                 .keys()
                 .map(|space| store_id(space, terrarium_net::vault::VAULT_STORE_ID)),
         );
-        for (id, loaded) in &self.plugins {
+        for loaded in self.plugins.values() {
+            let id = loaded.manifest.storage_id();
             ids.extend(loaded.stores.keys().map(|space| store_id(space, id)));
         }
         ids
@@ -2230,8 +2502,11 @@ impl terrarium_core::StoreSet for PluginHost {
                 .get_mut(space)
                 .map(terrarium_net::vault::Vault::store_mut);
         }
+        // Sync names a plugin's store by its storage id, which after a
+        // rename is a former id.
         self.plugins
-            .get_mut(plugin)?
+            .values_mut()
+            .find(|p| p.manifest.storage_id() == plugin)?
             .stores
             .get_mut(space)?
             .as_mut()
@@ -2282,4 +2557,94 @@ pub struct OAuthPreparation {
     pub signer: String,
     pub generation: Option<String>,
     pub client: terrarium_net::oauth::Client,
+}
+
+#[cfg(test)]
+mod view_query_tests {
+    use super::*;
+
+    fn query() -> QueryDef {
+        serde_json::from_value(json!({
+            "sql": "THIS SQL MUST NOT RUN",
+            "params": ["start_ms", "end_ms", "page_size", "offset", "sort", "direction", "required"],
+            "types": {
+                "start_ms": {"type":"integer"}, "end_ms": {"type":"integer"},
+                "page_size": {"type":"integer"}, "offset": {"type":"integer"},
+                "sort": {"type":"string"}, "direction": {"type":"string"},
+                "required": {"type":"string", "required":true}
+            },
+            "view": {
+                "version":1, "title":"Rows",
+                "columns":[{"key":"title", "label":"Title", "type":"string"}],
+                "temporal":{"start_param":"start_ms", "end_param":"end_ms"},
+                "pagination":{"page_size_param":"page_size", "offset_param":"offset", "default_page_size":100, "max_page_size":1000},
+                "sorts":[{"param":"sort", "values":["title", "completed_at"], "direction_param":"direction", "directions":["asc", "desc"]}]
+            }
+        })).unwrap()
+    }
+
+    fn inputs(value: Value) -> Map<String, Value> {
+        value.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn v1_query_uses_bounded_paging_defaults_and_accepts_declared_inputs() {
+        let query = query();
+        let missing = validate_view_query_values(&query, &Map::new()).unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("required query parameter `required` is missing"));
+        let defaults =
+            validate_view_query_values(&query, &inputs(json!({"required":"ok"}))).unwrap();
+        assert_eq!(defaults["page_size"], json!(100));
+        assert_eq!(defaults["offset"], json!(0));
+
+        let values = inputs(json!({"required":"ok", "start_ms":10, "end_ms":20,
+            "page_size":1001, "offset":50, "sort":"completed_at", "direction":"desc"}));
+        let accepted = validate_view_query_values(&query, &values).unwrap();
+        assert_eq!(accepted["page_size"], json!(1001));
+        assert_eq!(accepted["offset"], json!(50));
+        assert_eq!(accepted["start_ms"], json!(10));
+        assert_eq!(accepted["direction"], json!("desc"));
+    }
+
+    #[test]
+    fn malformed_v1_inputs_are_rejected_before_the_query_can_run() {
+        let query = query();
+        let cases = [
+            (
+                json!({"required":"ok", "page_size":1002}),
+                "page_size exceeds",
+            ),
+            (json!({"required":"ok", "offset":1000001}), "offset exceeds"),
+            (
+                json!({"required":"ok", "start_ms":5}),
+                "must be provided together",
+            ),
+            (
+                json!({"required":"ok", "start_ms":20, "end_ms":10}),
+                "must not exceed",
+            ),
+            (
+                json!({"required":"ok", "sort":"title; DROP TABLE tasks"}),
+                "unsupported sort value",
+            ),
+            (
+                json!({"required":"ok", "direction":"sideways"}),
+                "unsupported sort direction",
+            ),
+            (
+                json!({"required":"ok", "page_size":1.5}),
+                "page_size must be a positive integer",
+            ),
+            (
+                json!({"required":"ok", "typo":true}),
+                "not a declared parameter",
+            ),
+        ];
+        for (input, expected) in cases {
+            let error = validate_view_query_values(&query, &inputs(input)).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
 }

@@ -21,7 +21,10 @@ fn todo_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let dir = support::package_root().join("todo").canonicalize().unwrap();
+            let dir = support::package_root()
+                .join("tasks")
+                .canonicalize()
+                .unwrap();
             build_plugin(&dir).unwrap_or_else(|e| panic!("building todo: {e}"));
             dir
         })
@@ -68,8 +71,12 @@ fn described_todo(root: &Path) -> PathBuf {
     }
     for q in m["queries"].as_object_mut().unwrap().values_mut() {
         let q = q.as_object_mut().unwrap();
+        // Paged view queries need their typed page params to load.
+        let keep_types = q.contains_key("view");
         for key in ["description", "types", "cli"] {
-            q.remove(key);
+            if key != "types" || !keep_types {
+                q.remove(key);
+            }
         }
     }
     m.as_object_mut().unwrap().remove("open");
@@ -164,47 +171,47 @@ fn describe_lists_host_and_plugin_commands() {
         find(Kind::Action, "item.restore_version").unwrap().effect,
         terrarium_runtime::Effect::Write
     );
-    let create = find(Kind::Action, "todo.create").unwrap();
+    let create = find(Kind::Action, "tasks.create").unwrap();
     assert!(create.params.as_ref().unwrap()["title"].required);
     assert!(create.summary.starts_with("Create a task."));
     assert!(serde_json::to_value(create).unwrap().get("bulk").is_none());
     // Untyped operations say so with no params.
-    assert!(find(Kind::Action, "todo.update").unwrap().params.is_none());
+    assert!(find(Kind::Action, "tasks.update").unwrap().params.is_none());
     // Undeclared effects: delete-like names are destructive, others write.
     use terrarium_runtime::Effect;
     assert_eq!(
-        find(Kind::Action, "todo.clear_done").unwrap().effect,
+        find(Kind::Action, "tasks.clear_done").unwrap().effect,
         Effect::Destructive
     );
     assert_eq!(
-        find(Kind::Action, "todo.delete_step").unwrap().effect,
+        find(Kind::Action, "tasks.delete_step").unwrap().effect,
         Effect::Destructive
     );
     assert_eq!(
-        find(Kind::Action, "todo.update").unwrap().effect,
+        find(Kind::Action, "tasks.update").unwrap().effect,
         Effect::Write
     );
     // Context parameters are listed apart from the caller's own.
-    let tasks = find(Kind::Query, "todo.tasks").unwrap();
+    let tasks = find(Kind::Query, "tasks.tasks").unwrap();
     assert_eq!(tasks.context, ["today"]);
     assert!(!tasks.params.as_ref().unwrap().contains_key("today"));
     // A query and an operation may share a name; only the query is visible
     // because the operation is marked `cli: false`.
-    assert!(find(Kind::Query, "todo.note_settings").is_some());
-    assert!(find(Kind::Action, "todo.note_settings").is_none());
+    assert!(find(Kind::Query, "tasks.note_settings").is_some());
+    assert!(find(Kind::Action, "tasks.note_settings").is_none());
 
     // A read-only client is shown only what it can run.
     let read = commands::describe(&host, READ);
     assert!(read
         .iter()
         .all(|c| c.effect == terrarium_runtime::Effect::Read));
-    assert!(read.iter().any(|c| c.id == "todo.tasks"));
-    assert!(!read.iter().any(|c| c.id == "todo.create"));
+    assert!(read.iter().any(|c| c.id == "tasks.tasks"));
+    assert!(!read.iter().any(|c| c.id == "tasks.create"));
 
     let app = commands::describe(&host, Caller::App);
     assert!(app
         .iter()
-        .any(|c| c.id == "todo.note_settings" && c.kind == Kind::Action && c.hidden));
+        .any(|c| c.id == "tasks.note_settings" && c.kind == Kind::Action && c.hidden));
 }
 
 #[test]
@@ -523,7 +530,7 @@ fn a_dry_run_reports_changes_and_keeps_nothing() {
     assert!(out
         .changes
         .iter()
-        .any(|c| c.plugin == "todo" && c.table == "tasks" && c.op == "create"));
+        .any(|c| c.plugin == "tasks" && c.table == "tasks" && c.op == "create"));
     assert!(task_titles(&mut host).is_empty());
 
     // For real: the same changes are reported and kept.
@@ -576,7 +583,7 @@ fn a_dry_run_rolls_back_other_plugins_too() {
     assert!(out
         .changes
         .iter()
-        .any(|c| c.plugin == "todo" && c.op == "create"));
+        .any(|c| c.plugin == "tasks" && c.op == "create"));
     assert!(task_titles(&mut host).is_empty());
 
     run_with(
@@ -767,7 +774,7 @@ fn export_writes_every_table_as_json() {
     assert!(summary["rows"].as_u64().unwrap() >= 2);
     assert_eq!(summary["bytes"], std::fs::metadata(&path).unwrap().len());
     let entries = read_zip(&path);
-    let tasks: Vec<Value> = serde_json::from_str(&entries["data/todo/tasks.json"]).unwrap();
+    let tasks: Vec<Value> = serde_json::from_str(&entries["data/tasks/tasks.json"]).unwrap();
     let mut titles: Vec<_> = tasks.iter().map(|r| r["title"].as_str().unwrap()).collect();
     titles.sort();
     assert_eq!(titles, ["Call Sam", "Pay rent"]);
@@ -784,7 +791,7 @@ fn export_writes_every_table_as_json() {
     assert_eq!(entries.len(), tables.len() + 5);
     for table in tables.keys() {
         let rows: Vec<Value> =
-            serde_json::from_str(&entries[&format!("data/todo/{table}.json")]).unwrap();
+            serde_json::from_str(&entries[&format!("data/tasks/{table}.json")]).unwrap();
         assert_eq!(manifest["plugins"][0]["tables"][table], rows.len());
     }
     assert_eq!(
@@ -811,7 +818,7 @@ fn export_leaves_out_trash_unless_asked() {
         };
         run(&mut host, Caller::App, "space.export", args).unwrap();
         let entries = read_zip(&path);
-        let tasks: Vec<Value> = serde_json::from_str(&entries["data/todo/tasks.json"]).unwrap();
+        let tasks: Vec<Value> = serde_json::from_str(&entries["data/tasks/tasks.json"]).unwrap();
         if include_trash {
             assert_eq!(tasks.len(), 2);
             assert!(tasks.iter().all(|r| r.get("_deleted").is_some()));
@@ -1049,10 +1056,10 @@ fn export_writes_csv_and_markdown() {
     )
     .unwrap();
     let entries = read_zip(&path);
-    assert!(entries["files/todo/tasks.csv"].starts_with("title,due,done\r\n"));
-    assert!(entries["files/todo/tasks.csv"].contains("\"Pay, rent\""));
-    assert_eq!(entries["files/todo/notes/Pay, rent.md"], "Pay, rent");
-    assert_eq!(entries["files/todo/notes/a-b.md"], "a/b");
+    assert!(entries["files/tasks/tasks.csv"].starts_with("title,due,done\r\n"));
+    assert!(entries["files/tasks/tasks.csv"].contains("\"Pay, rent\""));
+    assert_eq!(entries["files/tasks/notes/Pay, rent.md"], "Pay, rent");
+    assert_eq!(entries["files/tasks/notes/a-b.md"], "a/b");
     let manifest: Value = serde_json::from_str(&entries["manifest.json"]).unwrap();
     assert_eq!(manifest["plugins"][0]["files"], 3);
 }
@@ -1073,9 +1080,9 @@ fn markdown_names_are_unique() {
     )
     .unwrap();
     let entries = read_zip(&path);
-    assert_eq!(entries["files/todo/notes/Same.md"], "Same");
-    assert_eq!(entries["files/todo/notes/Same (2).md"], "Same");
-    assert_eq!(entries["files/todo/notes/Same (2) (2).md"], "Same (2)");
+    assert_eq!(entries["files/tasks/notes/Same.md"], "Same");
+    assert_eq!(entries["files/tasks/notes/Same (2).md"], "Same");
+    assert_eq!(entries["files/tasks/notes/Same (2) (2).md"], "Same (2)");
 }
 
 #[test]
@@ -1101,7 +1108,7 @@ fn export_binds_clock_params_in_query_order() {
     )
     .unwrap();
     let entries = read_zip(&path);
-    let lines: Vec<_> = entries["files/todo/clock.csv"].split("\r\n").collect();
+    let lines: Vec<_> = entries["files/tasks/clock.csv"].split("\r\n").collect();
     assert_eq!(lines[0], "zone,clock,day,weekday,offset,missing");
     let cells: Vec<_> = lines[1].split(',').collect();
     assert_eq!(cells[0], "Asia/Kolkata");
@@ -1132,7 +1139,7 @@ fn export_query_failure_names_plugin_and_removes_archive() {
     )
     .unwrap_err();
     assert_eq!(error.code, "failed");
-    assert!(error.message.contains("todo"), "{error:?}");
+    assert!(error.message.contains("tasks"), "{error:?}");
     assert!(!path.exists());
 }
 
@@ -1501,7 +1508,8 @@ fn plugin_list_shows_importers() {
         notes["imports"],
         json!([{"id":"markdown", "label":"Notes from Markdown files", "format":"markdown"}])
     );
-    let todo = plugins.iter().find(|p| p["id"] == "todo").unwrap();
+    let todo = plugins.iter().find(|p| p["id"] == "tasks").unwrap();
+    assert_eq!(todo["former_ids"], json!(["todo"]));
     assert_eq!(
         todo["imports"],
         json!([

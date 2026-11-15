@@ -7,13 +7,15 @@ use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use terrarium_ai::{AiConfig, PRESETS};
 use terrarium_blobs::{BlobError, MAX_BLOB};
 use terrarium_core::FileRef;
 use terrarium_scheduler::{Repeat, Settings};
 
-use crate::pages::{clean_config, clean_host_config, host_widgets, Placement, HOST_WIDGETS};
+use crate::pages::{
+    clean_config, clean_host_config, clean_period, host_widgets, Placement, SavedView, HOST_WIDGETS,
+};
 use crate::registry::{PluginHost, ViewKind};
 
 // Detect after decryption, preserving the existing encrypted blob format.
@@ -67,7 +69,11 @@ fn schedules_state(host: &PluginHost) -> Value {
     let scheduler = host.scheduler();
     let names: BTreeMap<String, String> = host
         .manifests()
-        .map(|m| (m.id.clone(), m.name.clone()))
+        .flat_map(|m| {
+            std::iter::once(&m.id)
+                .chain(&m.former_ids)
+                .map(|id| (id.clone(), m.name.clone()))
+        })
         .collect();
     let spaces: BTreeMap<String, String> = host
         .spaces()
@@ -109,13 +115,54 @@ fn schedules_state(host: &PluginHost) -> Value {
     })
 }
 
+// Page placements and saved views are synced rows. They name a renamed
+// plugin by its storage id, so devices on older builds keep showing them;
+// callers see the current id.
+
+/// `plugin` (and a view's `config.plugin`) by current id, for callers.
+fn present_view_config(host: &PluginHost, config: &mut Map<String, Value>) {
+    if let Some(Value::String(plugin)) = config.get_mut("plugin") {
+        *plugin = host.canonical(plugin).to_string();
+    }
+}
+
+/// `plugin` (and a view's `config.plugin`) by storage id, for storing.
+fn store_view_config(host: &PluginHost, config: &mut Map<String, Value>) {
+    if let Some(Value::String(plugin)) = config.get_mut("plugin") {
+        *plugin = host.storage_plugin_id(plugin).to_string();
+    }
+}
+
+fn present_placement(host: &PluginHost, p: &mut Placement) {
+    p.plugin = host.canonical(&p.plugin).to_string();
+    if p.plugin == HOST_WIDGETS {
+        present_view_config(host, &mut p.config);
+    }
+}
+
+fn store_placement(host: &PluginHost, p: &mut Placement) {
+    p.plugin = host.storage_plugin_id(&p.plugin).to_string();
+    if p.plugin == HOST_WIDGETS {
+        store_view_config(host, &mut p.config);
+    }
+}
+
+fn present_view(host: &PluginHost, mut view: SavedView) -> SavedView {
+    present_view_config(host, &mut view.config);
+    view
+}
+
 fn page_state(host: &PluginHost, id: &str) -> Result<Value, String> {
     let pages = host.pages();
     let page = pages
         .page(id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("no page `{id}`"))?;
-    Ok(json!({ "page": page, "placements": pages.placements(id).map_err(|e| e.to_string())? }))
+    let mut placements = pages.placements(id).map_err(|e| e.to_string())?;
+    for p in &mut placements {
+        present_placement(host, p);
+    }
+    Ok(json!({ "page": page, "placements": placements }))
 }
 
 fn arg<'a>(args: &'a Value, key: &str) -> Result<&'a Value, String> {
@@ -325,9 +372,11 @@ pub fn invoke(
         })(),
         "schedule_remove" => (|| {
             let id = arg_str(args, "id")?;
-            if host.scheduler().get(id).is_some_and(|s| {
-                s.source == "manifest" && host.manifests().any(|m| m.id == s.plugin)
-            }) {
+            if host
+                .scheduler()
+                .get(id)
+                .is_some_and(|s| s.source == "manifest" && host.manifest(&s.plugin).is_some())
+            {
                 return Err("This schedule comes with its plugin; turn it off instead.".into());
             }
             host.scheduler_mut().remove(id)?;
@@ -365,21 +414,40 @@ pub fn invoke(
         })(),
         "page_widgets" => Ok(host_widgets()),
         "views_list" => (|| {
-            Ok(json!(host.pages().list_saved_views(arg_str(args, "space")?).map_err(|e| e.to_string())?))
+            let views = host
+                .pages()
+                .list_saved_views(arg_str(args, "space")?)
+                .map_err(|e| e.to_string())?;
+            Ok(json!(views
+                .into_iter()
+                .map(|v| present_view(host, v))
+                .collect::<Vec<_>>()))
         })(),
         "view_get" => (|| {
             let id = arg_str(args, "id")?;
-            host.pages().get_saved_view(id).map_err(|e| e.to_string())?
-                .map(|view| Ok(json!(view))).unwrap_or_else(|| Err(format!("no saved view `{id}`")))
+            host.pages()
+                .get_saved_view(id)
+                .map_err(|e| e.to_string())?
+                .map(|view| Ok(json!(present_view(host, view))))
+                .unwrap_or_else(|| Err(format!("no saved view `{id}`")))
         })(),
         "view_save" => (|| {
-            let config = arg(args, "config")?.as_object().cloned().ok_or("`config` must be an object")?;
+            let mut config = arg(args, "config")?
+                .as_object()
+                .cloned()
+                .ok_or("`config` must be an object")?;
+            store_view_config(host, &mut config);
             let id = args.get("id").and_then(Value::as_str);
-            let view = host.pages_mut().save_view(arg_str(args, "space")?, id, arg_str(args, "title")?, config).map_err(|e| e.to_string())?;
-            Ok(json!(view))
+            let view = host
+                .pages_mut()
+                .save_view(arg_str(args, "space")?, id, arg_str(args, "title")?, config)
+                .map_err(|e| e.to_string())?;
+            Ok(json!(present_view(host, view)))
         })(),
         "view_remove" => (|| {
-            host.pages_mut().remove_saved_view(arg_str(args, "id")?).map_err(|e| e.to_string())?;
+            host.pages_mut()
+                .remove_saved_view(arg_str(args, "id")?)
+                .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         })(),
         "pages_list" => (|| {
@@ -388,15 +456,118 @@ pub fn invoke(
                 .list(arg_str(args, "space")?)
                 .map_err(|e| e.to_string())?))
         })(),
+        "folders_list" => (|| {
+            let include_archived = match args.get("include_archived") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => return Err("`include_archived` must be a boolean".into()),
+            };
+            Ok(json!(host
+                .pages()
+                .folders_list(arg_str(args, "space")?, include_archived)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "folder_create" => (|| {
+            let parent_id = match args.get("parent_id") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_str().ok_or("`parent_id` must be text or null")?),
+            };
+            Ok(json!(host
+                .pages_mut()
+                .folder_create(arg_str(args, "space")?, arg_str(args, "title")?, parent_id)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "folder_update" => (|| {
+            let parent_id = match args.get("parent_id") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(value) => Some(Some(
+                    value.as_str().ok_or("`parent_id` must be text or null")?,
+                )),
+            };
+            let position = match args.get("position") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_i64().ok_or("`position` must be an integer")?),
+            };
+            let title = match args.get("title") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_str().ok_or("`title` must be text")?),
+            };
+            Ok(json!(host
+                .pages_mut()
+                .folder_update(arg_str(args, "id")?, title, parent_id, position)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "folder_remove" => (|| {
+            let subtree = match args.get("subtree") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => return Err("`subtree` must be a boolean".into()),
+            };
+            host.pages_mut()
+                .folder_remove(arg_str(args, "id")?, subtree)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })(),
+        "folder_restore" => (|| {
+            host.pages_mut()
+                .folder_restore(arg_str(args, "id")?)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })(),
+        "page_move" => (|| {
+            let folder_id = match args.get("folder_id") {
+                None => None,
+                Some(Value::Null) => Some(None),
+                Some(value) => Some(Some(
+                    value.as_str().ok_or("`folder_id` must be text or null")?,
+                )),
+            };
+            let position = match args.get("position") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(value.as_i64().ok_or("`position` must be an integer")?),
+            };
+            Ok(json!(host
+                .pages_mut()
+                .page_move(arg_str(args, "page")?, folder_id, position)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "page_trash" => (|| {
+            host.pages_mut()
+                .page_trash(arg_str(args, "page")?)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        })(),
+        "page_restore" => (|| {
+            Ok(json!(host
+                .pages_mut()
+                .page_restore(arg_str(args, "page")?)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "pages_trash" => (|| {
+            Ok(json!(host
+                .pages()
+                .pages_trash(arg_str(args, "space")?)
+                .map_err(|e| e.to_string())?))
+        })(),
+        "page_layout" => (|| {
+            Ok(json!(host
+                .pages_mut()
+                .page_layout(arg_str(args, "page")?, arg_str(args, "mode")?)
+                .map_err(|e| e.to_string())?))
+        })(),
         "page_get" => (|| page_state(host, arg_str(args, "page")?))(),
         "page_home" => (|| {
             let space = arg_str(args, "space")?;
-            let seed: Vec<Placement> = match args.get("seed") {
+            let mut seed: Vec<Placement> = match args.get("seed") {
                 Some(v) if !v.is_null() => {
                     serde_json::from_value(v.clone()).map_err(|e| e.to_string())?
                 }
                 _ => Vec::new(),
             };
+            for p in &mut seed {
+                store_placement(host, p);
+            }
             let page = host
                 .pages_mut()
                 .ensure_home(space, seed)
@@ -405,9 +576,20 @@ pub fn invoke(
         })(),
         "page_create" => (|| {
             let icon = args.get("icon").and_then(Value::as_str);
+            let period = args
+                .get("period")
+                .filter(|value| !value.is_null())
+                .map(clean_period)
+                .transpose()
+                .map_err(|e| e.to_string())?;
             let mut page = host
                 .pages_mut()
-                .create(arg_str(args, "space")?, arg_str(args, "title")?, icon)
+                .create_with_period(
+                    arg_str(args, "space")?,
+                    arg_str(args, "title")?,
+                    icon,
+                    period.as_ref(),
+                )
                 .map_err(|e| e.to_string())?;
             if let Some(focus) = args.get("focus").and_then(Value::as_str) {
                 page = host
@@ -423,9 +605,19 @@ pub fn invoke(
                 Some(Value::Null) => Some(None),
                 Some(v) => Some(Some(v.as_str().ok_or("`icon` must be text")?)),
             };
+            let period = args
+                .get("period")
+                .map(|value| {
+                    if value.is_null() {
+                        Ok(Value::Null)
+                    } else {
+                        clean_period(value).map_err(|e| e.to_string())
+                    }
+                })
+                .transpose()?;
             let page = host
                 .pages_mut()
-                .update(
+                .update_with_period(
                     arg_str(args, "page")?,
                     args.get("title").and_then(Value::as_str),
                     icon,
@@ -434,6 +626,7 @@ pub fn invoke(
                         None | Some(Value::Null) => None,
                         Some(v) => Some(v.as_str().ok_or("`focus` must be text")?),
                     },
+                    period.as_ref(),
                 )
                 .map_err(|e| e.to_string())?;
             Ok(json!(page))
@@ -458,6 +651,7 @@ pub fn invoke(
                 } else if let Ok(template) = host.template(&p.plugin, ViewKind::Widget, &p.widget) {
                     p.config = clean_config(&template["page"]["config"], &p.config);
                 }
+                store_placement(host, p);
             }
             host.pages_mut()
                 .save(page, placements)
@@ -565,7 +759,16 @@ fn rule_service(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value,
                 }
                 rules.push(rule);
             }
-            let mut state = json!({"rules":rules,"settings":host.rules().settings(space).map_err(error)?,"armed":host.automations_armed(space).map_err(error)?,"waiting":rules.iter().map(|r|r.waiting).sum::<u64>(),"problems":problems});
+            let waiting = rules.iter().map(|r| r.waiting).sum::<u64>();
+            let mut rules = json!(rules);
+            for rule in rules.as_array_mut().into_iter().flatten() {
+                for side in ["trigger", "action"] {
+                    if let Some(Value::String(plugin)) = rule[side].get_mut("plugin") {
+                        *plugin = host.canonical(plugin).to_string();
+                    }
+                }
+            }
+            let mut state = json!({"rules":rules,"settings":host.rules().settings(space).map_err(error)?,"armed":host.automations_armed(space).map_err(error)?,"waiting":waiting,"problems":problems});
             if cmd == "rules" {
                 let mut events = Vec::new();
                 let mut operations = Vec::new();
@@ -583,14 +786,14 @@ fn rule_service(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value,
                 state["operations"] = json!(operations);
                 state["examples"] = if events
                     .iter()
-                    .any(|e| e["plugin"] == "todo" && e["event"] == "task_done")
+                    .any(|e| e["plugin"] == "tasks" && e["event"] == "task_done")
                     && operations
                         .iter()
                         .any(|o| o["plugin"] == "habits" && o["operation"] == "checkin")
                 {
                     json!([{
                         "name": "Gym task done → Gym habit",
-                        "trigger": {"plugin": "todo", "event": "task_done"},
+                        "trigger": {"plugin": "tasks", "event": "task_done"},
                         "filter": [{"field": "tags", "op": "has_tag", "value": "gym"}],
                         "action": {"plugin": "habits", "operation": "checkin",
                             "args": {"id": "", "status": "done", "day": "{{event.completed_date}}"}}
@@ -602,8 +805,11 @@ fn rule_service(host: &mut PluginHost, cmd: &str, args: &Value) -> Result<Value,
             Ok(state)
         }
         "rule_create" | "rule_update" => {
-            let input: RuleInput = serde_json::from_value(arg(args, "rule")?.clone())
+            let mut input: RuleInput = serde_json::from_value(arg(args, "rule")?.clone())
                 .map_err(|_| "Invalid rule fields")?;
+            // Rules are synced rows: name renamed plugins by storage id.
+            input.trigger.plugin = host.storage_plugin_id(&input.trigger.plugin).to_string();
+            input.action.plugin = host.storage_plugin_id(&input.action.plugin).to_string();
             rules::check(host, &input)?;
             let rule = if cmd == "rule_create" {
                 host.rules_mut().create(space, &input)

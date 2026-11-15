@@ -147,7 +147,7 @@ pub(crate) fn invoke(
     )
     .map_err(|_| CommandError::invalid("`files` must be a list of {path, text}"))?;
     let dry_run = options.dry_run || args.get("dry_run") == Some(&Value::Bool(true));
-    let manifest = host.manifests().find(|m| m.id == plugin);
+    let manifest = host.manifest(plugin);
     let def = manifest
         .and_then(|m| m.import.iter().find(|i| i.id == importer))
         .ok_or_else(|| {

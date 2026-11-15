@@ -63,8 +63,7 @@ fn ids_where(
     };
     let name = format!("{plugin}.{query}");
     let manifest = host
-        .manifests()
-        .find(|m| m.id == plugin)
+        .manifest(plugin)
         .ok_or_else(|| CommandError::not_found(Kind::Query, &name))?;
     let info = commands::query_info(manifest, query)
         .ok_or_else(|| CommandError::not_found(Kind::Query, &name))?;
@@ -166,10 +165,7 @@ pub(crate) fn invoke(
     let op = commands::text(args, "op")?;
     let dry_run = options.dry_run || args.get("dry_run") == Some(&Value::Bool(true));
     let missing = || CommandError::not_found(Kind::Action, &format!("{plugin}.{op}"));
-    let manifest = host
-        .manifests()
-        .find(|m| m.id == plugin)
-        .ok_or_else(missing)?;
+    let manifest = host.manifest(plugin).ok_or_else(missing)?;
     let operation = manifest.operations.get(op).ok_or_else(missing)?;
     if matches!(caller, Caller::Client(_)) && commands::operation_hidden(manifest, op) {
         return Err(missing());

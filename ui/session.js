@@ -6,7 +6,7 @@
     read(space) {
       try {
         const value = JSON.parse(this.storage.getItem(`pp-location:${space}`) || "null");
-        if (!value || !["home", "apps", "settings", "plugin"].includes(value.view)) return null;
+        if (!value || !["today", "home", "apps", "settings", "plugin"].includes(value.view)) return null;
         const id = v => typeof v === "string" && v.length < 512 ? v : null;
         return { view: value.view, plugin: id(value.plugin), page: id(value.page), item: id(value.item), settings: id(value.settings), scroll: Number.isFinite(value.scroll) ? Math.max(0, Math.min(value.scroll, 10000000)) : 0 };
       } catch (_) { return null; }

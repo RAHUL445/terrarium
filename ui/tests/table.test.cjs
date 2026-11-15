@@ -130,3 +130,45 @@ test('sortRows keeps ties in order and empties last both ways', () => {
     return rendererHarness().renderer.sortRows(input, key, type, dir).map((row) => row.id);
   }
 });
+
+test('server sorted table preserves returned order and exposes no local sort controls', async () => {
+  const ui = rendererHarness();
+  const view = ui.renderer.mount(ui.root, { body: { type: 'table', query: 'tasks', server_sorted: true,
+    sort: 'title', dir: 'desc', columns: [{ key: 'title', label: 'Task' }] } }, bridge({
+    query: async () => [{ id: 'b', title: 'Second' }, { id: 'a', title: 'First' }],
+  }));
+  await view.ready;
+  assert.deepEqual(all(ui.root).filter(node => node.tag === 'td' && node.attrs['data-label'] === 'Task').map(text), ['Second', 'First']);
+  assert.equal(all(ui.root).some(node => node.className === 'pp-table-sortbar'), false);
+  assert.equal(all(ui.root).some(node => node.className === 'pp-table-sort'), false);
+  assert.equal(all(ui.root).some(node => node.tag === 'select'), false);
+  view.dispose();
+});
+
+test('table row_action passes row id and followup receives the operation result', async () => {
+  const ui = rendererHarness();
+  const actions = [], notices = [];
+  const rowAction = {
+    label: 'Archive', op: 'archive', args: { id: '{{row.id}}' }, success: 'Archived',
+    followup: { label: 'Review archive', action: { op: 'review', args: { id: '{{row.id}}', prompt: '{{result.prompt}}' } } },
+  };
+  const body = { type: 'table', query: 'tasks', columns: [{ key: 'title', label: 'Task' }], row_action: rowAction };
+  const view = ui.renderer.mount(ui.root, { body }, bridge({
+    query: async () => [{ id: 'task-7', title: 'Tidy desk' }],
+    action: async (op, args) => { actions.push({ op, args }); return op === 'archive' ? { prompt: 'Archive task-7?' } : {}; },
+    toast: (...notice) => notices.push(notice),
+  }));
+  await view.ready;
+  const button = all(ui.root).find(node => String(node.className).includes('pp-row-action'));
+  assert.equal(button.textContent, 'Archive');
+  await button.fire('click');
+  assert.equal(actions[0].op, 'archive');
+  assert.equal(actions[0].args.id, 'task-7');
+  assert.equal(notices[0][0], 'Archived');
+  assert.equal(notices[0][2].label, 'Review archive');
+  await notices[0][2].run();
+  assert.equal(actions[1].op, 'review');
+  assert.equal(actions[1].args.id, 'task-7');
+  assert.equal(actions[1].args.prompt, 'Archive task-7?');
+  view.dispose();
+});

@@ -13,7 +13,7 @@ use terrarium_runtime::ai::{AiConfig, AiError, Completion, Sealer};
 use terrarium_runtime::{build_plugin, HostConfig, PluginHost, RuntimeError};
 
 const PLUGINS: [&str; 7] = [
-    "todo",
+    "tasks",
     "bookmarks",
     "habits",
     "notes",
@@ -323,7 +323,7 @@ fn viewable_queries_return_their_declared_columns() {
     )
     .unwrap();
 
-    for plugin in ["todo", "notes", "bookmarks"] {
+    for plugin in ["tasks", "notes", "bookmarks"] {
         let manifest = host
             .manifests()
             .find(|m| m.id == plugin)
@@ -1425,10 +1425,10 @@ fn every_index_query_reads_its_rows() {
             .iter()
             .map(|(id, _)| id.as_str())
             .collect::<Vec<_>>(),
-        ["bookmarks", "notes", "todo", "voice"]
+        ["bookmarks", "notes", "tasks", "voice"]
     );
     for (plugin, entries) in entries {
-        let id = &ids[&plugin];
+        let id = &ids[host.storage_plugin_id(&plugin)];
         for entry in entries {
             let query =
                 host.manifests().find(|m| m.id == plugin).unwrap().queries[&entry.query].clone();
@@ -1558,7 +1558,7 @@ fn every_plugin_resolves_its_items() {
     ] {
         let made = host.call(plugin, op, &args).unwrap();
         let id = made["id"].as_str().unwrap();
-        let manifest = host.manifests().find(|m| m.id == plugin).unwrap();
+        let manifest = host.manifest(plugin).unwrap();
         let def = &manifest.refs[0];
         assert_eq!(def.table, table);
         assert_eq!(def.kind, kind);
@@ -1720,7 +1720,7 @@ fn todo_csv_round_trip() {
             &json!({"title": "Plan tomorrow #work !high every week"}),
         )
         .unwrap();
-    let files = exported_files(&mut original, &data, "todo");
+    let files = exported_files(&mut original, &data, "tasks");
     assert_eq!(files.len(), 1);
     assert_eq!(files[0]["path"], "tasks.csv");
     let fresh_data = TempDir::new().unwrap();

@@ -149,3 +149,25 @@ test('selecting a day lists its items', async () => {
   assert.ok(empty);
   view.dispose();
 });
+
+test('calendar row_action is available on entries and the selected-day list', async () => {
+  const ui = rendererHarness();
+  const actions = [];
+  const view = ui.renderer.mount(ui.root, { body: { type: 'calendar', query: 'tasks', date: 'due', title: 'title',
+    label: 'Tasks', row_action: { label: 'Complete', op: 'complete', args: { id: '{{row.id}}' } } } }, bridge({
+    query: async () => [{ id: 'task-9', title: 'Call Sam', due: '2026-11-03' }],
+    action: async (op, args) => { actions.push([op, args]); return {}; },
+  }));
+  await view.ready;
+  const entryAction = byClass(ui.root, 'pp-cal-row-action')[0];
+  assert.equal(entryAction.textContent, 'Complete');
+  await entryAction.fire('click');
+  const day = byClass(ui.root, 'pp-cal-daybtn').find(node => node.dataset.day === '2026-11-03');
+  await day.fire('click');
+  const listAction = byClass(ui.root, 'pp-row-action')[0];
+  assert.ok(listAction);
+  await listAction.fire('click');
+  assert.equal(actions.length, 2);
+  assert.deepEqual(actions.map(([op, args]) => [op, args.id]), [['complete', 'task-9'], ['complete', 'task-9']]);
+  view.dispose();
+});

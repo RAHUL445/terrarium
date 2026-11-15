@@ -35,6 +35,9 @@ pub struct PluginList {
 struct PluginInfo {
     oauth: BTreeMap<String, terrarium_runtime::net::oauth::OAuthDef>,
     id: String,
+    /// Ids this plugin had before a rename. The first is its storage id,
+    /// which refs and synced rows keep using.
+    former_ids: Vec<String>,
     name: String,
     version: String,
     description: String,
@@ -53,6 +56,12 @@ struct PluginInfo {
     views: BTreeMap<String, terrarium_runtime::QueryView>,
     quick_actions: Vec<terrarium_runtime::QuickAction>,
     share_target: Option<terrarium_runtime::ShareTarget>,
+    /// Declared operation names, so Today's capture bar routes only to
+    /// plugins that can take the text.
+    operations: Vec<String>,
+    /// Valid `today-v1` sources, and why any others were left out.
+    today: Vec<terrarium_runtime::TodaySource>,
+    today_errors: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -77,9 +86,11 @@ impl From<&Manifest> for PluginInfo {
                 })
                 .collect()
         };
+        let today = terrarium_runtime::today_sources(m);
         PluginInfo {
             oauth: m.oauth.clone(),
             id: m.id.clone(),
+            former_ids: m.former_ids.clone(),
             name: m.name.clone(),
             version: m.version.clone(),
             description: m.description.clone(),
@@ -100,6 +111,9 @@ impl From<&Manifest> for PluginInfo {
                 .collect(),
             quick_actions: m.quick_actions.clone(),
             share_target: m.share_target.clone(),
+            operations: m.operations.keys().cloned().collect(),
+            today: today.sources,
+            today_errors: today.errors,
         }
     }
 }
@@ -136,7 +150,7 @@ pub fn err(e: impl std::fmt::Display) -> String {
 #[tauri::command]
 pub fn plugins(state: State<'_, Plugins>) -> Result<PluginList, String> {
     let loaded = state.all_loaded();
-    let (plugins, installed, execution) = state
+    let (plugins, installed, execution, superseded) = state
         .with_host(|host| -> Result<_, String> {
             let installed = host.packages().installed().map_err(err)?;
             let plugins: Vec<PluginInfo> = host
@@ -144,7 +158,11 @@ pub fn plugins(state: State<'_, Plugins>) -> Result<PluginList, String> {
                 .map(|m| {
                     let mut info = PluginInfo::from(m);
                     info.origin = loaded.get(&m.id).map(|l| l.origin);
-                    if let Some(inst) = installed.iter().find(|i| i.id == m.id) {
+                    let record = installed
+                        .iter()
+                        .find(|i| i.id == m.id)
+                        .or_else(|| installed.iter().find(|i| m.answers_to(&i.id)));
+                    if let Some(inst) = record {
                         if info.origin != Some(Origin::Dev) {
                             info.previous_version = inst.previous_version.clone();
                         }
@@ -153,7 +171,12 @@ pub fn plugins(state: State<'_, Plugins>) -> Result<PluginList, String> {
                     info
                 })
                 .collect();
-            Ok((plugins, installed, host.execution_mode()))
+            // Records under a former id belong to the renamed plugin.
+            let superseded: Vec<String> = host
+                .manifests()
+                .flat_map(|m| m.former_ids.iter().cloned())
+                .collect();
+            Ok((plugins, installed, host.execution_mode(), superseded))
         })
         .ok_or("plugin host unavailable")??;
     Ok(PluginList {
@@ -163,6 +186,7 @@ pub fn plugins(state: State<'_, Plugins>) -> Result<PluginList, String> {
             .filter(|i| {
                 !i.removed
                     && i.digest != BUNDLED_DIGEST
+                    && !superseded.contains(&i.id)
                     && loaded.get(&i.id).and_then(|l| l.digest.as_deref())
                         != Some(i.digest.as_str())
             })
@@ -173,7 +197,7 @@ pub fn plugins(state: State<'_, Plugins>) -> Result<PluginList, String> {
             .collect(),
         removed: installed
             .iter()
-            .filter(|i| i.removed)
+            .filter(|i| i.removed && !superseded.contains(&i.id))
             .map(|i| RemovedInfo {
                 id: i.id.clone(),
                 version: i.version.clone(),

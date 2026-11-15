@@ -15,16 +15,16 @@
       <span class="space-text"><span class="space-name" id="space-name-label">Personal</span></span>
       <svg class="icon" aria-hidden="true" data-icon="chevron-down"></svg>
     </button>
-      <span id="workspace-context">Home</span>
+      <span id="workspace-context">Today</span>
       <div class="workspace-tools"><button type="button" data-open-search title="Search (⌘K / Ctrl+K)" aria-label="Search"><svg class="icon" aria-hidden="true" data-icon="search"></svg></button><div id="workspace-actions"></div></div>
     </header>
 <div class="shell">
   <nav class="sidebar" id="main-sidebar" aria-label="Main">
-    <button type="button" class="nav-item" data-view="home" aria-label="Home" title="Home"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
+    <button type="button" class="nav-item" data-view="today" aria-label="Home" title="Home (⌘1 / Ctrl+1)" aria-keyshortcuts="Meta+1 Control+1"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
     <div id="page-nav" class="app-nav page-nav" aria-label="Pages"></div>
     <button type="button" class="nav-item nav-quiet" id="page-new" aria-label="New page" title="New page"><svg class="icon" aria-hidden="true" data-icon="plus"></svg><span>New page</span></button>
     <button type="button" class="nav-item" data-view="apps" aria-label="All apps" title="All apps"><svg class="icon" aria-hidden="true" data-icon="grid"></svg><span>All apps</span></button>
-    <p class="nav-label">Pinned apps</p>
+    <p class="nav-label">Apps</p>
     <div id="app-nav" class="app-nav"></div>
     <div class="nav-spacer"></div>
     <button type="button" class="nav-item" data-settings="plugins" aria-label="Plugins" title="Plugins"><svg class="icon" aria-hidden="true" data-icon="apps-plus"></svg><span>Plugins</span><span class="pp-badge" data-registry-badge hidden></span></button>
@@ -42,19 +42,21 @@
     </header>
 
     <main class="content" id="content">
+      <section id="view-today" class="view today" aria-labelledby="today-title" hidden></section>
       <section id="view-home" class="view" hidden>
         <div class="home-head">
           <div><p class="muted" id="home-date"></p><h1 id="home-greeting">Hello</h1><button type="button" id="page-focus-chip" class="page-focus-chip" hidden></button></div>
-          <div class="head-actions"><button type="button" id="page-edit"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg>Edit page</button><button type="button" class="primary" data-open-search="add" title="Quick add (⌘⇧K / Ctrl+Shift+K)" aria-keyshortcuts="Meta+Shift+K Control+Shift+K"><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Quick add</button></div>
+          <div class="head-actions"><button type="button" id="page-edit"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg>Edit page</button><button type="button" class="primary" data-open-search="add" title="Quick add (⌘⇧K / Ctrl+Shift+K)" aria-keyshortcuts="Meta+Shift+K Control+Shift+K"><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Quick add</button><details class="head-menu" id="page-menu"><summary class="icon-button" aria-label="More page actions" title="More page actions"><svg class="icon" aria-hidden="true" data-icon="more"></svg></summary><div class="head-menu-panel" role="menu"><button type="button" role="menuitem" id="page-pin" aria-pressed="false">Pin page</button><button type="button" role="menuitem" id="page-weekly-review">New weekly review</button><button type="button" role="menuitem" id="page-pins-manage">Manage pins…</button></div></details></div>
         </div>
         
         
+        <p id="page-period-label" class="muted" hidden></p>
         <div id="load-errors"></div>
         <div id="home-empty" class="card empty" hidden>
           <h2>No plugins loaded</h2>
           <p>Import a plugin bundle before building, or set <code>TERRA_PLUGINS</code> to built package directories. The app picks up rebuilt plugins automatically.</p>
         </div>
-        <nav id="page-tabs" class="page-tabs" aria-label="Pages" hidden></nav>
+
         <div id="page-editbar" class="page-editbar" role="toolbar" aria-label="Edit page" hidden>
           <div class="page-editbar-name">
             <button type="button" id="page-icon" class="page-icon-button" aria-label="Page icon" title="Choose an icon" aria-haspopup="listbox" aria-expanded="false"></button>
@@ -62,11 +64,18 @@
             <input id="page-title-input" class="page-title-input" maxlength="40" autocomplete="off" aria-label="Page name" placeholder="Page name">
           </div>
           <label class="page-focus-field" title="Widgets that support it show only items matching this project, tag or word"><svg class="icon" aria-hidden="true" data-icon="target"></svg><input id="page-focus-input" maxlength="40" autocomplete="off" aria-label="Page focus: a project, tag or word that widgets filter by" placeholder="Focus: project or tag (optional)"></label>
+          <label class="page-layout-choice">Page layout <select id="page-layout-mode" class="pp-input"><option value="grid">Grid</option><option value="flow">Flow</option></select></label>
+          <div class="page-review-period">
+            <label>Review period <select id="page-period-mode" class="pp-input"><option value="">None</option><option value="previous_week">Previous week</option><option value="this_week">This week</option><option value="custom">Custom dates</option></select></label>
+            <label>Timezone <input id="page-period-timezone" class="pp-input" placeholder="Asia/Kolkata" aria-label="Review timezone"></label>
+            <label>From <input id="page-period-start" class="pp-input" type="date" aria-label="Review start date"></label>
+            <label>Until (exclusive) <input id="page-period-end" class="pp-input" type="date" aria-label="Review end date, exclusive"></label>
+          </div>
           <div class="page-editbar-actions">
             <div id="page-order" class="page-order" role="group" aria-label="Page order" hidden><button type="button" class="icon-button" id="page-move-left" aria-label="Move page earlier" title="Move page earlier"><svg class="icon" aria-hidden="true" data-icon="chevron-left"></svg></button><button type="button" class="icon-button" id="page-move-right" aria-label="Move page later" title="Move page later"><svg class="icon" aria-hidden="true" data-icon="chevron-right"></svg></button></div>
             <button type="button" data-page-add><svg class="icon" aria-hidden="true" data-icon="plus"></svg>Add widget</button>
             <button type="button" id="page-duplicate"><svg class="icon" aria-hidden="true" data-icon="copy"></svg>Duplicate</button>
-            <button type="button" id="page-delete" class="page-delete"><svg class="icon" aria-hidden="true" data-icon="trash"></svg>Delete page</button>
+            <button type="button" id="page-delete" class="page-delete"><svg class="icon" aria-hidden="true" data-icon="trash"></svg>Move to Trash</button>
             <span class="page-editbar-spacer"></span>
             <span class="page-editbar-end"><button type="button" id="page-cancel">Cancel</button><button type="button" class="primary" id="page-done">Done</button></span>
           </div>
@@ -84,6 +93,7 @@
             <span class="app-tile" id="app-tile"></span>
             <h1 id="app-title"></h1>
             <div class="app-actions" id="app-actions"></div>
+            <details class="head-menu" id="app-menu" hidden><summary class="icon-button" aria-label="More app actions" title="More app actions"><svg class="icon" aria-hidden="true" data-icon="more"></svg></summary><div class="head-menu-panel" id="app-menu-items" role="menu"></div></details>
           </div>
           <nav class="app-tabs" id="app-tabs" aria-label="Pages"></nav>
         </header>
@@ -639,6 +649,7 @@
         </div>
       </section>
     </main>
+    <aside class="detail-dock" id="detail-dock" aria-label="Details" hidden></aside>
 
   </div>
 
@@ -663,7 +674,7 @@
   </aside>
   <nav class="companion-tools" id="companion-tools" role="tablist" aria-label="Companion tools" aria-orientation="vertical"><button type="button" class="icon-button" id="rail-assistant-tab" role="tab" aria-selected="false" aria-controls="rail-assistant-panel" data-rail-tab="assistant" aria-label="Assistant" title="Assistant"><svg class="icon" aria-hidden="true" data-icon="sparkle"></svg></button><button type="button" class="icon-button" id="rail-activity-tab" role="tab" aria-selected="false" aria-controls="rail-activity-panel" data-rail-tab="activity" aria-label="Activity" title="Activity"><svg class="icon" aria-hidden="true" data-icon="clock"></svg></button><button type="button" class="icon-button" id="rail-actions-tab" role="tab" aria-selected="false" aria-controls="rail-actions-panel" data-rail-tab="actions" aria-label="Quick actions" title="Quick actions"><svg class="icon" aria-hidden="true" data-icon="plus"></svg></button><button type="button" class="icon-button" id="rail-pinned-tab" role="tab" aria-selected="false" aria-controls="rail-pinned-panel" data-rail-tab="pinned" aria-label="Pinned widgets" title="Pinned widgets"><svg class="icon" aria-hidden="true" data-icon="grid"></svg></button><button type="button" class="icon-button rail-customize-shortcut" data-customize-rail="widgets" aria-label="Customize workspace" title="Customize workspace"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg></button></nav>
   <nav class="tabbar" aria-label="Main">
-    <button type="button" class="tab" data-view="home"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
+    <button type="button" class="tab" data-view="today"><svg class="icon" aria-hidden="true" data-icon="home"></svg><span>Home</span></button>
     <button type="button" class="tab" data-view="apps"><svg class="icon" aria-hidden="true" data-icon="grid"></svg><span>Apps</span></button>
     <button type="button" class="tab" data-open-search><svg class="icon" aria-hidden="true" data-icon="search"></svg><span>Search</span></button>
     <button type="button" class="tab" data-view="settings"><svg class="icon" aria-hidden="true" data-icon="sliders"></svg><span>Settings</span></button>
@@ -713,9 +724,12 @@
 </dialog>
 
 <div id="toasts" class="toasts" role="status" aria-live="polite" popover="manual"></div>
+<dialog id="page-library-dialog" class="page-library-dialog" aria-labelledby="page-library-title"><div class="page-add-head"><h2 id="page-library-title">Pages and folders</h2><button type="button" id="page-library-close" aria-label="Close page browser">Close</button></div><div id="page-library-content"></div></dialog>
+<dialog id="page-pins-dialog" class="page-library-dialog" aria-labelledby="page-pins-title"><div class="page-add-head"><h2 id="page-pins-title">Pinned pages, folders and apps</h2><button type="button" id="page-pins-close" aria-label="Close pin settings">Close</button></div><p class="muted">Pins belong to this device and space. Removing a pin keeps the page, folder or app.</p><div id="page-pins-content"></div></dialog>
 <script src="confirm.js"></script>
 <script src="performance.js"></script>
 <script src="viewport.js"></script>
+<script src="plugin-ids.js"></script>
 <script src="renderer.js"></script>
 <script src="views.js"></script>
 <script src="view-library.js"></script>
@@ -724,9 +738,15 @@
 <script src="session.js"></script>
 <script src="status.js"></script>
 <script src="rails.js"></script>
+<script src="review-period.js"></script>
+<script src="pins.js"></script>
+<script src="page-library.js"></script>
+<script src="page-flow.js"></script>
 <script src="pages.js"></script>
 <script src="templates.js"></script>
 <script src="registry.js"></script>
+<script src="today.js"></script>
+<script src="detail-dock.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

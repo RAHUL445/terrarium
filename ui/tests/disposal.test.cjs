@@ -89,3 +89,18 @@ test('a microphone permission response arriving after disposal releases the stre
   view.dispose(); finish({ getTracks: () => [{ stop() { stopped++; } }] }); await click;
   assert.equal(stopped, 1); assert.equal(view.timers.size, 0);
 });
+
+test('a search field shows its bound state when an action resets it', async () => {
+  const time = clock(); const ui = rendererHarness(time);
+  const view = ui.renderer.mount(ui.root, { state: { q: '' }, body: { type: 'search-field', bind: 'state.q' } }, bridge);
+  await view.ready;
+  const input = ui.root.children[0].children[1];
+  input.value = 'Call'; input.dispatchEvent({ type: 'input' });
+  view.setState('state.q', '');
+  assert.equal(input.value, 'Call', 'a pending keystroke is not overwritten');
+  time.tick();
+  assert.equal(view.state.q, 'Call');
+  view.setState('state.q', '');
+  assert.equal(input.value, '');
+  view.dispose();
+});

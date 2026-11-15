@@ -331,9 +331,11 @@ fn plugin_info(m: &Manifest) -> Value {
             .filter_map(|(name, query)| query.view.clone().map(|view| (name.clone(), view)))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
+    let today = terrarium_runtime::today_sources(m);
     let mut info = Map::new();
     for (k, v) in [
         ("id", json!(m.id)),
+        ("former_ids", json!(m.former_ids)),
         ("name", json!(m.name)),
         ("version", json!(m.version)),
         ("description", json!(m.description)),
@@ -350,6 +352,9 @@ fn plugin_info(m: &Manifest) -> Value {
         ("views", json!(views_of(m))),
         ("quick_actions", json!(m.quick_actions)),
         ("share_target", json!(m.share_target)),
+        ("operations", json!(m.operations.keys().collect::<Vec<_>>())),
+        ("today", json!(today.sources)),
+        ("today_errors", json!(today.errors)),
     ] {
         info.insert(k.into(), v);
     }

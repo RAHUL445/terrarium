@@ -362,12 +362,19 @@ pub(crate) fn catch_up(
     plugin: &str,
     budget: usize,
 ) -> Result<IndexProgress> {
-    let Some(m) = host.manifests().find(|m| m.id == plugin) else {
+    let Some(m) = host.manifest(plugin) else {
         return Ok(IndexProgress {
             rows: 0,
             done: true,
         });
     };
+    let plugin = m.id.as_str();
+    // Entries indexed under a former id are rebuilt under the current one.
+    for former in &m.former_ids {
+        if index.cursor(space, former)?.is_some() {
+            index.forget(space, former)?;
+        }
+    }
     let Some(fp) = fingerprint(m) else {
         if index.cursor(space, plugin)?.is_some() {
             index.forget(space, plugin)?;

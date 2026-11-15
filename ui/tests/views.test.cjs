@@ -43,6 +43,14 @@ test("structured filters and page focus reach SQL before client presentation", a
   assert.throws(() => views.filterParams(entry.view, { filters: "not json" }), /invalid/);
 });
 
+test("widget filter objects reach SQL directly while saved JSON filters stay supported", async () => {
+  const view = { filters: [{ param: "q" }, { param: "project" }] };
+  const filters = { q: 'a "quoted" search', project: "Work" };
+  assert.deepEqual(views.filterParams(view, { filters }), filters);
+  assert.deepEqual(views.filterParams(view, { filters: JSON.stringify(filters) }), filters);
+  assert.throws(() => views.filterParams(view, { filters: ["invalid"] }), /invalid/);
+});
+
 test("dynamic status choices supply stable board ids and labels", async () => {
   const entry = { query: "tasks", view: { columns: [
     { key: "title", type: "string" },
@@ -210,4 +218,19 @@ test("views.js and the table sort the same way", () => {
       })
       .map((entry) => entry.row);
   }
+});
+
+test("a board grouped by a matrix column draws as the 2x2 matrix; other boards keep lanes", () => {
+  const values = ["do", "schedule", "delegate", "eliminate"];
+  const entry = { query: "tasks", view: { title: "Tasks", title_column: "title", columns: [
+    { key: "title", label: "Task", type: "string" },
+    { key: "quadrant", label: "Quadrant", type: "enum", values, board: "matrix" },
+    { key: "stage", label: "Stage", type: "enum", values: ["todo", "doing", "done"] },
+    { key: "odd", label: "Odd", type: "enum", values: ["a", "b"], board: "matrix" },
+  ] } };
+  const matrix = views.template(entry, { layout: "board", group: "quadrant" }).body;
+  assert.equal(matrix.layout, "matrix");
+  assert.deepEqual(matrix.columns.map(c => c.value), values);
+  assert.equal(views.template(entry, { layout: "board", group: "stage" }).body.layout, "board");
+  assert.equal(views.template(entry, { layout: "board", group: "odd" }).body.layout, "board", "needs four values");
 });

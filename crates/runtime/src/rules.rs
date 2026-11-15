@@ -706,8 +706,7 @@ fn check_condition(c: &Condition, spec: &ParamSpec) -> std::result::Result<(), S
 pub fn check(host: &PluginHost, input: &RuleInput) -> std::result::Result<(), String> {
     limits(input).map_err(|e| e.to_string())?;
     let source = host
-        .manifests()
-        .find(|m| m.id == input.trigger.plugin)
+        .manifest(&input.trigger.plugin)
         .ok_or("Trigger plugin is not installed")?;
     let event = source
         .events
@@ -721,8 +720,7 @@ pub fn check(host: &PluginHost, input: &RuleInput) -> std::result::Result<(), St
         check_condition(c, spec)?;
     }
     let target = host
-        .manifests()
-        .find(|m| m.id == input.action.plugin)
+        .manifest(&input.action.plugin)
         .ok_or("Action plugin is not installed")?;
     let op = target
         .operations

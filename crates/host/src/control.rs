@@ -75,7 +75,7 @@ pub struct AuditEntry {
     /// Items a bulk command ran on (`plugin.run_bulk`, `space.import`).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub items: usize,
-    /// The action a bulk command ran, e.g. `todo.toggle`.
+    /// The action a bulk command ran, e.g. `tasks.toggle`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
 }
@@ -637,16 +637,17 @@ mod server {
                                 format!("no open space `{space}`"),
                             ));
                         }
-                        let m = host.manifests().find(|m| m.id == plugin).ok_or_else(|| {
+                        let m = host.manifest(plugin).ok_or_else(|| {
                             RpcError::command("not-found", format!("no plugin `{plugin}`"))
                         })?;
+                        let id = m.id.clone();
                         match text("page") {
-                            Some(p) if m.pages.iter().any(|x| x.id == p) => Ok(p.to_string()),
+                            Some(p) if m.pages.iter().any(|x| x.id == p) => Ok((id, p.to_string())),
                             Some(p) => Err(RpcError::command(
                                 "not-found",
                                 format!("`{plugin}` has no page `{p}`"),
                             )),
-                            None => m.pages.first().map(|p| p.id.clone()).ok_or_else(|| {
+                            None => m.pages.first().map(|p| (id, p.id.clone())).ok_or_else(|| {
                                 RpcError::command("not-found", format!("`{plugin}` has no pages"))
                             }),
                         }
@@ -657,7 +658,7 @@ mod server {
                             "The plugin host is unavailable.",
                         ))
                     })?;
-                json!({ "action": "open", "space": space, "plugin": plugin, "page": page, "item": text("item") })
+                json!({ "action": "open", "space": space, "plugin": page.0, "page": page.1, "item": text("item") })
             }
             other => {
                 return Err(RpcError::command(

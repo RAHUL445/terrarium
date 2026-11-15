@@ -9,7 +9,10 @@ fn todo_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let dir = support::package_root().join("todo").canonicalize().unwrap();
+            let dir = support::package_root()
+                .join("tasks")
+                .canonicalize()
+                .unwrap();
             build_plugin(&dir).unwrap_or_else(|e| panic!("building todo: {e}"));
             dir
         })
@@ -177,7 +180,7 @@ fn unloading_forgets_and_no_index_is_skipped() {
     let (root, mut host) = setup();
     create(&mut host, "Lamp");
     catch_up(&mut host);
-    assert!(host.unload("todo"));
+    assert!(host.unload("tasks"));
     assert!(host.indexed_items("personal", "todo").unwrap().is_empty());
     let dir = indexed_todo(&root.path().join("plain"), "Task");
     let path = dir.join("manifest.json");
@@ -291,7 +294,7 @@ fn fallback_hits_merge_after_equal_indexed_hits() {
         .unwrap();
     let found = search(&mut host, "lamp");
     assert_eq!(found["results"].as_array().unwrap().len(), 2);
-    assert_eq!(found["results"][0]["plugin"], "todo");
+    assert_eq!(found["results"][0]["plugin"], "tasks");
     assert_eq!(found["results"][1]["plugin"], "notes");
 }
 #[test]
@@ -336,7 +339,7 @@ fn a_big_rebuild_reports_indexing() {
         })
         .unwrap();
     let found = search(&mut host, "lamp");
-    assert_eq!(found["indexing"], json!(["todo"]));
+    assert_eq!(found["indexing"], json!(["tasks"]));
     assert!(!found["results"].as_array().unwrap().is_empty());
     assert!(found["results"][0]["kind"].is_null());
     let mut done = false;
@@ -505,7 +508,7 @@ fn backlinks_report_plugins_still_indexing() {
         })
         .unwrap();
     let found = backlinks(&mut host, None, "notes/notes/n1").unwrap();
-    assert_eq!(found["indexing"], json!(["todo"]));
+    assert_eq!(found["indexing"], json!(["tasks"]));
     assert_eq!(found["mentions"], json!([]));
 }
 

@@ -40,6 +40,9 @@ pub(crate) struct HostState {
     pub store: CoreStore,
     pub timezone: String,
     pub plugin_id: String,
+    /// The id synced rows name this plugin by (events, schedules): its
+    /// first former id after a rename, otherwise `plugin_id`.
+    pub storage_id: String,
     limits: StoreLimits,
     host_calls: u32,
     log_lines: usize,
@@ -73,6 +76,7 @@ pub(crate) struct HostState {
 /// Who is calling and with what limits.
 pub(crate) struct CallContext<'a> {
     pub plugin_id: &'a str,
+    pub storage_id: &'a str,
     pub timezone: &'a str,
     pub limits: Limits,
     pub uses: &'a [String],
@@ -306,9 +310,9 @@ fn finish_call(
         peers.events.extend(
             data.emitted
                 .into_iter()
-                .map(|event| (data.plugin_id.clone(), event)),
+                .map(|event| (data.storage_id.clone(), event)),
         );
-        peers.apply_schedule_changes(&data.plugin_id, data.schedule_changes);
+        peers.apply_schedule_changes(&data.storage_id, data.schedule_changes);
     } else {
         if let Some(ai) = peers.ai.as_mut() {
             for id in &data.ai_jobs {
@@ -352,6 +356,7 @@ pub(crate) fn transaction(
         store: core,
         timezone: ctx.timezone.to_string(),
         plugin_id: ctx.plugin_id.to_string(),
+        storage_id: ctx.storage_id.to_string(),
         limits: StoreLimitsBuilder::new()
             .memory_size(limits.memory_mb as usize * 1024 * 1024)
             .memories(4)
@@ -822,7 +827,7 @@ impl HostState {
     }
 
     fn schedule_id(&self, key: &str) -> String {
-        terrarium_scheduler::schedule_id(&self.peers.space, &self.plugin_id, key)
+        terrarium_scheduler::schedule_id(&self.peers.space, &self.storage_id, key)
     }
 
     /// Fails unless `key` is one of this plugin's schedules in this space,
@@ -881,7 +886,7 @@ impl wit::schedule::Host for HostState {
             .filter(|c| matches!(c, ScheduleChange::Set(..)))
             .count();
         if scheduler
-            .list(Some(&self.peers.space), Some(&self.plugin_id))
+            .list(Some(&self.peers.space), Some(&self.storage_id))
             .len()
             + pending
             >= 100
@@ -906,7 +911,7 @@ impl wit::schedule::Host for HostState {
         self.count_call()?;
         let list = self
             .scheduler()?
-            .list(Some(&self.peers.space), Some(&self.plugin_id));
+            .list(Some(&self.peers.space), Some(&self.storage_id));
         to_json(&list)
     }
 
@@ -966,7 +971,7 @@ impl wit::events::Host for HostState {
             return Err(quota());
         }
         self.peers.event_count += 1;
-        let accepted = EmittedEvent::accept(&self.peers, &self.plugin_id, name, payload, event)
+        let accepted = EmittedEvent::accept(&self.peers, &self.storage_id, name, payload, event)
             .map_err(|_| invalid("Event metadata unavailable".into()))?;
         self.emitted.push(accepted);
         Ok(())
@@ -1052,6 +1057,7 @@ mod payload_tests {
             store,
             timezone: "UTC".into(),
             plugin_id: "events-test".into(),
+            storage_id: "events-test".into(),
             limits: StoreLimitsBuilder::new().build(),
             host_calls: 0,
             log_lines: 0,
@@ -1086,7 +1092,7 @@ mod payload_tests {
         state.peers.event_root = Some(format!("ev-source-device-{}", uuid::Uuid::now_v7()));
         wit::events::Host::emit(&mut state, "pinged".into(), "{}".into()).unwrap();
         let accepted = state.emitted[0].clone();
-        assert_eq!(accepted.plugin, state.plugin_id);
+        assert_eq!(accepted.plugin, state.storage_id);
         assert_eq!(accepted.space, "source-space");
         assert_eq!(accepted.device, "source-device");
         assert_eq!(accepted.depth, 2);

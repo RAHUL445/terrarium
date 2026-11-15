@@ -8,7 +8,7 @@
 //! Each space has a Home page, `home-<space>`, that cannot be removed; its
 //! id is fixed so devices creating it offline end up with one page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ pub const HOST_WIDGETS: &str = "_host";
 pub const GRID_COLUMNS: i64 = 12;
 pub const MAX_PLACEMENTS: usize = 40;
 const MAX_PAGES: usize = 50;
+const MAX_FOLDERS: usize = 200;
+const MAX_POSITION: i64 = 1_000_000;
 const MAX_TITLE: usize = 40;
 const MAX_FOCUS: usize = 40;
 const MAX_ROWS: i64 = 400;
@@ -32,15 +34,28 @@ const MAX_FIELDS_BYTES: usize = 1400;
 const MAX_ID: usize = 64;
 
 const SCHEMA: &str = r#"{
-  "version": 4,
+  "version": 6,
   "tables": [
     { "name": "pages", "delete_policy": "delete-wins", "columns": [
       { "name": "space", "type": "text" },
+      { "name": "folder_id", "type": "text" },
+      { "name": "archived", "type": "boolean", "default": false },
+      { "name": "trash_batch", "type": "text" },
+      { "name": "layout_mode", "type": "text", "default": "grid" },
       { "name": "title", "type": "text" },
       { "name": "icon", "type": "text" },
       { "name": "position", "type": "integer", "default": 0 },
       { "name": "system", "type": "boolean", "default": false },
-      { "name": "focus", "type": "text" }
+      { "name": "focus", "type": "text" },
+      { "name": "period", "type": "text" }
+    ]},
+    { "name": "folders", "delete_policy": "delete-wins", "columns": [
+      { "name": "space", "type": "text" },
+      { "name": "parent_id", "type": "text" },
+      { "name": "title", "type": "text" },
+      { "name": "position", "type": "integer", "default": 0 },
+      { "name": "archived", "type": "boolean", "default": false },
+      { "name": "trash_batch", "type": "text" }
     ]},
     { "name": "placements", "delete_policy": "delete-wins", "columns": [
       { "name": "page", "type": "text" },
@@ -51,7 +66,8 @@ const SCHEMA: &str = r#"{
       { "name": "w", "type": "integer", "default": 4 },
       { "name": "h", "type": "integer", "default": 3 },
       { "name": "config", "type": "text" },
-      { "name": "focus", "type": "text" }
+      { "name": "focus", "type": "text" },
+      { "name": "flow_order", "type": "integer" }
     ]},
     { "name": "saved_views", "delete_policy": "delete-wins", "columns": [
       { "name": "space", "type": "text" },
@@ -72,6 +88,25 @@ pub struct PageInfo {
     /// What the page is about (a project, tag or word). Widgets that opt in
     /// read it as `$page.focus` and filter their own data by it.
     pub focus: Option<String>,
+    /// Optional date window shared by widgets that follow the page period.
+    pub period: Option<Value>,
+    pub folder_id: Option<String>,
+    pub recovered: bool,
+    pub archived: bool,
+    pub trash_batch: Option<String>,
+    pub layout_mode: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FolderInfo {
+    pub id: String,
+    pub space: String,
+    pub parent_id: Option<String>,
+    pub title: String,
+    pub position: i64,
+    pub archived: bool,
+    pub trash_batch: Option<String>,
+    pub recovered: bool,
 }
 
 /// A widget on a page. `plugin` is `_host` for the host's own widgets.
@@ -91,6 +126,9 @@ pub struct Placement {
     /// all items, other text filters by that project, tag or word.
     #[serde(default)]
     pub focus: Option<String>,
+    /// Optional order used by flow layouts. Grid coordinates remain intact.
+    #[serde(default)]
+    pub flow_order: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -153,6 +191,16 @@ fn clean_id(kind: &str, id: &str) -> Result<()> {
     }
 }
 
+fn clean_position(position: i64) -> Result<i64> {
+    if (0..=MAX_POSITION).contains(&position) {
+        Ok(position)
+    } else {
+        Err(bad(format!(
+            "Position must be between 0 and {MAX_POSITION}"
+        )))
+    }
+}
+
 fn valid_manifest_id(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
@@ -189,21 +237,30 @@ fn valid_fields_csv(fields: &str) -> bool {
 fn valid_saved_view_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_ID
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 fn clean_filters(value: &Value) -> Result<Value> {
-    let raw = value.as_str().ok_or_else(|| bad("View filters must be JSON text"))?;
+    let raw = value
+        .as_str()
+        .ok_or_else(|| bad("View filters must be JSON text"))?;
     if raw.len() > MAX_FILTERS_BYTES {
         return Err(bad("View filters are limited to 2 KB"));
     }
-    let parsed: Value = serde_json::from_str(raw).map_err(|_| bad("View filters must be a JSON object"))?;
-    let filters = parsed.as_object().ok_or_else(|| bad("View filters must be a JSON object"))?;
+    let parsed: Value =
+        serde_json::from_str(raw).map_err(|_| bad("View filters must be a JSON object"))?;
+    let filters = parsed
+        .as_object()
+        .ok_or_else(|| bad("View filters must be a JSON object"))?;
     if filters.iter().any(|(key, value)| {
         !valid_view_setting_id(key)
             || !(value.is_null() || value.is_boolean() || value.is_string() || value.is_number())
     }) {
-        return Err(bad("View filters need safe parameter names and scalar values"));
+        return Err(bad(
+            "View filters need safe parameter names and scalar values",
+        ));
     }
     Ok(json!(raw))
 }
@@ -213,40 +270,58 @@ pub fn clean_saved_view_config(config: &Map<String, Value>) -> Result<Map<String
     if config.contains_key("saved_view") {
         return Err(bad("A saved view cannot reference another saved view"));
     }
-    let allowed = ["plugin", "query", "layout", "sort", "dir", "group", "date", "filters", "density", "fields"];
+    let allowed = [
+        "plugin", "query", "layout", "sort", "dir", "group", "date", "filters", "density", "fields",
+    ];
     if config.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err(bad("Saved view has an unknown setting"));
     }
-    let plugin = config.get("plugin").and_then(Value::as_str)
-        .filter(|id| valid_manifest_id(id)).ok_or_else(|| bad("Saved view needs a valid app id"))?;
-    let query = config.get("query").and_then(Value::as_str)
-        .filter(|id| valid_view_setting_id(id)).ok_or_else(|| bad("Saved view needs a valid data id"))?;
+    let plugin = config
+        .get("plugin")
+        .and_then(Value::as_str)
+        .filter(|id| valid_manifest_id(id))
+        .ok_or_else(|| bad("Saved view needs a valid app id"))?;
+    let query = config
+        .get("query")
+        .and_then(Value::as_str)
+        .filter(|id| valid_view_setting_id(id))
+        .ok_or_else(|| bad("Saved view needs a valid data id"))?;
     let mut out = Map::new();
     out.insert("plugin".into(), json!(plugin));
     out.insert("query".into(), json!(query));
     if let Some(value) = config.get("layout") {
-        let layout = value.as_str().filter(|value| ["list", "table", "board", "calendar"].contains(value))
+        let layout = value
+            .as_str()
+            .filter(|value| ["list", "table", "board", "calendar"].contains(value))
             .ok_or_else(|| bad("Invalid saved view layout"))?;
         out.insert("layout".into(), json!(layout));
     }
     if let Some(value) = config.get("density") {
-        let density = value.as_str().filter(|value| ["comfortable", "compact"].contains(value))
+        let density = value
+            .as_str()
+            .filter(|value| ["comfortable", "compact"].contains(value))
             .ok_or_else(|| bad("Invalid saved view density"))?;
         out.insert("density".into(), json!(density));
     }
     if let Some(value) = config.get("fields") {
-        let fields = value.as_str().filter(|fields| valid_fields_csv(fields))
+        let fields = value
+            .as_str()
+            .filter(|fields| valid_fields_csv(fields))
             .ok_or_else(|| bad("Invalid saved view fields"))?;
         out.insert("fields".into(), json!(fields));
     }
     if let Some(value) = config.get("dir") {
-        let dir = value.as_str().filter(|value| ["asc", "desc"].contains(value))
+        let dir = value
+            .as_str()
+            .filter(|value| ["asc", "desc"].contains(value))
             .ok_or_else(|| bad("Invalid saved view sort direction"))?;
         out.insert("dir".into(), json!(dir));
     }
     for key in ["sort", "group", "date"] {
         if let Some(value) = config.get(key) {
-            let setting = value.as_str().filter(|id| id.is_empty() || valid_view_setting_id(id))
+            let setting = value
+                .as_str()
+                .filter(|id| id.is_empty() || valid_view_setting_id(id))
                 .ok_or_else(|| bad(format!("Invalid saved view `{key}` setting")))?;
             if !setting.is_empty() {
                 out.insert(key.into(), json!(setting));
@@ -311,6 +386,9 @@ pub fn clean_placement(mut p: Placement) -> Result<Placement> {
         // Blank is meaningful here ("all items"), so it stays blank.
         p.focus = Some(clean_focus(focus)?.unwrap_or_default());
     }
+    if let Some(order) = p.flow_order.as_mut() {
+        *order = (*order).clamp(0, MAX_PLACEMENTS as i64 - 1);
+    }
     Ok(p)
 }
 
@@ -344,6 +422,7 @@ pub fn host_widgets() -> Value {
                 "plugin": { "type": "text", "label": "App", "max_length": 63, "default": "" },
                 "query": { "type": "text", "label": "Data", "max_length": 64, "default": "" },
                 "saved_view": { "type": "text", "label": "Saved view", "max_length": 64, "default": "" },
+                "follow_page_period": { "type": "boolean", "label": "Follow page period", "default": false },
                 "filters": { "type": "text", "label": "Filters", "max_length": 2048, "default": "" },
                 "layout": {
                     "type": "enum",
@@ -398,6 +477,7 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
             out.remove("url");
         }
     } else if widget == "view" {
+        let follow_page_period = config.get("follow_page_period").and_then(Value::as_bool);
         let plugin_ok = out
             .get("plugin")
             .and_then(Value::as_str)
@@ -428,6 +508,9 @@ pub fn clean_host_config(widget: &str, config: &Map<String, Value>) -> Result<Ma
         }
         if let Some(filters) = preserved_filters {
             out.insert("filters".into(), filters);
+        }
+        if let Some(follow) = follow_page_period {
+            out.insert("follow_page_period".into(), json!(follow));
         }
     }
     Ok(out)
@@ -497,6 +580,7 @@ pub fn clean_config(spec: &Value, config: &Map<String, Value>) -> Map<String, Va
 }
 
 fn page_info(row: &Map<String, Value>) -> Option<PageInfo> {
+    let period = text(row, "period").and_then(|raw| serde_json::from_str(&raw).ok());
     Some(PageInfo {
         id: text(row, "id")?,
         space: text(row, "space")?,
@@ -505,7 +589,231 @@ fn page_info(row: &Map<String, Value>) -> Option<PageInfo> {
         position: int(row, "position", 0),
         system: truthy(row, "system"),
         focus: text(row, "focus").filter(|f| !f.is_empty()),
+        period,
+        folder_id: text(row, "folder_id"),
+        recovered: truthy(row, "recovered"),
+        archived: truthy(row, "archived"),
+        trash_batch: text(row, "trash_batch"),
+        layout_mode: text(row, "layout_mode").unwrap_or_else(|| "grid".into()),
     })
+}
+
+fn folder_rows(store: &CoreStore) -> Result<Vec<Map<String, Value>>> {
+    Ok(store.query(
+        "SELECT id, space, parent_id, title, position, archived, trash_batch FROM folders WHERE _deleted IS NULL",
+        &[],
+    )?)
+}
+
+/// Projects parent links into a safe forest without writing repairs back to the
+/// synced store. For a cycle, the edge owned by the lexicographically greatest
+/// stable ID is cut, so every device makes the same projection.
+fn project_folders(rows: &[Map<String, Value>]) -> Vec<FolderInfo> {
+    let mut raw =
+        BTreeMap::<String, (String, Option<String>, String, i64, bool, Option<String>)>::new();
+    for row in rows {
+        if let (Some(id), Some(space)) = (text(row, "id"), text(row, "space")) {
+            raw.insert(
+                id,
+                (
+                    space,
+                    text(row, "parent_id"),
+                    text(row, "title").unwrap_or_else(|| "Folder".into()),
+                    int(row, "position", 0),
+                    truthy(row, "archived"),
+                    text(row, "trash_batch"),
+                ),
+            );
+        }
+    }
+    let mut parents = BTreeMap::<String, Option<String>>::new();
+    let mut recovered = BTreeSet::<String>::new();
+    for (id, (space, parent, _, _, archived, _)) in &raw {
+        let resolved = parent
+            .as_ref()
+            .filter(|parent_id| {
+                raw.get(*parent_id)
+                    .is_some_and(|(parent_space, _, _, _, parent_archived, _)| {
+                        parent_space == space && !*parent_archived && !*archived
+                    })
+            })
+            .cloned();
+        if parent.is_some() && resolved.is_none() {
+            recovered.insert(id.clone());
+        }
+        parents.insert(id.clone(), resolved);
+    }
+    for start in raw.keys() {
+        let mut path = Vec::<String>::new();
+        let mut seen = BTreeMap::<String, usize>::new();
+        let mut current = Some(start.clone());
+        while let Some(id) = current {
+            if let Some(&cycle_start) = seen.get(&id) {
+                if let Some(cut) = path[cycle_start..].iter().max() {
+                    parents.insert(cut.clone(), None);
+                    recovered.insert(cut.clone());
+                }
+                break;
+            }
+            seen.insert(id.clone(), path.len());
+            path.push(id.clone());
+            current = parents.get(&id).cloned().flatten();
+        }
+    }
+    raw.into_iter()
+        .map(
+            |(id, (space, _, title, position, archived, trash_batch))| FolderInfo {
+                parent_id: parents.remove(&id).flatten(),
+                recovered: recovered.contains(&id),
+                id,
+                space,
+                title,
+                position,
+                archived,
+                trash_batch,
+            },
+        )
+        .collect()
+}
+
+fn project_page_folder(page: &mut PageInfo, folders: &[FolderInfo]) {
+    if let Some(id) = page.folder_id.clone() {
+        match folders.iter().find(|folder| folder.id == id) {
+            Some(folder) if folder.space == page.space && !folder.archived => {
+                if folder.recovered {
+                    page.recovered = true;
+                }
+            }
+            _ => {
+                page.folder_id = None;
+                page.recovered = true;
+            }
+        }
+    }
+}
+
+fn valid_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+        || !bytes[8..].iter().all(u8::is_ascii_digit)
+    {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) = (
+        value[0..4].parse::<i32>(),
+        value[5..7].parse::<u32>(),
+        value[8..10].parse::<u32>(),
+    ) else {
+        return false;
+    };
+    if !(1..=9999).contains(&year) || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    (1..=days[(month - 1) as usize]).contains(&day)
+}
+
+/// Validates the persisted period shape. Intl on the UI side validates that
+/// the syntactically safe timezone is a real IANA timezone.
+pub fn clean_period(period: &Value) -> Result<Value> {
+    let object = period
+        .as_object()
+        .ok_or_else(|| bad("Page period must be an object"))?;
+    if object
+        .keys()
+        .any(|key| !["mode", "timezone", "start", "end"].contains(&key.as_str()))
+    {
+        return Err(bad("Page period has an unknown setting"));
+    }
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|mode| ["previous_week", "this_week", "custom"].contains(mode))
+        .ok_or_else(|| bad("Invalid page period mode"))?;
+    let timezone = object
+        .get("timezone")
+        .and_then(Value::as_str)
+        .filter(|tz| {
+            !tz.is_empty()
+                && tz.len() <= 128
+                && tz.split('/').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_+-".contains(&b))
+                })
+        })
+        .ok_or_else(|| bad("Invalid page period timezone"))?;
+    let mut out = Map::new();
+    out.insert("mode".into(), json!(mode));
+    out.insert("timezone".into(), json!(timezone));
+    if mode == "custom" {
+        let start = object
+            .get("start")
+            .and_then(Value::as_str)
+            .filter(|date| valid_date(date))
+            .ok_or_else(|| bad("Custom page period needs a valid start date"))?;
+        let end = object
+            .get("end")
+            .and_then(Value::as_str)
+            .filter(|date| valid_date(date))
+            .ok_or_else(|| bad("Custom page period needs a valid exclusive end date"))?;
+        let day_number = |date: &str| {
+            let year = date[0..4].parse::<i64>().unwrap();
+            let month = date[5..7].parse::<i64>().unwrap();
+            let day = date[8..10].parse::<i64>().unwrap();
+            let year = year - i64::from(month <= 2);
+            let era = year.div_euclid(400);
+            let yoe = year - era * 400;
+            let adjusted_month = month + if month > 2 { -3 } else { 9 };
+            let doy = (153 * adjusted_month + 2) / 5 + day - 1;
+            era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy
+        };
+        let days = day_number(end) - day_number(start);
+        if !(1..=366).contains(&days) {
+            return Err(bad(
+                "Custom page period must be 1 to 366 days; end is exclusive",
+            ));
+        }
+        out.insert("start".into(), json!(start));
+        out.insert("end".into(), json!(end));
+    } else if object.contains_key("start") || object.contains_key("end") {
+        return Err(bad(
+            "Only a custom page period can have start and end dates",
+        ));
+    }
+    Ok(Value::Object(out))
+}
+
+fn period_value(period: Option<&Value>) -> Result<Option<String>> {
+    period
+        .map(|value| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                Ok(Some(serde_json::to_string(&clean_period(value)?)?))
+            }
+        })
+        .transpose()
+        .map(Option::flatten)
 }
 
 impl Pages {
@@ -534,30 +842,414 @@ impl Pages {
     /// A space's pages: Home first (when it exists), then by position.
     pub fn list(&self, space: &str) -> Result<Vec<PageInfo>> {
         let rows = self.store.query(
-            "SELECT id, space, title, icon, position, system, focus FROM pages \
-             WHERE _deleted IS NULL AND space = ?1 \
+            "SELECT id, space, title, icon, position, system, focus, period, folder_id, archived, trash_batch, layout_mode FROM pages \
+             WHERE _deleted IS NULL AND space = ?1 AND archived = 0 \
              ORDER BY system DESC, position, title COLLATE NOCASE, id",
             &[json!(space)],
         )?;
-        Ok(rows.iter().filter_map(page_info).collect())
+        let folders = project_folders(&folder_rows(&self.store)?);
+        let mut pages: Vec<_> = rows.iter().filter_map(page_info).collect();
+        for page in &mut pages {
+            project_page_folder(page, &folders);
+        }
+        Ok(pages)
     }
 
     pub fn page(&self, id: &str) -> Result<Option<PageInfo>> {
         let rows = self.store.query(
-            "SELECT id, space, title, icon, position, system, focus FROM pages \
+            "SELECT id, space, title, icon, position, system, focus, period, folder_id, archived, trash_batch, layout_mode FROM pages \
              WHERE _deleted IS NULL AND id = ?1",
             &[json!(id)],
         )?;
-        Ok(rows.first().and_then(page_info))
+        let folders = project_folders(&folder_rows(&self.store)?);
+        let mut page = rows.first().and_then(page_info);
+        if let Some(page) = page.as_mut() {
+            project_page_folder(page, &folders);
+        }
+        Ok(page)
     }
 
     fn require(&self, id: &str) -> Result<PageInfo> {
         self.page(id)?.ok_or_else(|| bad(format!("no page `{id}`")))
     }
 
+    fn require_active(&self, id: &str) -> Result<PageInfo> {
+        let page = self.require(id)?;
+        if page.archived {
+            return Err(bad(format!("page `{id}` is in the trash")));
+        }
+        Ok(page)
+    }
+
+    pub fn folders_list(&self, space: &str, include_archived: bool) -> Result<Vec<FolderInfo>> {
+        let rows = folder_rows(&self.store)?;
+        let mut folders: Vec<_> = project_folders(&rows)
+            .into_iter()
+            .filter(|folder| folder.space == space && (include_archived || !folder.archived))
+            .collect();
+        folders.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.id.cmp(&b.id)));
+        Ok(folders)
+    }
+
+    fn folder(&self, id: &str) -> Result<FolderInfo> {
+        project_folders(&folder_rows(&self.store)?)
+            .into_iter()
+            .find(|folder| folder.id == id)
+            .ok_or_else(|| bad(format!("no folder `{id}`")))
+    }
+
+    fn validate_parent(&self, space: &str, id: Option<&str>, moving: Option<&str>) -> Result<()> {
+        if let Some(id) = id {
+            let parent = self.folder(id)?;
+            if parent.archived {
+                return Err(bad("Cannot use an archived folder"));
+            }
+            if parent.space != space {
+                return Err(bad("Folder belongs to another space"));
+            }
+            if Some(id) == moving {
+                return Err(bad("A folder cannot be its own parent"));
+            }
+            if let Some(moving) = moving {
+                let mut cursor = Some(id.to_string());
+                let mut seen = BTreeSet::new();
+                while let Some(current) = cursor {
+                    if current == moving {
+                        return Err(bad("A folder cannot move inside its descendant"));
+                    }
+                    if !seen.insert(current.clone()) {
+                        break;
+                    }
+                    cursor = self.folder(&current)?.parent_id;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn folder_create(
+        &mut self,
+        space: &str,
+        title: &str,
+        parent_id: Option<&str>,
+    ) -> Result<FolderInfo> {
+        let title = clean_title(title)?;
+        self.validate_parent(space, parent_id, None)?;
+        let active = self.folders_list(space, false)?;
+        if active.len() >= MAX_FOLDERS {
+            return Err(bad(format!("A space holds at most {MAX_FOLDERS} folders")));
+        }
+        let siblings = active
+            .into_iter()
+            .filter(|folder| folder.parent_id.as_deref() == parent_id)
+            .collect::<Vec<_>>();
+        let position = siblings
+            .iter()
+            .map(|folder| folder.position)
+            .max()
+            .unwrap_or(-1)
+            .checked_add(1)
+            .filter(|position| *position <= MAX_POSITION)
+            .ok_or_else(|| bad("No available folder position"))?;
+        let id = random_id('f')?;
+        let mut values = Map::new();
+        values.insert("space".into(), json!(space));
+        values.insert("parent_id".into(), json!(parent_id));
+        values.insert("title".into(), json!(title));
+        values.insert("position".into(), json!(position));
+        self.store
+            .write(|writer| writer.upsert("folders", &id, &values))?;
+        self.folder(&id)
+    }
+
+    pub fn folder_update(
+        &mut self,
+        id: &str,
+        title: Option<&str>,
+        parent_id: Option<Option<&str>>,
+        position: Option<i64>,
+    ) -> Result<FolderInfo> {
+        let folder = self.folder(id)?;
+        if folder.archived {
+            return Err(bad("Archived folders cannot be edited"));
+        }
+        if let Some(parent_id) = parent_id {
+            self.validate_parent(&folder.space, parent_id, Some(id))?;
+        }
+        let mut values = Map::new();
+        if let Some(title) = title {
+            values.insert("title".into(), json!(clean_title(title)?));
+        }
+        if let Some(parent_id) = parent_id {
+            values.insert("parent_id".into(), json!(parent_id));
+        }
+        if let Some(position) = position {
+            values.insert("position".into(), json!(clean_position(position)?));
+        }
+        if !values.is_empty() {
+            self.store
+                .write(|writer| writer.update("folders", id, &values))?;
+        }
+        self.folder(id)
+    }
+
+    pub fn folder_remove(&mut self, id: &str, subtree: bool) -> Result<()> {
+        let root = self.folder(id)?;
+        if root.archived {
+            return Err(bad("Folder is already in the trash"));
+        }
+        let all = self.folders_list(&root.space, false)?;
+        let batch = random_id('t')?;
+        let mut folders = BTreeSet::from([id.to_string()]);
+        let mut pages = Vec::new();
+        if subtree {
+            loop {
+                let before = folders.len();
+                for folder in &all {
+                    if folder
+                        .parent_id
+                        .as_ref()
+                        .is_some_and(|parent| folders.contains(parent))
+                    {
+                        folders.insert(folder.id.clone());
+                    }
+                }
+                if folders.len() == before {
+                    break;
+                }
+            }
+            pages = self
+                .list(&root.space)?
+                .into_iter()
+                .filter(|page| {
+                    page.folder_id
+                        .as_ref()
+                        .is_some_and(|folder| folders.contains(folder))
+                })
+                .map(|page| page.id)
+                .collect();
+        }
+        let direct_children: Vec<_> = if subtree {
+            Vec::new()
+        } else {
+            all.iter()
+                .filter(|folder| folder.parent_id.as_deref() == Some(id))
+                .map(|folder| folder.id.clone())
+                .collect()
+        };
+        let direct_pages: Vec<_> = if subtree {
+            Vec::new()
+        } else {
+            self.list(&root.space)?
+                .into_iter()
+                .filter(|page| page.folder_id.as_deref() == Some(id))
+                .map(|page| page.id)
+                .collect()
+        };
+        self.store.write(|writer| {
+            for child in &direct_children {
+                let mut values = Map::new();
+                values.insert("parent_id".into(), json!(root.parent_id));
+                writer.update("folders", child, &values)?;
+            }
+            for page in &direct_pages {
+                let mut values = Map::new();
+                values.insert("folder_id".into(), json!(root.parent_id));
+                writer.update("pages", page, &values)?;
+            }
+            for folder in &folders {
+                let mut values = Map::new();
+                values.insert("archived".into(), json!(true));
+                values.insert("trash_batch".into(), json!(batch));
+                writer.update("folders", folder, &values)?;
+            }
+            for page in &pages {
+                let mut values = Map::new();
+                values.insert("archived".into(), json!(true));
+                values.insert("trash_batch".into(), json!(batch));
+                writer.update("pages", page, &values)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    pub fn folder_restore(&mut self, id: &str) -> Result<()> {
+        let folder = self.folder(id)?;
+        if !folder.archived {
+            return Err(bad("Folder is not in the trash"));
+        }
+        let batch = folder
+            .trash_batch
+            .ok_or_else(|| bad("Folder has no restore batch"))?;
+        let rows = folder_rows(&self.store)?;
+        let restore_ids: Vec<_> = rows
+            .iter()
+            .filter(|row| {
+                text(row, "space").as_deref() == Some(&folder.space)
+                    && text(row, "trash_batch").as_deref() == Some(&batch)
+            })
+            .filter_map(|row| text(row, "id"))
+            .collect();
+        let pages = self.store.query(
+            "SELECT id, space, folder_id, trash_batch FROM pages WHERE _deleted IS NULL AND archived = 1",
+            &[],
+        )?;
+        let restore_pages: Vec<_> = pages
+            .iter()
+            .filter(|row| {
+                text(row, "space").as_deref() == Some(&folder.space)
+                    && text(row, "trash_batch").as_deref() == Some(&batch)
+            })
+            .filter_map(|row| text(row, "id"))
+            .collect();
+        let restore_set: BTreeSet<_> = restore_ids.iter().cloned().collect();
+        let mut projected_rows = rows.clone();
+        for row in &mut projected_rows {
+            if text(row, "space").as_deref() == Some(&folder.space)
+                && text(row, "trash_batch").as_deref() == Some(&batch)
+            {
+                row.insert("archived".into(), json!(false));
+            }
+        }
+        let projected = project_folders(&projected_rows);
+        let reset_folders: BTreeSet<_> = projected
+            .into_iter()
+            .filter(|candidate| {
+                candidate.space == folder.space
+                    && restore_set.contains(&candidate.id)
+                    && candidate.recovered
+            })
+            .map(|candidate| candidate.id)
+            .collect();
+        let folder_map: BTreeMap<_, _> = projected_rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    text(row, "id")?,
+                    (text(row, "space")?, truthy(row, "archived")),
+                ))
+            })
+            .collect();
+        self.store.write(|writer| {
+            for folder_id in &restore_ids {
+                let mut values = Map::new();
+                values.insert("archived".into(), json!(false));
+                values.insert("trash_batch".into(), Value::Null);
+                if reset_folders.contains(folder_id) {
+                    values.insert("parent_id".into(), Value::Null);
+                }
+                writer.update("folders", folder_id, &values)?;
+            }
+            for page_id in &restore_pages {
+                let mut values = Map::new();
+                values.insert("archived".into(), json!(false));
+                values.insert("trash_batch".into(), Value::Null);
+                if let Some(row) = pages
+                    .iter()
+                    .find(|row| text(row, "id").as_deref() == Some(page_id))
+                {
+                    if let Some(parent_id) = text(row, "folder_id") {
+                        let valid = folder_map.get(&parent_id).is_some_and(|(space, archived)| {
+                            space == &folder.space
+                                && (!*archived || restore_set.contains(&parent_id))
+                        });
+                        if !valid {
+                            values.insert("folder_id".into(), Value::Null);
+                        }
+                    }
+                }
+                writer.update("pages", page_id, &values)?;
+            }
+            Ok(())
+        })?;
+        // Parent links are retained; projection safely roots missing, archived,
+        // or cross-space links on reads.
+        Ok(())
+    }
+
+    pub fn page_move(
+        &mut self,
+        id: &str,
+        folder_id: Option<Option<&str>>,
+        position: Option<i64>,
+    ) -> Result<PageInfo> {
+        let page = self.require_active(id)?;
+        if page.system {
+            return Err(bad("Home cannot be moved"));
+        }
+        if let Some(folder_id) = folder_id {
+            self.validate_parent(&page.space, folder_id, None)?;
+        }
+        let mut values = Map::new();
+        if let Some(folder_id) = folder_id {
+            values.insert("folder_id".into(), json!(folder_id));
+        }
+        if let Some(position) = position {
+            values.insert("position".into(), json!(clean_position(position)?));
+        }
+        self.store
+            .write(|writer| writer.update("pages", id, &values))?;
+        self.require(id)
+    }
+
+    pub fn page_trash(&mut self, id: &str) -> Result<()> {
+        let page = self.require_active(id)?;
+        if page.system {
+            return Err(bad("Home cannot be moved to the trash"));
+        }
+        let mut values = Map::new();
+        values.insert("archived".into(), json!(true));
+        values.insert("trash_batch".into(), json!(random_id('t')?));
+        self.store
+            .write(|writer| writer.update("pages", id, &values))?;
+        Ok(())
+    }
+
+    pub fn page_restore(&mut self, id: &str) -> Result<PageInfo> {
+        let page = self.require(id)?;
+        if !page.archived {
+            return Err(bad("Page is not in the trash"));
+        }
+        let mut values = Map::new();
+        values.insert("archived".into(), json!(false));
+        values.insert("trash_batch".into(), Value::Null);
+        if page.recovered {
+            values.insert("folder_id".into(), Value::Null);
+        }
+        self.store
+            .write(|writer| writer.update("pages", id, &values))?;
+        self.require(id)
+    }
+
+    pub fn pages_trash(&self, space: &str) -> Result<Vec<PageInfo>> {
+        let rows = self.store.query(
+            "SELECT id, space, title, icon, position, system, focus, period, folder_id, archived, trash_batch, layout_mode FROM pages WHERE _deleted IS NULL AND space = ?1 AND archived = 1 ORDER BY position, id",
+            &[json!(space)],
+        )?;
+        let folders = project_folders(&folder_rows(&self.store)?);
+        let mut pages: Vec<_> = rows.iter().filter_map(page_info).collect();
+        for page in &mut pages {
+            project_page_folder(page, &folders);
+        }
+        Ok(pages)
+    }
+
+    pub fn page_layout(&mut self, id: &str, mode: &str) -> Result<PageInfo> {
+        if !matches!(mode, "grid" | "flow") {
+            return Err(bad("Page layout must be `grid` or `flow`"));
+        }
+        self.require_active(id)?;
+        let mut values = Map::new();
+        values.insert("layout_mode".into(), json!(mode));
+        self.store
+            .write(|writer| writer.update("pages", id, &values))?;
+        self.require(id)
+    }
+
     pub fn placements(&self, page: &str) -> Result<Vec<Placement>> {
         let rows = self.store.query(
-            "SELECT id, plugin, widget, x, y, w, h, config, focus FROM placements \
+            "SELECT id, plugin, widget, x, y, w, h, config, focus, flow_order FROM placements \
              WHERE _deleted IS NULL AND page = ?1 ORDER BY y, x, id",
             &[json!(page)],
         )?;
@@ -576,6 +1268,7 @@ impl Pages {
                         .and_then(|c| serde_json::from_str(&c).ok())
                         .unwrap_or_default(),
                     focus: text(r, "focus"),
+                    flow_order: r.get("flow_order").and_then(Value::as_i64),
                 })
             })
             .collect())
@@ -597,15 +1290,27 @@ impl Pages {
         Ok(rows.first().and_then(saved_view_info))
     }
 
-    pub fn save_view(&mut self, space: &str, id: Option<&str>, title: &str, config: Map<String, Value>) -> Result<SavedView> {
+    pub fn save_view(
+        &mut self,
+        space: &str,
+        id: Option<&str>,
+        title: &str,
+        config: Map<String, Value>,
+    ) -> Result<SavedView> {
         let title = clean_title(title)?;
         let config = clean_saved_view_config(&config)?;
         let updating = id.is_some();
         let id = match id {
             Some(id) => {
-                if !valid_saved_view_id(id) { return Err(bad(format!("`{id}` is not a valid saved view id"))); }
-                let existing = self.get_saved_view(id)?.ok_or_else(|| bad(format!("no saved view `{id}`")))?;
-                if existing.space != space { return Err(bad("Saved view belongs to another space")); }
+                if !valid_saved_view_id(id) {
+                    return Err(bad(format!("`{id}` is not a valid saved view id")));
+                }
+                let existing = self
+                    .get_saved_view(id)?
+                    .ok_or_else(|| bad(format!("no saved view `{id}`")))?;
+                if existing.space != space {
+                    return Err(bad("Saved view belongs to another space"));
+                }
                 id.to_string()
             }
             None => random_id('v')?,
@@ -615,26 +1320,50 @@ impl Pages {
         values.insert("title".into(), json!(title));
         values.insert("config".into(), json!(serde_json::to_string(&config)?));
         self.store.write(|w| {
-            if updating { w.update("saved_views", &id, &values) }
-            else { w.upsert("saved_views", &id, &values) }
+            if updating {
+                w.update("saved_views", &id, &values)
+            } else {
+                w.upsert("saved_views", &id, &values)
+            }
         })?;
-        self.get_saved_view(&id)?.ok_or_else(|| bad("Saved view could not be read after saving"))
+        self.get_saved_view(&id)?
+            .ok_or_else(|| bad("Saved view could not be read after saving"))
     }
 
     /// Removes a saved definition only. Placements referencing its id remain intact.
     pub fn remove_saved_view(&mut self, id: &str) -> Result<()> {
-        if self.get_saved_view(id)?.is_none() { return Err(bad(format!("no saved view `{id}`"))); }
+        if self.get_saved_view(id)?.is_none() {
+            return Err(bad(format!("no saved view `{id}`")));
+        }
         self.store.write(|w| w.delete("saved_views", id))?;
         Ok(())
     }
 
     pub fn create(&mut self, space: &str, title: &str, icon: Option<&str>) -> Result<PageInfo> {
+        self.create_with_period(space, title, icon, None)
+    }
+
+    pub fn create_with_period(
+        &mut self,
+        space: &str,
+        title: &str,
+        icon: Option<&str>,
+        period: Option<&Value>,
+    ) -> Result<PageInfo> {
         let title = clean_title(title)?;
+        let period = period_value(period)?;
         let pages = self.list(space)?;
         if pages.len() >= MAX_PAGES {
             return Err(bad(format!("A space holds at most {MAX_PAGES} pages")));
         }
-        let position = pages.iter().map(|p| p.position).max().unwrap_or(0) + 1;
+        let position = pages
+            .iter()
+            .map(|p| p.position)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|position| *position <= MAX_POSITION)
+            .ok_or_else(|| bad("No available page position"))?;
         let id = random_id('p')?;
         let mut values = Map::new();
         values.insert("space".into(), json!(space));
@@ -642,6 +1371,7 @@ impl Pages {
         values.insert("icon".into(), json!(icon));
         values.insert("position".into(), json!(position));
         values.insert("system".into(), json!(false));
+        values.insert("period".into(), json!(period));
         self.store.write(|w| w.upsert("pages", &id, &values))?;
         self.require(&id)
     }
@@ -685,7 +1415,19 @@ impl Pages {
         position: Option<i64>,
         focus: Option<&str>,
     ) -> Result<PageInfo> {
-        self.require(id)?;
+        self.update_with_period(id, title, icon, position, focus, None)
+    }
+
+    pub fn update_with_period(
+        &mut self,
+        id: &str,
+        title: Option<&str>,
+        icon: Option<Option<&str>>,
+        position: Option<i64>,
+        focus: Option<&str>,
+        period: Option<&Value>,
+    ) -> Result<PageInfo> {
+        self.require_active(id)?;
         let mut values = Map::new();
         if let Some(title) = title {
             values.insert("title".into(), json!(clean_title(title)?));
@@ -694,10 +1436,13 @@ impl Pages {
             values.insert("icon".into(), json!(icon));
         }
         if let Some(position) = position {
-            values.insert("position".into(), json!(position));
+            values.insert("position".into(), json!(clean_position(position)?));
         }
         if let Some(focus) = focus {
             values.insert("focus".into(), json!(clean_focus(focus)?));
+        }
+        if let Some(period) = period {
+            values.insert("period".into(), json!(period_value(Some(period))?));
         }
         if !values.is_empty() {
             self.store.write(|w| w.update("pages", id, &values))?;
@@ -707,7 +1452,7 @@ impl Pages {
 
     /// Removes a page and its placements on every device. Home stays.
     pub fn remove(&mut self, id: &str) -> Result<()> {
-        if self.require(id)?.system {
+        if self.require_active(id)?.system {
             return Err(bad("Home cannot be removed; rename it instead"));
         }
         let placements = self.placements(id)?;
@@ -724,7 +1469,7 @@ impl Pages {
     /// those without one are added, and the rest are removed. Only changed
     /// columns are written so concurrent edits elsewhere survive.
     pub fn save(&mut self, page: &str, placements: Vec<Placement>) -> Result<Vec<Placement>> {
-        self.require(page)?;
+        self.require_active(page)?;
         if placements.len() > MAX_PLACEMENTS {
             return Err(bad(format!(
                 "A page holds at most {MAX_PLACEMENTS} widgets"
@@ -748,6 +1493,9 @@ impl Pages {
                         if new != before {
                             changed.insert(key.into(), json!(new));
                         }
+                    }
+                    if p.flow_order != old.flow_order {
+                        changed.insert("flow_order".into(), json!(p.flow_order));
                     }
                     if p.focus != old.focus {
                         changed.insert("focus".into(), json!(p.focus));
@@ -795,6 +1543,7 @@ fn placement_values(page: &str, p: &Placement) -> Result<Map<String, Value>> {
     values.insert("h".into(), json!(p.h));
     values.insert("config".into(), json!(serde_json::to_string(&p.config)?));
     values.insert("focus".into(), json!(p.focus));
+    values.insert("flow_order".into(), json!(p.flow_order));
     Ok(values)
 }
 
@@ -826,6 +1575,7 @@ mod tests {
             h: 3,
             config: Map::new(),
             focus: None,
+            flow_order: None,
         }
     }
 
@@ -886,27 +1636,52 @@ mod tests {
 
     fn named_config(filters: &str) -> Map<String, Value> {
         json!({"plugin":"todo", "query":"tasks", "layout":"list", "filters":filters})
-            .as_object().unwrap().clone()
+            .as_object()
+            .unwrap()
+            .clone()
     }
 
     #[test]
     fn saved_views_round_trip_update_and_leave_shared_placements_on_remove() {
         let dir = tempfile::tempdir().unwrap();
         let mut pages = open(&dir, "device-a");
-        let saved = pages.save_view("personal", None, "Open tasks", named_config(r#"{"status":"open"}"#)).unwrap();
-        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved.clone()));
-        assert_eq!(pages.list_saved_views("personal").unwrap(), vec![saved.clone()]);
+        let saved = pages
+            .save_view(
+                "personal",
+                None,
+                "Open tasks",
+                named_config(r#"{"status":"open"}"#),
+            )
+            .unwrap();
+        assert_eq!(
+            pages.get_saved_view(&saved.id).unwrap(),
+            Some(saved.clone())
+        );
+        assert_eq!(
+            pages.list_saved_views("personal").unwrap(),
+            vec![saved.clone()]
+        );
         let home = pages.ensure_home("personal", vec![]).unwrap();
         let mut placement = widget(HOST_WIDGETS, "view", 0, 0);
         placement.config = json!({"saved_view": saved.id}).as_object().unwrap().clone();
         let placement = pages.save(&home.id, vec![placement]).unwrap().remove(0);
-        let updated = pages.save_view("personal", Some(&saved.id), "Urgent", named_config(r#"{"status":"urgent"}"#)).unwrap();
+        let updated = pages
+            .save_view(
+                "personal",
+                Some(&saved.id),
+                "Urgent",
+                named_config(r#"{"status":"urgent"}"#),
+            )
+            .unwrap();
         assert_eq!(updated.id, saved.id);
         assert_eq!(updated.title, "Urgent");
         assert_eq!(pages.placements(&home.id).unwrap()[0], placement);
         pages.remove_saved_view(&saved.id).unwrap();
         assert!(pages.get_saved_view(&saved.id).unwrap().is_none());
-        assert_eq!(pages.placements(&home.id).unwrap()[0].config["saved_view"], saved.id);
+        assert_eq!(
+            pages.placements(&home.id).unwrap()[0].config["saved_view"],
+            saved.id
+        );
     }
 
     #[test]
@@ -918,7 +1693,9 @@ mod tests {
         assert!(!clean.contains_key("date"));
         let dir = tempfile::tempdir().unwrap();
         let mut pages = open(&dir, "device-a");
-        let saved = pages.save_view("personal", None, "Default tasks", clean).unwrap();
+        let saved = pages
+            .save_view("personal", None, "Default tasks", clean)
+            .unwrap();
         assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved));
     }
 
@@ -933,13 +1710,21 @@ mod tests {
         let clean = clean_saved_view_config(config.as_object().unwrap()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut pages = open(&dir, "device-a");
-        let saved = pages.save_view("personal", None, "Compact tasks", clean).unwrap();
-        assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved.clone()));
+        let saved = pages
+            .save_view("personal", None, "Compact tasks", clean)
+            .unwrap();
+        assert_eq!(
+            pages.get_saved_view(&saved.id).unwrap(),
+            Some(saved.clone())
+        );
         assert_eq!(saved.config["density"], "compact");
         assert_eq!(saved.config["fields"], "title,due_date,board_lane");
 
         let title_only = json!({"plugin":"todo", "query":"tasks", "fields":""});
-        assert_eq!(clean_saved_view_config(title_only.as_object().unwrap()).unwrap()["fields"], "");
+        assert_eq!(
+            clean_saved_view_config(title_only.as_object().unwrap()).unwrap()["fields"],
+            ""
+        );
 
         let invalid_fields = vec![
             "bad-key".to_string(),
@@ -950,43 +1735,78 @@ mod tests {
         ];
         for fields in invalid_fields {
             let invalid = json!({"plugin":"todo", "query":"tasks", "fields":fields});
-            assert!(clean_saved_view_config(invalid.as_object().unwrap()).is_err(), "accepted fields {}", invalid["fields"]);
+            assert!(
+                clean_saved_view_config(invalid.as_object().unwrap()).is_err(),
+                "accepted fields {}",
+                invalid["fields"]
+            );
         }
         let invalid_density = json!({"plugin":"todo", "query":"tasks", "density":"dense"});
         assert!(clean_saved_view_config(invalid_density.as_object().unwrap()).is_err());
 
         let widget = json!({"density":"compact", "fields":"title,due_date"});
-        assert_eq!(clean_host_config("view", widget.as_object().unwrap()).unwrap(), widget.as_object().unwrap().clone());
+        assert_eq!(
+            clean_host_config("view", widget.as_object().unwrap()).unwrap(),
+            widget.as_object().unwrap().clone()
+        );
         let unsafe_widget = json!({"fields":"title,title", "density":"dense"});
-        assert_eq!(clean_host_config("view", unsafe_widget.as_object().unwrap()).unwrap(), Map::new());
+        assert_eq!(
+            clean_host_config("view", unsafe_widget.as_object().unwrap()).unwrap(),
+            Map::new()
+        );
     }
 
     #[test]
     fn saved_view_configs_reject_bad_filters_and_nested_references() {
         for invalid in ["[]", r#"{"bad-key":"x"}"#, r#"{"status":{"nested":true}}"#] {
-            assert!(clean_saved_view_config(&named_config(invalid)).is_err(), "accepted {invalid}");
+            assert!(
+                clean_saved_view_config(&named_config(invalid)).is_err(),
+                "accepted {invalid}"
+            );
         }
-        assert!(clean_saved_view_config(&named_config(&format!("{{\"q\":\"{}\"}}", "x".repeat(2100)))).is_err());
+        assert!(clean_saved_view_config(&named_config(&format!(
+            "{{\"q\":\"{}\"}}",
+            "x".repeat(2100)
+        )))
+        .is_err());
         let mut recursive = named_config("{}");
         recursive.insert("saved_view".into(), json!("vabc"));
         assert!(clean_saved_view_config(&recursive).is_err());
-        assert!(clean_host_config("view", json!({"filters":"not-json"}).as_object().unwrap()).is_err());
+        assert!(
+            clean_host_config("view", json!({"filters":"not-json"}).as_object().unwrap()).is_err()
+        );
     }
 
     #[test]
     fn saved_view_update_cannot_cross_spaces_and_legacy_view_config_survives() {
         let dir = tempfile::tempdir().unwrap();
         let mut pages = open(&dir, "device-a");
-        let saved = pages.save_view("personal", None, "Tasks", named_config("{}")).unwrap();
-        assert!(pages.save_view("work", Some(&saved.id), "Hijack", named_config("{}")).is_err());
-        assert_eq!(pages.get_saved_view(&saved.id).unwrap().unwrap().space, "personal");
+        let saved = pages
+            .save_view("personal", None, "Tasks", named_config("{}"))
+            .unwrap();
+        assert!(pages
+            .save_view("work", Some(&saved.id), "Hijack", named_config("{}"))
+            .is_err());
+        assert_eq!(
+            pages.get_saved_view(&saved.id).unwrap().unwrap().space,
+            "personal"
+        );
         let legacy = json!({"plugin":"todo", "query":"tasks", "layout":"board", "sort":"due", "dir":"desc", "group":"lane", "date":"due"});
-        assert_eq!(clean_host_config("view", legacy.as_object().unwrap()).unwrap(), legacy.as_object().unwrap().clone());
+        assert_eq!(
+            clean_host_config("view", legacy.as_object().unwrap()).unwrap(),
+            legacy.as_object().unwrap().clone()
+        );
         let reference = json!({"saved_view":"vabc123"});
-        assert_eq!(clean_host_config("view", reference.as_object().unwrap()).unwrap(), reference.as_object().unwrap().clone());
+        assert_eq!(
+            clean_host_config("view", reference.as_object().unwrap()).unwrap(),
+            reference.as_object().unwrap().clone()
+        );
         let filters = format!("{{\"q\":\"{}\"}}", "x".repeat(2030));
         let config = json!({"filters":filters.clone()});
-        assert_eq!(clean_host_config("view", config.as_object().unwrap()).unwrap()["filters"], filters);
+        assert_eq!(
+            clean_host_config("view", config.as_object().unwrap()).unwrap()["filters"],
+            filters
+        );
     }
 
     #[test]
@@ -994,15 +1814,228 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut old_schema: Value = serde_json::from_str(SCHEMA).unwrap();
         old_schema["version"] = json!(3);
-        old_schema["tables"].as_array_mut().unwrap().retain(|table| table["name"] != "saved_views");
+        old_schema["tables"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|table| table["name"] != "saved_views");
         let old_schema: PluginSchema = serde_json::from_value(old_schema).unwrap();
-        let old = CoreStore::open(dir.path().join(format!("{PAGES_STORE_ID}.db")), StoreConfig {
-            space: "personal".into(), plugin: PAGES_STORE_ID.into(), device: "a".into(), user: "owner".into(),
-        }, old_schema, Box::new(SystemTime)).unwrap();
+        let old = CoreStore::open(
+            dir.path().join(format!("{PAGES_STORE_ID}.db")),
+            StoreConfig {
+                space: "personal".into(),
+                plugin: PAGES_STORE_ID.into(),
+                device: "a".into(),
+                user: "owner".into(),
+            },
+            old_schema,
+            Box::new(SystemTime),
+        )
+        .unwrap();
         drop(old);
         let mut pages = open(&dir, "a");
-        let saved = pages.save_view("personal", None, "Tasks", named_config("{}")).unwrap();
+        let saved = pages
+            .save_view("personal", None, "Tasks", named_config("{}"))
+            .unwrap();
         assert_eq!(pages.get_saved_view(&saved.id).unwrap(), Some(saved));
+    }
+
+    #[test]
+    fn a_version_four_page_without_period_migrates_and_can_be_updated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old_schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        old_schema["version"] = json!(4);
+        let tables = old_schema["tables"].as_array_mut().unwrap();
+        tables.retain(|table| table["name"] != "folders");
+        for table in tables {
+            if let Some(columns) = table["columns"].as_array_mut() {
+                columns.retain(|column| {
+                    !matches!(
+                        column["name"].as_str(),
+                        Some(
+                            "folder_id"
+                                | "archived"
+                                | "trash_batch"
+                                | "layout_mode"
+                                | "flow_order"
+                                | "period"
+                        )
+                    )
+                });
+            }
+        }
+        let old_schema: PluginSchema = serde_json::from_value(old_schema).unwrap();
+        let mut old = CoreStore::open(
+            dir.path().join(format!("{PAGES_STORE_ID}.db")),
+            StoreConfig {
+                space: "personal".into(),
+                plugin: PAGES_STORE_ID.into(),
+                device: "a".into(),
+                user: "owner".into(),
+            },
+            old_schema,
+            Box::new(SystemTime),
+        )
+        .unwrap();
+        let mut values = Map::new();
+        values.insert("space".into(), json!("personal"));
+        values.insert("title".into(), json!("Legacy"));
+        values.insert("system".into(), json!(false));
+        old.write(|writer| writer.upsert("pages", "plegacy", &values))
+            .unwrap();
+        drop(old);
+
+        let mut pages = open(&dir, "a");
+        assert_eq!(pages.page("plegacy").unwrap().unwrap().period, None);
+        let period = json!({ "mode": "custom", "timezone": "Asia/Kolkata", "start": "2024-02-28", "end": "2024-03-01" });
+        assert_eq!(
+            pages
+                .update_with_period("plegacy", None, None, None, None, Some(&period))
+                .unwrap()
+                .period,
+            Some(period.clone())
+        );
+        assert_eq!(
+            pages
+                .update_with_period("plegacy", None, None, None, None, Some(&Value::Null))
+                .unwrap()
+                .period,
+            None
+        );
+    }
+
+    #[test]
+    fn version_five_pages_migrate_additively_to_folders_trash_and_flow_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old_schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        old_schema["version"] = json!(5);
+        let tables = old_schema["tables"].as_array_mut().unwrap();
+        tables.retain(|table| table["name"] != "folders");
+        for table in tables {
+            let columns = table["columns"].as_array_mut().unwrap();
+            columns.retain(|column| {
+                !matches!(
+                    column["name"].as_str(),
+                    Some("folder_id" | "archived" | "trash_batch" | "layout_mode" | "flow_order")
+                )
+            });
+        }
+        let old_schema: PluginSchema = serde_json::from_value(old_schema).unwrap();
+        let path = dir.path().join(format!("{PAGES_STORE_ID}.db"));
+        let mut old = CoreStore::open(
+            path,
+            StoreConfig {
+                space: "personal".into(),
+                plugin: PAGES_STORE_ID.into(),
+                device: "old".into(),
+                user: "owner".into(),
+            },
+            old_schema,
+            Box::new(SystemTime),
+        )
+        .unwrap();
+        old.write(|writer| {
+            let mut page = Map::new();
+            page.insert("space".into(), json!("personal"));
+            page.insert("title".into(), json!("Legacy"));
+            writer.upsert("pages", "plegacy", &page)?;
+            let mut placement = Map::new();
+            placement.insert("page".into(), json!("plegacy"));
+            placement.insert("plugin".into(), json!("todo"));
+            placement.insert("widget".into(), json!("today"));
+            writer.upsert("placements", "wlegacy", &placement)
+        })
+        .unwrap();
+        drop(old);
+
+        let mut pages = open(&dir, "new");
+        let page = pages.page("plegacy").unwrap().unwrap();
+        assert_eq!(page.layout_mode, "grid");
+        assert_eq!(page.folder_id, None);
+        assert!(!page.archived);
+        assert!(pages.placements("plegacy").unwrap()[0].flow_order.is_none());
+        let folder = pages.folder_create("personal", "Migrated", None).unwrap();
+        assert_eq!(folder.space, "personal");
+    }
+
+    #[test]
+    fn version_five_clients_buffer_version_six_folder_changes_until_upgrade() {
+        let old_dir = tempfile::tempdir().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let mut old_schema: Value = serde_json::from_str(SCHEMA).unwrap();
+        old_schema["version"] = json!(5);
+        let tables = old_schema["tables"].as_array_mut().unwrap();
+        tables.retain(|table| table["name"] != "folders");
+        for table in tables {
+            if let Some(columns) = table["columns"].as_array_mut() {
+                columns.retain(|column| {
+                    !matches!(
+                        column["name"].as_str(),
+                        Some(
+                            "folder_id" | "archived" | "trash_batch" | "layout_mode" | "flow_order"
+                        )
+                    )
+                });
+            }
+        }
+        let old_schema: PluginSchema = serde_json::from_value(old_schema).unwrap();
+        let mut old = CoreStore::open(
+            old_dir.path().join(format!("{PAGES_STORE_ID}.db")),
+            StoreConfig {
+                space: "personal".into(),
+                plugin: PAGES_STORE_ID.into(),
+                device: "old".into(),
+                user: "owner".into(),
+            },
+            old_schema,
+            Box::new(SystemTime),
+        )
+        .unwrap();
+        let mut new = open(&new_dir, "new");
+        new.folder_create("personal", "New folder", None).unwrap();
+        let (batch, _) = new.store().export_since(0).unwrap();
+        let report = old.import(&batch).unwrap();
+        assert_eq!(report.pending, batch.changes.len());
+        assert_eq!(report.applied, 0);
+    }
+
+    #[test]
+    fn period_config_checks_real_dates_modes_and_exclusive_span() {
+        let good = json!({ "mode": "custom", "timezone": "Asia/Kolkata", "start": "2024-02-28", "end": "2024-03-01" });
+        assert_eq!(clean_period(&good).unwrap(), good);
+        for invalid in [
+            json!({ "mode": "next_week", "timezone": "UTC" }),
+            json!({ "mode": "custom", "timezone": "UTC", "start": "2023-02-29", "end": "2023-03-01" }),
+            json!({ "mode": "custom", "timezone": "UTC", "start": "2024-03-02", "end": "2024-03-01" }),
+            json!({ "mode": "custom", "timezone": "UTC", "start": "2023-01-01", "end": "2024-01-03" }),
+            json!({ "mode": "this_week", "timezone": "UTC", "start": "2024-01-01" }),
+            json!({ "mode": "this_week", "timezone": "Bad Zone" }),
+        ] {
+            assert!(clean_period(&invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
+    fn invalid_period_creation_writes_no_orphan_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pages = open(&dir, "a");
+        let invalid = json!({ "mode": "custom", "timezone": "UTC", "start": "2024-02-30", "end": "2024-03-01" });
+        assert!(pages
+            .create_with_period("personal", "Bad", None, Some(&invalid))
+            .is_err());
+        assert!(pages.list("personal").unwrap().is_empty());
+    }
+
+    #[test]
+    fn view_placement_keeps_its_period_binding_and_saved_view_rejects_it() {
+        let config = json!({ "plugin": "todo", "query": "tasks", "follow_page_period": true });
+        assert_eq!(
+            clean_host_config("view", config.as_object().unwrap()).unwrap(),
+            config.as_object().unwrap().clone()
+        );
+        let mut saved = config.as_object().unwrap().clone();
+        assert!(clean_saved_view_config(&saved).is_err());
+        saved.remove("follow_page_period");
+        assert!(clean_saved_view_config(&saved).is_ok());
     }
 
     #[test]
@@ -1139,12 +2172,29 @@ mod tests {
     #[test]
     fn a_version_one_store_gains_the_focus_column() {
         let dir = tempfile::tempdir().unwrap();
-        let v1: PluginSchema = serde_json::from_str(
-            &SCHEMA
-                .replace("\"version\": 4", "\"version\": 1")
-                .replace(",\n      { \"name\": \"focus\", \"type\": \"text\" }", ""),
-        )
-        .unwrap();
+        let mut v1: Value = serde_json::from_str(SCHEMA).unwrap();
+        v1["version"] = json!(1);
+        let tables = v1["tables"].as_array_mut().unwrap();
+        tables.retain(|table| !matches!(table["name"].as_str(), Some("folders" | "saved_views")));
+        for table in tables {
+            if let Some(columns) = table["columns"].as_array_mut() {
+                columns.retain(|column| {
+                    !matches!(
+                        column["name"].as_str(),
+                        Some(
+                            "focus"
+                                | "period"
+                                | "folder_id"
+                                | "archived"
+                                | "trash_batch"
+                                | "layout_mode"
+                                | "flow_order"
+                        )
+                    )
+                });
+            }
+        }
+        let v1: PluginSchema = serde_json::from_value(v1).unwrap();
         assert_eq!(v1.version, 1);
         assert!(v1.tables[0].columns.iter().all(|c| c.name != "focus"));
         let mut old = CoreStore::open(

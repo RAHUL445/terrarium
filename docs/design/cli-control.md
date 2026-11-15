@@ -55,7 +55,7 @@ search. The rows also don't say how to open the result.
 ### Host-owned objects
 
 Pages are owned by the host (`crates/runtime/src/pages.rs`, store `_pages`):
-a grid of widget placements per space, a fixed Home page, at most 50 pages
+a grid of widget placements per space, a fixed system page (shown as Dashboard), at most 50 pages
 and 40 placements each. Spaces, schedules, AI settings, themes, sync and
 backups are also host-owned. Plugins can't reach any of them, so the CLI
 needs host commands for these.

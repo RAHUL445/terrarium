@@ -13,7 +13,7 @@ async function editor(action, query = async (name, params) => [{ id: params.id, 
   } }, { today: () => '2026-11-04', query, action, changed() {}, toast() {} });
   await view.ready; await turn();
   const dialog = harness.root.children[0];
-  return { ...harness, view, dialog, close: dialog.children[0].children[1],
+  return { ...harness, view, dialog, close: dialog.children[0].children.find(node => node.attrs?.['aria-label'] === 'Close'),
     form: () => dialog.querySelector('form'), input: () => dialog.querySelector('[data-pp-name]') };
 }
 
@@ -94,4 +94,18 @@ test('autosave uses one status indicator through edits and save completion', asy
   assert.equal(ui.form().querySelector('.pp-save-status').textContent, 'Saved on this device');
   assert.equal(ui.form().dataset.ppUnsaved, 'false');
   ui.view.dispose();
+});
+
+test('a late change event after the autosave delay does not leave the sheet unable to close', async () => {
+  const ui = await editor(async () => ({}));
+  ui.input().value = 'Edited'; ui.form().dispatchEvent({ type: 'input' });
+  assert.equal(await ui.view.flush(), true);
+  assert.equal(ui.form().dataset.ppUnsaved, 'false');
+  // Blurring the field after the debounce already saved fires `change` with nothing new to save.
+  ui.form().dispatchEvent({ type: 'change' });
+  assert.equal(ui.form().dataset.ppUnsaved, 'true');
+  const closed = await Promise.race([ui.close.fire('click').then(() => 'closed'), new Promise(r => setTimeout(() => r('hung'), 1000))]);
+  assert.equal(closed, 'closed');
+  assert.equal(ui.dialog.open, false);
+  assert.equal(ui.form().dataset.ppUnsaved, 'false');
 });

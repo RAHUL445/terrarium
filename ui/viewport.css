@@ -7,6 +7,12 @@
     height: calc(var(--visible-height, 100dvh) * .92);
     max-height: calc(var(--visible-height, 100dvh) * .92);
   }
+  /* A "panel" sheet (task panel) is full screen on phones, still above the keyboard. */
+  .pp-sheet.pp-sheet-panel[open] {
+    inset: var(--visible-top, 0px) 0 auto;
+    height: var(--visible-height, 100dvh);
+    max-height: var(--visible-height, 100dvh);
+  }
   .overlay {
     top: var(--visible-top, 0px);
     bottom: auto;

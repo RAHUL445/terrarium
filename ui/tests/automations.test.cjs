@@ -313,7 +313,8 @@ test('Gym example offers titled habit choices, requires a selection and saves a 
   const manifest = JSON.parse(readFileSync(join(packages, 'habits/manifest.json'), 'utf8'));
   const services = readFileSync(join(__dirname, '../../crates/runtime/src/services.rs'), 'utf8');
   const example = JSON.parse(services.match(/json!\(\[({\s*"name": "Gym task done[^]*?})\]\)/)[1]);
-  h.state.events = [{plugin:'todo',event:'task_done',description:'A task was marked done.',payload:{tags:{type:'string'},completed_date:{type:'date',required:true}}}];
+  h.state.events = [{plugin:'tasks',event:'task_done',description:'A task was marked done.',payload:{tags:{type:'string'},completed_date:{type:'date',required:true}}}];
+  h.run("pluginList.plugins.push({ id: 'tasks', name: 'Task manager' })");
   h.state.operations = [{plugin:'habits',operation:'checkin',...manifest.operations.checkin}];
   h.state.examples = [example];
   h.respond = async cmd => cmd === 'run_query' ? [{id:'habit-gym',title:'Gym'}] : undefined;
@@ -333,7 +334,7 @@ test('Gym example offers titled habit choices, requires a selection and saves a 
   assert.equal(saved.action.args.day,'{{event.completed_date}}');
   assert.equal(saved.filter[0].value,'gym');
   const summary=h.run(`ruleSentence(${JSON.stringify(saved)}, autoState)`);
-  assert.match(summary,/When To-do: A task is marked done \(with conditions\) → Habits: Record a check-in for Gym/);
+  assert.match(summary,/When Task manager: A task is marked done \(with conditions\) → Habits: Record a check-in for Gym/);
   assert.doesNotMatch(summary,/default today|daily target/);
   assert.ok(h.requests.some(r=>r.cmd==='run_query' && r.plugin==='habits' && r.name==='habits' && r.space==='personal'));
 });
@@ -341,6 +342,7 @@ test('Gym example offers titled habit choices, requires a selection and saves a 
 test('action labels are curated and required IDs need a picker or matching app event', () => {
   const h = harness();
   assert.equal(h.run('autoActionLabel({plugin:"todo",operation:"create"})'), 'Create a task');
+  assert.equal(h.run('autoActionLabel({plugin:"tasks",operation:"create"})'), 'Create a task');
   assert.equal(h.run('autoActionAvailable({plugin:"voice",operation:"capture_audio"}, {})'), false);
   assert.equal(h.run('autoActionAvailable({plugin:"reports",operation:"on_draft"}, {})'), false);
   const operation = {plugin:'habits', operation:'checkin', params:{id:{type:'id',required:true}}};

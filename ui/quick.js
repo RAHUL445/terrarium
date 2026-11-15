@@ -21,7 +21,7 @@
         });
       }
     }
-    return out.sort((a, b) => Number(b.plugin === "todo") - Number(a.plugin === "todo"));
+    return out.sort((a, b) => Number(b.plugin === "tasks") - Number(a.plugin === "tasks"));
   }
 
   function argsFor(action, text) {

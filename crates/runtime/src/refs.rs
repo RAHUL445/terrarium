@@ -75,9 +75,11 @@ pub fn resolve(host: &PluginHost, space: &str, refs: &[String]) -> Vec<Value> {
         }
     }
     for ((plugin, table), items) in groups {
-        let Some(manifest) = host.manifests().find(|m| m.id == plugin) else {
+        let Some(manifest) = host.manifest(&plugin) else {
             continue;
         };
+        // A ref may name the plugin by a former id; describe it by its current one.
+        let plugin = manifest.id.clone();
         let Some(def) = manifest.refs.iter().find(|r| r.table == table) else {
             continue;
         };

@@ -1,7 +1,7 @@
 {
   "format": 1,
   "api": "terrarium:plugin@0.1.0",
-  "plugins_commit": "c600592482d2f03c8ecf6af4f9d38675c9e30e48",
+  "plugins_commit": "8415fbd153f309cdcfecb758117cd16be1caecba",
   "source_dirty": true,
   "sdk": {
     "host_commit": "0e51387709feb28fa92641d54cf032f66f989d7d",
@@ -15,30 +15,32 @@
   "plugins": [
     {
       "id": "bookmarks",
-      "version": "0.2.4",
+      "version": "0.3.1",
       "files": {
-        "dist/plugin.wasm": "a4892be7b71d507c0d04aac0bef58857768e9692028c147faf55da749c3d94d5",
-        "manifest.json": "a28d84079a3e663bc9187a1e89e3d1696ecb1c861d5c20bd68a541e4ad09ebad",
+        "dist/plugin.wasm": "d8828baee3aecaa4a02f24d572ef2550ae8909ac1b382faeacb9e29188cd8fa7",
+        "manifest.json": "06f132ac29c151f5b5d50744da4f12e378823ffb4661d4588b2fde81a24e0239",
         "ui/page-main.json": "2a19977faf564c9a8514cf2e53498ca2f11298ae2e0fb828b92b7d0398110f00",
+        "ui/widget-host-view.json": "f846b6664417017952773ec6a84d0951430edf991e808b60db638e25adc9c2f5",
         "ui/widget-recent.json": "e31b356edfaf6c8f5994dbfdee8aa941fbbe4178d436561c34b5b9baea116e31"
       }
     },
     {
       "id": "feeds",
-      "version": "0.1.2",
+      "version": "0.2.1",
       "files": {
-        "dist/plugin.wasm": "1b4cbd44a1d33b80f675ccb1fa7019329e5182b04cb1ffc948e0bdab64f37c80",
-        "manifest.json": "25e5da77d582ca305e681eab3c5c678337a1ea6f7e9c952e0408911225dc4e52",
+        "dist/plugin.wasm": "a91749bebcc95e3304d7bcdab7f68aa05f44cf83aab0d010acf2acfdd0a90bee",
+        "manifest.json": "dc81aa51437d5360e44f977138338359f9053b01459c7c0d33840ab2e4dd1d28",
         "ui/page-main.json": "84d371033a2bace733d5b85d216135bf8b1adb89a218242867770a25f104e264",
+        "ui/widget-host-view.json": "71b9f2c52795de797ad8c17e9b3eb57f411885fea5ebb5299305bdb8cd6001a4",
         "ui/widget-unread.json": "ca0557baef7035f458513605fc447202b9dd593f290406171272137ea48d786a"
       }
     },
     {
       "id": "habits",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "files": {
-        "dist/plugin.wasm": "11fb26560658c6ab82307df6ea7e77c1641b5283c66a89d5388bba3cea40793b",
-        "manifest.json": "e21f6dc9eb3aceca08a66b7d525b84d01d0b91f908dfaa55d8493b5444fb760f",
+        "dist/plugin.wasm": "80e0a1e88140f83e2c5141efa96ae5d9bc8a50a892583e06f01d619e79fc78a5",
+        "manifest.json": "1d25a1b07cf4629919abcfef506545b9a4a75d5e0b979d80250980391a569922",
         "ui/page-main.json": "aa917909b263217e98588ab127145d9fa6392f76ac873036091b4246493ace20",
         "ui/widget-streaks.json": "11854099c7b0b8dd82fb23921e29907f85f4b95c2ef57d1a471b0babd2d04b4f",
         "ui/widget-today.json": "bab0a110c090102529508f57fec19dbce649b9ecfd61d594eed5828c3081d96a"
@@ -46,12 +48,13 @@
     },
     {
       "id": "notes",
-      "version": "0.3.4",
+      "version": "0.5.3",
       "files": {
-        "dist/plugin.wasm": "49b72c711948bb4b46618c6d69374ed68f0b1ec731eb7c23c03ce083a47b996b",
-        "manifest.json": "ff66de47fa09453f4eec5b52b959f54d670f917c428d1be83275b555c07928b8",
-        "ui/page-main.json": "5c8de12b87d69985ff400053f70939f445be97556b8928c232222356b8730bcf",
+        "dist/plugin.wasm": "20ecd179d9c21f8de214b82cdde590135b7671252e841cabc14b6de380b42d0a",
+        "manifest.json": "cd406ae471d8864e8f8d55a1b4852c29927683b3fdd2e92f04e8be91dd063d13",
+        "ui/page-main.json": "a79b0d814c88137188e0e42100129dd32574ecf28f5adaa51badf6837c2a96a5",
         "ui/widget-capture.json": "cd3e695be27e0e6abb24cb3741c5e54cd2285280a5c74bec34e7a3e52c9226b9",
+        "ui/widget-host-view.json": "3d209ab619a66d35cc72250200711225e45fd6b7951484e8dc63c99a8ea992b7",
         "ui/widget-pinned.json": "ce5cec52ce341c5673d4d63072880b36c24196f7a331c572831d8f8e52ccb19c"
       }
     },
@@ -59,31 +62,32 @@
       "id": "reports",
       "version": "0.3.5",
       "files": {
-        "dist/plugin.wasm": "9404a648d63f7b9d91c19feebfe0eec4a6ca2b31779ae5d4be7ca450f2961ac8",
+        "dist/plugin.wasm": "06ac3b7dea81cfd0e20d6972b5c56206a7bd691eaf197eac00020107ddc63cf1",
         "manifest.json": "05831b696ad38fba92099688b709ebd30496595d2fae272b045fb495cf23acf3",
         "ui/page-main.json": "4cd9af271b41a1329a1a4bc68177ad1d04ed476b9b739179de5fe4668df0e9ff",
         "ui/widget-latest.json": "3bb9b5e55b55d21f5bd7809a7d21345b755fdb00d09efcae353b71503223ad5a"
       }
     },
     {
-      "id": "todo",
-      "version": "0.6.0",
+      "id": "tasks",
+      "version": "0.12.4",
       "files": {
-        "dist/plugin.wasm": "dae7be0ddade04a52754ec545fff023034d91686ab857eca4d35b65fc2e54d68",
-        "manifest.json": "a91642520e146b28954e964b800e74cc02698ea4c77c4744548ee832185efb32",
-        "ui/page-main.json": "f199308956b7170aad489aff98b132b12adab3f9071b80c330068adc7eeacde3",
+        "dist/plugin.wasm": "9d1a7a0821c69f4ba879ec9ba0dcf47eae1f8f2bb54b234e29ad073ebbecd0eb",
+        "manifest.json": "d32a7b8ca24d7b49008a5bf4624f18ebd12f472060764b6beec445e0b4df704d",
+        "ui/page-main.json": "343e5c40044074ab801af06dc613f433fd65733a1eeec755fb88d6db6f180570",
+        "ui/widget-my-day.json": "b52523ce81ba26d344bb059b6ddbf4ada8192c9ac3436812a7763e45a2e656bd",
         "ui/widget-quick-add.json": "c73b5d371eb4c90062dd2a69135bdfe5afdf874547ccc26580cc68258ed7bdc6",
-        "ui/widget-today.json": "32bfa83cac914cbd852c5f8c4f4944d5369202d3017dc5b913f18fa4f36462a5"
+        "ui/widget-today.json": "765caf4dde8d9870926c422a8874a83d51b7e936a9d893acd8e8980aae87d06a"
       }
     },
     {
       "id": "voice",
-      "version": "0.2.4",
+      "version": "0.2.7",
       "files": {
-        "dist/plugin.wasm": "7f4310c1395d965b19c7ff8d284b8606af1c2ad8dd1bee978dc7649374c4dcff",
-        "manifest.json": "3f484d43705963bef782a230017640ae6d626dc67b3e90fc3fe043f1a81798cb",
-        "ui/page-main.json": "66ee318f127a94366c09170bd097223ee046cf8e9b9b5d3eefabf5467e9a8cf9",
-        "ui/widget-capture.json": "e5909fceefd7f462a927da7c106400bee5075415e195361d79cde8d3209898cb"
+        "dist/plugin.wasm": "76ebb03d508cc54ef85aa1a24cd3bd9d0e25a2174c5383692bf7afefc7e24e7d",
+        "manifest.json": "f71bd7b67de7be44e2a55df61f104f4001022c7658e90ecc271418ad2ad76a1a",
+        "ui/page-main.json": "7c4e7422ea9ed15f50b33fb30e210d76dd70900cd8a92ac8896714356e2a2171",
+        "ui/widget-capture.json": "50c2f027f2203bb94d81db3a9c032d8b84f006dc9bf1e9ebc6d4c7f3f8fa8ecd"
       }
     }
   ]

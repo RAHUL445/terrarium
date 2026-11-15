@@ -5,13 +5,13 @@ const { resolve } = require('node:path');
 const { rendererHarness } = require('./helpers/renderer-dom.cjs');
 
 const packages = process.env.TERRA_PLUGIN_SOURCE || resolve(__dirname, '../../../terrarium-plugins/packages');
-const templatePath = resolve(packages, 'todo/ui/page-main.json');
+const templatePath = resolve(packages, 'tasks/ui/page-main.json');
 const template = JSON.parse(readFileSync(templatePath, 'utf8'));
 const walk = (node, visit, parent = null) => {
   if (!node || typeof node !== 'object') return;
   visit(node, parent);
   for (const child of node.children || []) walk(child, visit, node);
-  for (const key of ['navigation', 'content', 'item', 'trailing']) {
+  for (const key of ['navigation', 'content', 'item', 'trailing', 'actions']) {
     const child = node[key];
     if (Array.isArray(child)) child.forEach(value => walk(value, visit, node));
     else if (child && typeof child === 'object') walk(child, visit, node);
@@ -66,7 +66,9 @@ test('capture destination is explicit, Plan today changes planning only, and edi
   assert.ok(capture);
   const destination = capture.children.find(node => node.type === 'select' && node.name === 'list_id');
   assert.equal(destination.options_query.query, 'list_choices');
-  assert.equal(destination.value, '');
+  assert.equal(destination.bind, 'state.capture_list');
+  assert.equal(template.state.capture_list, '');
+  assert.deepEqual(destination.options, [{ value: '', label: 'Inbox' }]);
 
   const planningActions = nodes(template.body, node => node.label === 'Plan today');
   assert.ok(planningActions.length);
@@ -102,7 +104,9 @@ test('capture and list/group/status management forms call their declared operati
     const form = forms.find(node => node.children.some(child => child.tag === 'button' && child.textContent === label));
     assert.ok(form, `mounted form for ${label}`);
     for (const input of domNodes(form, node => node.dataset?.ppName)) {
-      if (Object.hasOwn(values, input.dataset.ppName)) input.value = values[input.dataset.ppName];
+      if (!Object.hasOwn(values, input.dataset.ppName)) continue;
+      input.value = values[input.dataset.ppName];
+      if (input.tag === 'select') await input.fire('change');
     }
     await form.fire('submit', { bubbles: true });
   };
@@ -141,18 +145,20 @@ test('inline steps load only the expanded task, use step and parent ids, and pla
   assert.deepEqual(calls.queries.filter(([name]) => name === 'steps'), []);
 
   const buttons = () => domNodes(ui.root, node => node.tag === 'button');
-  const showButtons = buttons().filter(node => node.textContent === 'Show steps');
-  const show = showButtons[1];
-  assert.ok(show, `second task has a Show steps button; buttons=${buttons().map(node => node.textContent).join('|')}; queries=${JSON.stringify(calls.queries)}`);
-  const planButtonsBeforeExpand = buttons().filter(node => node.textContent === 'Plan today');
-  assert.equal(planButtonsBeforeExpand.length, 2);
-  const controlsRow = planButtonsBeforeExpand[1].parent;
-  assert.equal(show.parent.parent, controlsRow);
-  assert.equal(controlsRow.style.flexDirection, 'row');
-  assert.equal(controlsRow.style.flexWrap, 'wrap');
-  assert.equal(controlsRow.style.alignItems, 'flex-start');
-  assert.equal(controlsRow.style.justifyContent, 'flex-start');
-  assert.equal(show.dataset.ppFocus, 'steps-task-2');
+  // Row actions sit in one quiet "..." menu per row; items mount when it opens.
+  const rowMenus = () => buttons().filter(node => /^More for /.test(node.attrs?.['aria-label'] || ''));
+  assert.equal(rowMenus().length, 2);
+  assert.equal(buttons().filter(node => node.textContent === 'Show steps').length, 0);
+  let opened = null;
+  const menuItems = (label) => domNodes(opened.parent, node => node.attrs?.role === 'menuitem' && domNodes(node, n => n.textContent === label).length > 0);
+  const openMenu = async (n) => { opened = rowMenus()[n]; await opened.fire('click'); await new Promise(resolve => setImmediate(resolve)); };
+  await openMenu(1);
+  const show = menuItems('Show steps')[0];
+  assert.ok(show, `second task menu has Show steps; buttons=${buttons().map(node => node.textContent).join('|')}`);
+  assert.equal(menuItems('Plan today').length, 1);
+  assert.equal(menuItems('Remove from today').length, 0);
+  assert.equal(rowMenus()[1].parent.parent.className, 'pp-item-actions');
+  assert.match(rowMenus()[1].parent.parent.parent.className, /\bpp-item-line\b/);
   await show.fire('click');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(JSON.stringify(calls.queries.filter(([name]) => name === 'steps')), JSON.stringify([['steps', { task_id: 'task-2' }]]));
@@ -172,18 +178,18 @@ test('inline steps load only the expanded task, use step and parent ids, and pla
   assert.ok(calls.actions.some(([op, args]) => op === 'add_step' && args.task_id === 'task-2' && args.title === 'New subtask'));
   assert.deepEqual(calls.queries.filter(([name]) => name === 'steps').map(([, params]) => params.task_id), ['task-2']);
 
-  const hide = buttons().find(node => node.textContent === 'Hide steps');
-  assert.ok(hide, 'expanded row has a collapse button');
-  assert.equal(hide.parent.parent, buttons().filter(node => node.textContent === 'Plan today')[1].parent);
-  assert.equal(hide.dataset.ppFocus, 'steps-task-2');
+  await openMenu(1);
+  const hide = menuItems('Hide steps')[0];
+  assert.ok(hide, 'expanded row menu has a collapse item');
+  assert.equal(menuItems('Show steps').length, 0);
   await hide.fire('click');
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(buttons().some(node => node.textContent === 'Hide steps'), false);
   assert.equal(calls.queries.filter(([name]) => name === 'steps').length, 1);
 
-  const planButtons = buttons().filter(node => node.textContent === 'Plan today');
-  assert.equal(planButtons.length, 2);
-  for (const plan of planButtons) {
+  for (const [index, label] of [[0, 'Plan today'], [1, 'Plan today']]) {
+    await openMenu(index);
+    const plan = menuItems(label)[0];
+    assert.ok(plan, `row ${index} menu has ${label}`);
     await plan.fire('click');
     const undo = calls.toasts.at(-1)?.[2];
     assert.equal(undo?.label, 'Undo');

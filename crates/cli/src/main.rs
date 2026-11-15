@@ -100,14 +100,19 @@ fn check(dir: &Path) -> Result<(), String> {
         })
         .map_err(|e| e.to_string())?;
         let manifest = host.load(dir).map_err(|e| e.to_string())?;
+        let today = terrarium_runtime::today_sources(manifest);
+        if !today.errors.is_empty() {
+            return Err(today.errors.join("\n"));
+        }
         println!(
-            "ok: {} {} ({} operations, {} queries, {} pages, {} widgets)",
+            "ok: {} {} ({} operations, {} queries, {} pages, {} widgets, {} today sources)",
             manifest.id,
             manifest.version,
             manifest.operations.len(),
             manifest.queries.len(),
             manifest.pages.len(),
-            manifest.widgets.len()
+            manifest.widgets.len(),
+            today.sources.len()
         );
         Ok(())
     })();

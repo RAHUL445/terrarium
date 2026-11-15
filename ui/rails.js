@@ -48,7 +48,15 @@
       window.addEventListener("popstate", (event) => {
         if (this.compact.matches) this.setOpen(event.state?.ppCompanion === true, { fromHistory: true });
       });
-      document.querySelectorAll("[data-customize-rail]").forEach((button) => button.addEventListener("click", () => this.customize(button.dataset.customizeRail)));
+      document.querySelectorAll("[data-customize-rail]").forEach((button) => button.addEventListener("click", async () => {
+        // The rail's own Customize button toggles: a second click closes it, discarding unapplied changes like Cancel.
+        if (button.classList.contains("rail-customize-shortcut") && !this.phone.matches && this.isOpen() && this.tab === "customize") {
+          await this.showTab("pinned");
+          if (this.tab === "pinned") this.setOpen(false);
+          return;
+        }
+        this.customize(button.dataset.customizeRail);
+      }));
       document.querySelectorAll("[data-rail-mode]").forEach((button) => button.addEventListener("click", () => this.customize(button.dataset.railMode)));
       this.$("rail-custom-done").addEventListener("click", async () => {
         const space = this.space.id;
@@ -144,7 +152,7 @@
       this.catalog.nav = plugins.filter((p) => p.pages.length).map((p) => ({ key: p.id, plugin: p, name: p.name, default: true }));
       this.catalog.widgets = items.sort((a, b) => (a.template?.rail?.order ?? a.template?.home?.order ?? 100) - (b.template?.rail?.order ?? b.template?.home?.order ?? 100));
       this.catalog.home = items.slice().sort((a, b) => (a.template?.home?.order ?? 100) - (b.template?.home?.order ?? 100)).map((item) => ({ ...item, default: !item.template?.home?.hidden }));
-      this.catalog.actions = plugins.slice().sort((a, b) => Number(b.id === "todo") - Number(a.id === "todo")).flatMap((plugin) => plugin.quick_actions.map((action) => ({ key: `${plugin.id}/${action.op}/${action.arg}`, plugin, action, name: action.label, default: true })));
+      this.catalog.actions = plugins.slice().sort((a, b) => Number(b.id === "tasks") - Number(a.id === "tasks")).flatMap((plugin) => plugin.quick_actions.map((action) => ({ key: `${plugin.id}/${action.op}/${action.arg}`, plugin, action, name: action.label, default: true })));
       for (const [key, mounted] of this.mounted) {
         const item = items.find((entry) => entry.key === key);
         const stamp = item && `${this.space.id}:${item.plugin.version}:${JSON.stringify(item.template)}`;
@@ -202,12 +210,12 @@
       document.querySelectorAll("[data-rail-mode]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.railMode === this.mode)));
       const selected = this.ids(mode);
       const count = (kind, noun) => `${this.ids(kind).length} ${noun}${this.ids(kind).length === 1 ? "" : "s"}`;
-      this.$("rail-layout-preview").textContent = `Preview: ${count("home", "Home widget")} · ${count("nav", "app")} · ${count("widgets", "widget")} · ${count("actions", "quick action")}. Apply to keep changes.`;
+      this.$("rail-layout-preview").textContent = `Preview: ${count("home", "Dashboard widget")} · ${count("nav", "app")} · ${count("widgets", "widget")} · ${count("actions", "quick action")}. Apply to keep changes.`;
       const items = this.catalog[mode];
       const ordered = [...selected.map((id) => items.find((item) => item.key === id)), ...items.filter((item) => !selected.includes(item.key))];
       this.$("rail-custom-list").replaceChildren(...ordered.map((item) => {
         const checked = selected.includes(item.key), index = selected.indexOf(item.key);
-        const input = this.el("input", { type: "checkbox", "aria-label": `${item.name} in ${this.mode === "home" ? "Home" : this.mode === "nav" ? "navigation" : this.mode === "widgets" ? "widgets" : "quick actions"}` });
+        const input = this.el("input", { type: "checkbox", "aria-label": `${item.name} in ${this.mode === "home" ? "Dashboard" : this.mode === "nav" ? "navigation" : this.mode === "widgets" ? "widgets" : "quick actions"}` });
         input.dataset.railKey = item.key;
         input.checked = checked;
         input.addEventListener("change", async () => {
@@ -240,6 +248,7 @@
         if (!fromHistory && !open && this.drawer && history.state?.ppCompanion) history.back();
         this.drawer = open;
       } else { this.opened = open;  }
+      document.querySelectorAll(".rail-customize-shortcut").forEach((button) => button.setAttribute("aria-pressed", String(open && this.tab === "customize")));
       this.renderChrome();
       if (this.drawerOpen()) this.$("companion-close").focus();
       else if (!open && !this.compact.matches) {
@@ -290,6 +299,7 @@
       }
       this.tab = name;
       if (!this.isOpen()) this.setOpen(true);
+      document.querySelectorAll(".rail-customize-shortcut").forEach((button) => button.setAttribute("aria-pressed", String(name === "customize")));
       document.querySelectorAll("[data-rail-tab][role='tab']").forEach((button, index) => {
         button.setAttribute("aria-selected", String(button.dataset.railTab === name));
         button.tabIndex = button.dataset.railTab === name || (!["pinned", "assistant", "activity"].includes(name) && index === 0) ? 0 : -1;

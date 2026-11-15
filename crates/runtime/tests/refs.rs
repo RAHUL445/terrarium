@@ -11,7 +11,10 @@ fn todo_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let dir = support::package_root().join("todo").canonicalize().unwrap();
+            let dir = support::package_root()
+                .join("tasks")
+                .canonicalize()
+                .unwrap();
             build_plugin(&dir).unwrap_or_else(|e| panic!("building todo: {e}"));
             dir
         })
@@ -122,7 +125,8 @@ fn resolve_describes_live_trashed_missing_and_unknown() {
     assert_eq!(rows[0]["open"]["page"], "main");
     for row in &rows[1..3] {
         assert!(row["title"].is_null());
-        assert_eq!(row["plugin"], "todo");
+        // Refs may name the former id; results name the plugin's current id.
+        assert_eq!(row["plugin"], "tasks");
         assert!(row.get("open").is_none());
     }
     for row in &rows[3..] {

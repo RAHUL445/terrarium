@@ -32,6 +32,7 @@ mod spaces;
 mod speech;
 mod theme;
 mod time;
+pub mod today;
 
 pub use builder::{build_plugin, componentize};
 pub use error::{Result, RuntimeError};
@@ -68,6 +69,7 @@ pub use terrarium_blobs as blobs;
 pub use terrarium_net as net;
 pub use terrarium_scheduler as scheduler;
 pub use theme::{contrast, Theme, THEME_EXT, THEME_FONTS, THEME_TOKENS};
+pub use today::{today_sources, TodayLoad, TodaySource, TODAY_SECTIONS};
 
 pub use refs::{ItemRef, MAX_RESOLVE};
 mod automation;

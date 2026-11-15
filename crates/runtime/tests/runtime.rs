@@ -20,7 +20,7 @@ fn repo() -> PathBuf {
 fn built(dir: PathBuf) -> PathBuf {
     static TODO: OnceLock<()> = OnceLock::new();
     static LIMITS: OnceLock<()> = OnceLock::new();
-    let lock = if dir.ends_with("todo") {
+    let lock = if dir.ends_with("tasks") {
         &TODO
     } else {
         &LIMITS
@@ -43,7 +43,7 @@ fn take_events(host: &mut PluginHost) -> Vec<(String, String, Map<String, Value>
 }
 
 fn todo_dir() -> PathBuf {
-    built(support::package_root().join("todo"))
+    built(support::package_root().join("tasks"))
 }
 
 fn limits_dir() -> PathBuf {
@@ -77,15 +77,11 @@ fn params(v: Value) -> Map<String, Value> {
 }
 
 fn todo_organization_row(host: &PluginHost, id: &str) -> Map<String, Value> {
-    host.query(
-        "todo",
-        "organization_tasks",
-        &params(json!({"id": id})),
-    )
-    .unwrap()
-    .into_iter()
-    .next()
-    .expect("organization query returns the requested task")
+    host.query("todo", "organization_tasks", &params(json!({"id": id})))
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("organization query returns the requested task")
 }
 
 fn todo_stored_task(host: &PluginHost, id: &str) -> Map<String, Value> {
@@ -394,9 +390,7 @@ fn todo_v4_to_v5_additive_schema_preserves_tasks_and_steps() {
     v4_manifest["storage"]["tables"][0]["columns"]
         .as_array_mut()
         .unwrap()
-        .retain(|column| {
-            !new_task_columns.contains(&column["name"].as_str().unwrap_or_default())
-        });
+        .retain(|column| !new_task_columns.contains(&column["name"].as_str().unwrap_or_default()));
     v4_manifest["storage"]["tables"]
         .as_array_mut()
         .unwrap()
@@ -486,7 +480,9 @@ fn todo_v4_to_v5_additive_schema_preserves_tasks_and_steps() {
     let before = host.store("todo").unwrap().dump().unwrap();
     assert_eq!(before["tasks"].len(), 3);
     assert_eq!(before["steps"].len(), 2);
-    assert!(before["tasks"].iter().any(|row| row["cleared_at"].is_number()));
+    assert!(before["tasks"]
+        .iter()
+        .any(|row| row["cleared_at"].is_number()));
     assert!(before["tasks"].iter().any(|row| !row["_deleted"].is_null()));
     let original_step = before["steps"]
         .iter()
@@ -533,17 +529,34 @@ fn todo_organization_definitions_create_defaults_and_update_metadata() {
 
     // Inbox is the unassigned (NULL list_id) task set. Generic board lanes
     // must resolve to category flags without custom status definitions.
-    let virtual_task = host.call("todo", "create", &json!({
-        "title": "Virtual status routing",
-    })).unwrap()["id"].as_str().unwrap().to_string();
+    let virtual_task = host
+        .call(
+            "todo",
+            "create",
+            &json!({
+                "title": "Virtual status routing",
+            }),
+        )
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(todo_stored_task(&host, &virtual_task)["list_id"].is_null());
     for (virtual_status, category) in [
         ("@active", "active"),
         ("@completed", "completed"),
         ("@not_started", "not_started"),
     ] {
-        host.call("todo", "organize", &json!({"id": virtual_task, "status_id": virtual_status})).unwrap();
-        assert_eq!(todo_organization_row(&host, &virtual_task)["status_category"], json!(category));
+        host.call(
+            "todo",
+            "organize",
+            &json!({"id": virtual_task, "status_id": virtual_status}),
+        )
+        .unwrap();
+        assert_eq!(
+            todo_organization_row(&host, &virtual_task)["status_category"],
+            json!(category)
+        );
     }
 
     let list = host
@@ -555,10 +568,17 @@ fn todo_organization_definitions_create_defaults_and_update_metadata() {
         .unwrap();
     let list_id = list["id"].as_str().unwrap();
     let statuses = host
-        .query("todo", "task_statuses", &params(json!({"list_id": list_id})))
+        .query(
+            "todo",
+            "task_statuses",
+            &params(json!({"list_id": list_id})),
+        )
         .unwrap();
     assert_eq!(
-        statuses.iter().map(|row| row["name"].as_str().unwrap()).collect::<Vec<_>>(),
+        statuses
+            .iter()
+            .map(|row| row["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
         ["To pick", "In progress", "Waiting", "Done"]
     );
     assert_eq!(statuses[0]["category"], json!("not_started"));
@@ -619,7 +639,11 @@ fn todo_organization_definitions_create_defaults_and_update_metadata() {
     assert_eq!(saved_group["color"], json!("#654321"));
     assert_eq!(saved_group["position"], json!(2));
     let statuses = host
-        .query("todo", "task_statuses", &params(json!({"list_id": list_id})))
+        .query(
+            "todo",
+            "task_statuses",
+            &params(json!({"list_id": list_id})),
+        )
         .unwrap();
     let saved_status = statuses.iter().find(|row| row["id"] == status_id).unwrap();
     assert_eq!(saved_status["name"], json!("In review"));
@@ -710,12 +734,8 @@ fn todo_organization_recurring_completion_reopen_and_legacy_moves_stay_coherent(
 
     let before_planning = todo_stored_task(&host, &task_id);
     assert_eq!(before_planning["planned_for"], json!("2027-02-03"));
-    host.call(
-        "todo",
-        "update",
-        &json!({"id": task_id, "planned_for": ""}),
-    )
-    .unwrap();
+    host.call("todo", "update", &json!({"id": task_id, "planned_for": ""}))
+        .unwrap();
     let cleared_planning = todo_stored_task(&host, &task_id);
     assert!(cleared_planning["planned_for"].is_null());
     for key in ["due", "remind_at"] {
@@ -748,7 +768,10 @@ fn todo_organization_recurring_completion_reopen_and_legacy_moves_stay_coherent(
     let next_steps = host
         .store("todo")
         .unwrap()
-        .query("SELECT done FROM steps WHERE task_id = ?1 AND _deleted IS NULL", &[json!(next_id)])
+        .query(
+            "SELECT done FROM steps WHERE task_id = ?1 AND _deleted IS NULL",
+            &[json!(next_id)],
+        )
         .unwrap();
     assert_eq!(next_steps.len(), 1);
     assert_eq!(next_steps[0]["done"], json!(0));
@@ -761,20 +784,29 @@ fn todo_organization_recurring_completion_reopen_and_legacy_moves_stay_coherent(
         &json!({"id": task_id, "status_id": done_id}),
     )
     .unwrap();
-    assert_eq!(host.store("todo").unwrap().dump().unwrap()["tasks"].len(), task_count);
+    assert_eq!(
+        host.store("todo").unwrap().dump().unwrap()["tasks"].len(),
+        task_count
+    );
 
     host.call("todo", "toggle", &json!({"id": task_id, "done": false}))
         .unwrap();
     let reopened = todo_stored_task(&host, &task_id);
     assert_eq!(reopened["previous_status_id"], Value::Null);
-    assert_eq!(todo_organization_row(&host, &task_id)["status_name"], json!("Reviewing"));
+    assert_eq!(
+        todo_organization_row(&host, &task_id)["status_name"],
+        json!("Reviewing")
+    );
     host.call(
         "todo",
         "update_status",
         &json!({"id": active_id, "name": "In review"}),
     )
     .unwrap();
-    assert_eq!(todo_organization_row(&host, &task_id)["status_name"], json!("In review"));
+    assert_eq!(
+        todo_organization_row(&host, &task_id)["status_name"],
+        json!("In review")
+    );
 
     let legacy = host
         .call(
@@ -788,10 +820,16 @@ fn todo_organization_recurring_completion_reopen_and_legacy_moves_stay_coherent(
         .to_string();
     host.call("todo", "move", &json!({"id": legacy, "lane": "todo"}))
         .unwrap();
-    assert_eq!(todo_organization_row(&host, &legacy)["status_name"], json!("To pick"));
+    assert_eq!(
+        todo_organization_row(&host, &legacy)["status_name"],
+        json!("To pick")
+    );
     host.call("todo", "move", &json!({"id": legacy, "lane": "doing"}))
         .unwrap();
-    assert_eq!(todo_organization_row(&host, &legacy)["status_category"], json!("active"));
+    assert_eq!(
+        todo_organization_row(&host, &legacy)["status_category"],
+        json!("active")
+    );
 }
 
 #[test]
@@ -861,7 +899,10 @@ fn todo_organization_rejects_invalid_targets_atomically_and_keeps_archived_refs(
             &json!({"id": status_id, "category": "completed"}),
         )
         .is_err());
-    assert_eq!(todo_stored_task(&host, &task_id)["status_id"], json!(status_id));
+    assert_eq!(
+        todo_stored_task(&host, &task_id)["status_id"],
+        json!(status_id)
+    );
 
     let tasks_before_invalid_create = host.store("todo").unwrap().dump().unwrap()["tasks"].len();
     assert!(host
@@ -893,8 +934,12 @@ fn todo_organization_rejects_invalid_targets_atomically_and_keeps_archived_refs(
     // Archiving an assigned definition preserves its reference. Metadata edits
     // to those archived definitions remain possible, while assigning them anew
     // is rejected.
-    host.call("todo", "update_group", &json!({"id": group_id, "archived": true}))
-        .unwrap();
+    host.call(
+        "todo",
+        "update_group",
+        &json!({"id": group_id, "archived": true}),
+    )
+    .unwrap();
     host.call(
         "todo",
         "update_status",
@@ -913,22 +958,32 @@ fn todo_organization_rejects_invalid_targets_atomically_and_keeps_archived_refs(
         &json!({"id": status_id, "name": "Archived status retained"}),
     )
     .unwrap();
-    assert_eq!(todo_stored_task(&host, &task_id)["group_id"], json!(group_id));
-    assert_eq!(todo_stored_task(&host, &task_id)["status_id"], json!(status_id));
-    host.call(
-        "todo",
-        "organize",
-        &json!({"id": task_id, "group_id": ""}),
-    )
-    .unwrap();
+    assert_eq!(
+        todo_stored_task(&host, &task_id)["group_id"],
+        json!(group_id)
+    );
+    assert_eq!(
+        todo_stored_task(&host, &task_id)["status_id"],
+        json!(status_id)
+    );
+    host.call("todo", "organize", &json!({"id": task_id, "group_id": ""}))
+        .unwrap();
     let ungrouped = todo_stored_task(&host, &task_id);
     assert!(ungrouped["group_id"].is_null());
     assert_eq!(ungrouped["status_id"], json!(status_id));
     assert!(host
-        .call("todo", "organize", &json!({"id": task_id, "group_id": group_id}))
+        .call(
+            "todo",
+            "organize",
+            &json!({"id": task_id, "group_id": group_id})
+        )
         .is_err());
     assert!(host
-        .call("todo", "organize", &json!({"id": task_id, "status_id": status_id}))
+        .call(
+            "todo",
+            "organize",
+            &json!({"id": task_id, "status_id": status_id})
+        )
         .is_err());
 
     host.call(
@@ -2133,7 +2188,7 @@ fn plugin_event_rejection_rolls_back_writes_and_dry_runs_discard_events() {
 
     for (plugin, event, operation, args) in [
         (
-            "todo",
+            "tasks",
             "task_done",
             "toggle",
             json!({"id":task,"done":true}),

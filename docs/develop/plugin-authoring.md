@@ -14,7 +14,7 @@ Run the app with `TERRA_PLUGINS=/path/to/my-plugin` (supply explicit built packa
 
 | File | Purpose |
 | --- | --- |
-| `manifest.json` | id, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `kind`, `index`, `history`, `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
+| `manifest.json` | id, optional `former_ids`, name, version, `api` (`terrarium:plugin@0.1.0`), `storage` schema, `operations`, `queries`, `pages`, `widgets`, optional `kind`, `index`, `history`, `limits`, `provides`, `uses`, `jobs`, `reminders`, `events`, `permissions`, `hosts`, `oauth`, `open`, `refs`, `export`, `import` |
 | `src/lib.rs` | `impl terrarium_guest::Plugin` with `handle(operation, args)`, then `terrarium_guest::plugin!(Type)` |
 | `ui/*.json` | page and widget templates |
 | `dist/plugin.wasm` | built component (`terra build`) |
@@ -40,6 +40,39 @@ code never receives attachment bytes. Byte upload/download stays in host
 commands and host-rendered UI. Hosts that do not support attachments reject
 manifests with `type: "file"`, so publish attachment plugins only for
 attachment-capable host builds.
+
+### Renaming a plugin (`former_ids`)
+
+A plugin's id names its data everywhere: its database (`<id>.db`), its sync
+and backup store, item refs (`<id>/<table>/<row>`), page widgets, saved views,
+automations, schedules and links on every device. To rename a plugin, give it
+the new `id` and list the old one in `former_ids`:
+
+```json
+{ "id": "tasks", "former_ids": ["todo"], "name": "Task manager", "...": "..." }
+```
+
+- The first former id is the plugin's **storage id** forever: the host keeps
+  opening `todo.db`, syncs and backs it up as `todo`, and keys reminders,
+  events and plugin-made schedules by it. Devices on an older build, and a
+  rollback to one, keep working with the same data.
+- Every former id still names the plugin: commands (`todo.create` runs
+  `tasks.create`), refs and backlinks (`todo/tasks/<id>` and
+  `tasks/tasks/<id>` both resolve), deep links, page widgets, saved views,
+  rules and installed-package records. The host shows the current id; refs it
+  hands out (search results, `row.$ref`) keep the storage id, and widgets,
+  saved views and rules are stored under it.
+- MCP lists `tasks_*` tools plus `todo_*` aliases marked deprecated.
+- An installed record under a former id counts as the renamed plugin; if a
+  package with the old id is also present, the one listing it in
+  `former_ids` replaces it.
+
+Rules: at most four former ids, each a valid plugin id that is not the
+plugin's own id, not a host namespace and not repeated. A loaded plugin may
+not use an id or former id another loaded plugin answers to. Hosts older than
+this field reject the manifest (unknown field), so ship a renamed plugin only
+with a host that understands `former_ids`. Accounts, AI and network jobs of a
+renamed plugin are keyed by its current id and are not carried over.
 
 ## Queries and templates
 
@@ -75,7 +108,7 @@ More components and keys:
 | `list.group` | Column whose value starts a new heading when it changes; `group_tone` names a column holding `danger` / `accent` |
 | `form.inline` | Field and button on one line; `submit_icon: "plus"` shows an icon button. With `reset`, fields clear at once so the next entry can be typed while the last one saves |
 | `section.collapsible` | Folded until opened |
-| `button.icon`, `variant: "ghost"` | Icons: `calendar`, `repeat`, `steps`, `bell`, `tag`, `close`, `trash`, `plus`, `check`, `note`, `flame`, `moon`, `pause`, `play`, `minus`, `chart`, `mic`, `stop`, `send`, `undo`, `archive`, `clock`, `pin`, `edit`, `external`, `folder`, `eye`, `link`. With `pressed`, an icon button shows on/off (a filled pin). A button inside a sheet waits for the sheet's autosaving forms before its action runs |
+| `button.icon`, `variant: "ghost"` | Icons: `calendar`, `repeat`, `steps`, `bell`, `tag`, `close`, `trash`, `plus`, `check`, `note`, `flame`, `moon`, `pause`, `play`, `minus`, `chart`, `mic`, `stop`, `send`, `undo`, `archive`, `clock`, `pin`, `edit`, `external`, `folder`, `eye`, `link`, `lock`. With `pressed`, an icon button shows on/off (a filled pin). A button inside a sheet waits for the sheet's autosaving forms before its action runs |
 | `audio-recorder` | Round mic button: `{label, hint, max_seconds, action}`. Shows the elapsed time and a level meter while recording; Cancel drops the take. `action` gets `{{value.audio}}` (base64), `{{value.mime}}`, `{{value.duration_ms}}` |
 | `label_hidden` | On fields and `search-field`: the label is read aloud but not shown |
 | `action.open` | `{"open": "{{row.url}}", "op": "visit", "args": {…}}`: opens an http(s) address in the system browser, then runs `op` if given |
@@ -106,10 +139,29 @@ More components and keys:
 | `image` | Preview an attachment from a file value: `{type: "image", file: "{{row.photo}}", alt, max_height}`. Supports PNG/JPEG/GIF/WebP. Missing bytes show "Not on this device yet". SVG is not rendered inline. |
 | `file` | File card from a file value: `{type: "file", file: "{{row.attachment}}"}` with name, size and a Save action when available. Missing bytes show "Not on this device yet". |
 | `form.autosave` | Saves a moment after typing stops and when its sheet closes; no button. Status shows next to the editor's word count |
+| `sheet.size: "panel"` | A 460px panel (docked at that width when the list keeps its room; full screen on phones). For a task or record panel that should not be as wide as `large` |
+| `field.style`, `checkbox.style: "round"` | On `text-field`, `text-area`, `date`, `number`, `select`, `choice`: `"title"` (big borderless title), `"bare"` (borderless; a text area grows with its text), `"compact"` (small muted input for property rows). A `checkbox` with `style: "round"` draws the round list check; give it `aria_label` and an empty `label` |
 | `sheet.size: "large"`, `sheet.on_close` | Wide panel (full screen on phones); an action run after closing, with the sheet's `row` (e.g. drop an empty note) |
 | `list.layout: "chips"`, `button.variant: "chip"`, `button.pressed` | A row of filter chips (scrolls sideways on phones) |
 | `text-field.suggestions` | `{query, column}`: offers existing values while typing |
 | `$utc_offset_ms` | Add to a UTC ms timestamp in SQL to get local time: `date((ts + ?n) / 1000, 'unixepoch')` |
+| `workspace` | A page with an inner view sidebar: `{navigation, content, label, menu_label?, collapsible?, collapsed?: "state.key", id?}`. The sidebar is 210px. `collapsible` adds a sidebar toggle (`panel-left`, "Hide sidebar" / "Show sidebar") at the start of the content's head row: the content itself, or its first child, when that is a `stack` with `direction: "row"` (put the page title there). Without a head row the toggle floats in the content's top-left padding. ⌘\ on macOS, Ctrl+\ elsewhere, toggles the sidebar of the visible page (not while typing in a field). Collapsed on desktop, the sidebar becomes a 44px icon rail: each `nav` entry shows its `icon`, else a dot in its `color`, else the first letter of its label, with a badge for a non-zero `count`; the tooltip is the label and count. Group titles, `add` buttons and entry menus are hidden; groups are separated by thin lines. The choice is kept on this device per page and space (`id` names the workspace when a page has several) and wins over the `collapsed` state's template default; `collapsed` stays in sync, so setting that state still collapses or expands it. Below 900px wide the sidebar opens from a "View ▾" button above the content labelled with `menu_label`, and the toggle and shortcut do nothing |
+| `nav` | A sidebar group: `{title?, add?: {label, action}, items: [...]}`, `{query, params, item}` (one entry per row) or `source: "saved-views"` (the host's saved views for this plugin as rows `{id, title, icon}`). Static items see the query's first row as `row`, e.g. for counts. Entry: `{label, icon, color, count, count_tone?, tooltip, key, selected, action, menu: [menu items]}`; a zero count is hidden and shown right-aligned and muted (`count_tone: "danger"` tints it), `selected` marks the current entry, `menu` shows a ⋯ button on hover (menu items take `if`; with none applying to a row, no button). `collapsible: true` makes the group title a disclosure button (`collapsed: true` starts it closed; the device remembers the choice). In the icon rail a count is a small dot beside the icon, and the tooltip carries the number |
+| `menu` | A button with a menu. Actions: `{label, icon?, text?, align?, items: [{label, icon, variant, if, action} or {type: "divider"}]}`; `confirm` on an action asks first. One choice: `{label, bind, options, prefix?}`, e.g. `prefix: "Sort"` shows "Sort" for the first option and "Sort: Due date" otherwise |
+| `view-toolbar` | One toolbar row for a list: `{search: {bind, label}, filters: [{label, bind, multiple?, options?, options_query?, default?, placeholder?}], sort, group, layout: {label, bind, options}, display: [{label, bind, multiple?, options}], save?: {label, action}}`. Filter changes are temporary page state shown as removable chips with "Temporary · Save view · Reset" |
+| `item.layout: "line"` | A single-line row: `note` (and `note_icon`) after the title, chips on the right, and `actions` nodes that replace the chips on hover or keyboard focus (always shown on touch). Chip `style`: `tag`, `time` or `source`; chip `field` with item `fields: "tags,due"` shows only the named chips; chip `format: "tags"` renders "#a #b"; chip `format: "short-time"` turns embedded HH:MM into "2pm" / "2:30pm" and joins it to a preceding date as "10 Dec · 2pm"; chip `icon_only: true` shows only its `icon`, named by `label` (or its text); on other chips `label` is a tooltip; in a grouped list a chip whose text equals the row's group heading is hidden |
+| `item.meta`, `item.slots`, `item.calm` | Calm line rows. `meta: [chips]` shows muted chips on a second line under the title (only when one has text); chip `style: "parent"` cuts to 18 characters. `slots: [{name, width, field?, if?}]` gives chips with a matching `slot` a fixed-width column so they line up between rows (an empty slot keeps its space; a slot whose `field` is not in `fields`, or whose `if` is false, is dropped; at most two chips show per slot). Any chip also takes `if`. `calm: true` tints the row on hover and keeps the chips, so `actions` (say one `menu` with `icon: "more"`) show as a quiet button at the row end instead of replacing the chips |
+| `{{a && b}}`, `{{a \|\| b}}`, menu `focus_key` | An `if` (or any whole-string binding) can combine plain conditions with `&&` and `\|\|` (`&&` binds tighter; no parentheses, each term is `path`, `!path`, `path == word` or `path != @path`). A `menu` takes `focus_key`: after one of its items changes the page, focus returns to that menu button |
+| `list.group_count`, `list.empty_action` | `group_count: true` adds the count of every row in the group (nested rows included) to group headings. `empty_action: {label, action..., if?}` adds one button to the empty line, e.g. `{label: "Add a task", set: {"state.creating": "yes"}}` |
+| `list.tree` | `tree: {depth: "depth", remember?: "key"}` nests rows: a row whose `depth` column is higher than the row before is indented under it (up to two levels) and that row gets a disclosure arrow that hides or shows its children. Return rows parent first, then children, so grouping and sorting keep a family together. Group counts leave nested rows out. `remember` keeps collapsed parents on this device per plugin; without it they reset when the view is rebuilt. Not used by board layouts |
+| `list.density`, `list.select.bind` | `density: "compact"` (36px rows) or `"comfortable"` (44px). `select.bind: "state.selecting"` starts selection from elsewhere (say a page menu) instead of an idle Select button |
+| `heading.style: "title"`, `heading.tooltip` | A 22px page title; text and tooltip may use `state` and update with it |
+| `form.style: "capture"` | One bordered capture box: the field and a destination `select` sit inside it; success messages are announced but not shown |
+| Docked item sheet | On windows at least 1200px wide, the page's item sheet (the `sheet` whose `bind` is the template's `entry.bind`, i.e. what `navigate: {item}` opens) shows docked beside the list (360px; `size: "large"` sheets get up to 640px) instead of over it. The list stays usable: rows whose `action` sets the entry state are marked as selected, J/K open the next or previous such row (saving the current item first) and Escape closes. Today opens records the same way beside its list. Narrower windows keep the usual sheet. `sheet.dock: false` opts out; `dock: true` docks another sheet |
+| `sheet.menu` | `{label?, items: [menu items]}`: a ⋯ menu in the sheet header with the sheet's `row` in scope (e.g. Delete). Items wait for the sheet's autosaving forms first |
+| `section.remember` | With `collapsible`: a key under which this device remembers whether the section was open, per plugin (e.g. `"task-more"` for a "More" disclosure) |
+| `form.autosave` on blur | Autosaving forms also save as soon as focus leaves the form, so several small forms (each saving only its own fields) can make up one details panel |
+| `$now` | The current time in UTC milliseconds, e.g. to compare with a stored reminder time: `remind_at < CAST(?n AS INTEGER)` |
 
 Markdown attachments use `terrarium:blob/<blob-id>` links:
 
@@ -781,6 +833,7 @@ Field rules:
 - `columns[*].type`: one of `string`, `text`, `integer`, `number`, `boolean`, `date`, `time`, `id`, `enum`, `json`.
 - Enum columns require `values` (1–12 entries), or `choices_query` naming a parameterless query returning `value` and `label`. Dynamic choices support user-defined groups/statuses. Include retained archived or unavailable assignments so board cards remain visible. `labels` is optional for fixed values but must match their length when present.
 - `move` is allowed only on enum columns, must point to a declared operation, and that operation must not be destructive.
+- `board` (optional) sets how a board grouped by the column draws: `"lanes"` (default) or `"matrix"`, a 2×2 grid in value order; `"matrix"` needs an enum with exactly four fixed `values` (e.g. an Eisenhower quadrant).
 - `title_column` must name a declared string/text column.
 - `params` sets fixed values for the query's own declared params only; context params (`today`, `weekday`, `now_ms`, `utc_offset_ms`, `tz`) are host-filled and must not be listed here.
 
@@ -802,6 +855,17 @@ declared scalar query parameters. A page View placement can use
 `{"saved_view":"<id>"}` while retaining its own geometry and focus. Removed
 definitions or unavailable filter choices remain visibly unresolved; they do
 not fall back to an unfiltered query. Existing inline View placements still work.
+
+A page that lists saved views in its own sidebar (a `nav` with
+`source: "saved-views"`) embeds the library without its picker: `selected:
+"{{state.saved_view}}"` opens that view and follows the state, and `draft:
+{title, layout, sort, density, filters: {...}, layouts?}` starts a new view from page
+state (only declared scalar filters are kept). `layouts` maps a page-only
+layout name to view settings, e.g. `{"kanban": {"layout": "board", "group":
+"board_lane"}}`, so a saved view reopens as a board grouped by that enum
+column instead of falling back to the list. `on_save` runs after Save
+changes or Save as new with the saved record as `{{value}}`. Give each embedded
+library its own `id`.
 
 Saved views also support `density` (`comfortable` or `compact`) and `fields`
 (comma-separated column keys). Omitted fields keep the legacy display; an empty
@@ -951,7 +1015,7 @@ Use a dedicated import operation if normal creation parses quick-add text.
 To-do's hidden `import` operation preserves the title literally and accepts
 completion state; `create` parses dates, tags and priority out of the title.
 
-## Home and search entry
+## Dashboard and search entry
 
 Widget templates may set `home: {order: 10, collapsed: true}`. Lower order appears first (default 100); collapsed history stays available through a native disclosure. Existing templates retain their normal behavior.
 
@@ -983,7 +1047,7 @@ Selection actions may also declare `undo`. After a bulk run, Undo runs one bulk 
 
 ## Pages and widget grid
 
-Home and any pages the user creates (Edit page, New page) are grids of widget placements owned by the host and synced between devices. Users can place any declared widget, more than once, then move and resize it on a 12-column grid. `home.order` and `home.hidden` only choose the first Home layout; after that the user's page decides. The host provides dragging, resizing, keyboard movement and saving; plugins do not implement positioning.
+The Dashboard and any pages the user creates (Edit page, New page) are grids of widget placements owned by the host and synced between devices. Users can place any declared widget, more than once, then move and resize it on a 12-column grid. `home.order` and `home.hidden` only choose the first Dashboard layout (the system page, formerly called Home); after that the user's page decides. The host provides dragging, resizing, keyboard movement and saving; plugins do not implement positioning.
 
 A widget template may declare how it fits on a page:
 

@@ -11,7 +11,7 @@ for an overview.
 | --- | --- |
 | [Install on macOS](guide/install-macos.md) | Build the app with the recommended plugins, install it, update it, where data lives |
 | [Install on Android](guide/install-android.md) | Build the APK, sideload it, permissions, updates |
-| [First steps](guide/first-steps.md) | Home, pages, global search, mentions and backlinks, quick capture, deep links, Android share, bulk selection and undo |
+| [First steps](guide/first-steps.md) | Today, Dashboard, pages, global search, mentions and backlinks, quick capture, deep links, Android share, bulk selection and undo |
 | [Sync and devices](guide/sync-and-devices.md) | Pairing over Tailscale, Google Drive, recovery phrase, backups |
 | [Export and import](guide/export-and-import.md) | Save readable copies of a space, import tasks from CSV and notes from Markdown |
 | [Views on pages](guide/views.md) | List, table, board and calendar widgets, sorting, grouping and page focus |

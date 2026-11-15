@@ -13,7 +13,10 @@ fn todo_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let dir = support::package_root().join("todo").canonicalize().unwrap();
+            let dir = support::package_root()
+                .join("tasks")
+                .canonicalize()
+                .unwrap();
             build_plugin(&dir).unwrap_or_else(|e| panic!("building todo: {e}"));
             dir
         })

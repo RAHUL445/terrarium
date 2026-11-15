@@ -362,7 +362,10 @@ pub(crate) fn stage_package(
     let loaded = plugins.loaded(&manifest.id);
     let (current, trusted, signer_name) = plugins
         .with_host(|host| {
-            let current = host.manifests().find(|m| m.id == manifest.id).cloned();
+            let current = host
+                .manifests()
+                .find(|m| m.answers_to(&manifest.id) || manifest.answers_to(&m.id))
+                .cloned();
             let signers = host.packages().signers().unwrap_or_default();
             let name = package.signer().and_then(|key| {
                 signers

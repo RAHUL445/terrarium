@@ -55,6 +55,8 @@ pub struct Loaded {
     pub version: String,
     /// Digest of the installed package ([`BUNDLED_DIGEST`] for bundled).
     pub digest: Option<String>,
+    /// Ids the plugin was published under before (see `former_ids`).
+    pub former_ids: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -199,8 +201,19 @@ impl Plugins {
                     origin,
                     version: manifest.version,
                     digest,
+                    former_ids: manifest.former_ids,
                 },
             ))
+        };
+        // The plugin an id names among `out`: itself, or the successor that
+        // lists it in `former_ids`.
+        let successor = |out: &BTreeMap<String, Loaded>, id: &str| -> Option<String> {
+            if out.contains_key(id) {
+                return Some(id.to_string());
+            }
+            out.iter()
+                .find(|(_, l)| l.former_ids.iter().any(|f| f == id))
+                .map(|(k, _)| k.clone())
         };
         for dir in self.0.bundled.values() {
             if let Some((id, l)) = entry(dir, Origin::Bundled, Some(BUNDLED_DIGEST.into())) {
@@ -209,16 +222,27 @@ impl Plugins {
         }
         match host.packages().installed() {
             Ok(installed) => {
-                for inst in installed {
+                for inst in &installed {
                     let label = format!("installed {}", inst.id);
                     if inst.removed {
-                        out.remove(&inst.id);
+                        // A removal recorded under a former id (by a device on an
+                        // older build) removes the successor too, unless the
+                        // successor has its own record, which then decides.
+                        match successor(&out, &inst.id) {
+                            Some(id) if id == inst.id => {
+                                out.remove(&id);
+                            }
+                            Some(id) if !installed.iter().any(|i| i.id == id) => {
+                                out.remove(&id);
+                            }
+                            _ => {}
+                        }
                         self.set_error(&label, None);
                         continue;
                     }
                     match host
                         .packages()
-                        .materialize_approved(&inst, cfg!(debug_assertions))
+                        .materialize_approved(inst, cfg!(debug_assertions))
                     {
                         Ok(Some(dir)) => {
                             self.set_error(&label, None);
@@ -228,7 +252,10 @@ impl Plugins {
                                 out.insert(id, l);
                             }
                         }
-                        Ok(None) if out.contains_key(&inst.id) => self.set_error(&label, None),
+                        // A record under a former id is satisfied by its successor.
+                        Ok(None) if successor(&out, &inst.id).is_some() => {
+                            self.set_error(&label, None)
+                        }
                         Ok(None) => self.set_error(
                             &label,
                             Some(format!("{} is not bundled with this app version", inst.id)),
@@ -254,6 +281,7 @@ impl Plugins {
                             origin: Origin::Dev,
                             version: m.version,
                             digest: None,
+                            former_ids: m.former_ids,
                         },
                     );
                 }
@@ -264,6 +292,17 @@ impl Plugins {
                         out.insert(id.clone(), current.clone());
                     }
                 }
+            }
+        }
+        // A successor replaces the plugin it was renamed from: both would
+        // open the same storage.
+        let replaced: Vec<String> = out
+            .values()
+            .flat_map(|l| l.former_ids.iter().cloned())
+            .collect();
+        for id in replaced {
+            if out.remove(&id).is_some() {
+                self.set_error(&format!("installed {id}"), None);
             }
         }
         out
@@ -363,5 +402,100 @@ impl Plugins {
                 }),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn package(root: &Path, id: &str, former: &[&str]) -> PathBuf {
+        let dir = root.join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = json!({
+            "id": id, "former_ids": former, "name": id, "version": "1.0.0",
+            "api": terrarium_runtime::API_VERSION,
+            "storage": {"version": 1, "tables": [{"name": "items", "columns": [{"name": "text", "type": "text"}]}]}
+        });
+        std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+        dir
+    }
+
+    fn plugins(root: &Path, bundled: &[(&str, PathBuf)]) -> Plugins {
+        Plugins::new(
+            HostConfig {
+                data_dir: root.join("data"),
+                spaces_dir: None,
+                space: "personal".into(),
+                device: "test-device".into(),
+                user: "owner".into(),
+                timezone: "UTC".into(),
+                execution: Default::default(),
+                speech: None,
+            },
+            Vec::new(),
+            bundled
+                .iter()
+                .map(|(id, dir)| (id.to_string(), dir.clone()))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    fn desired(p: &Plugins) -> Vec<String> {
+        p.with_host(|host| p.desired(host, &BTreeMap::new()))
+            .unwrap()
+            .into_keys()
+            .collect()
+    }
+
+    fn record(p: &Plugins, id: &str, removed: bool) {
+        p.with_host(|host| {
+            host.packages_mut()
+                .set_removed(id, removed, Some(("0.7.4", BUNDLED_DIGEST)))
+                .unwrap()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_record_under_a_former_id_is_satisfied_by_the_renamed_plugin() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = package(root.path(), "tasks", &["todo"]);
+        let p = plugins(root.path(), &[("tasks", tasks)]);
+        // The user's real install record: `todo`, bundled, not removed.
+        record(&p, "todo", false);
+        assert_eq!(desired(&p), ["tasks"]);
+        assert!(p.errors().is_empty(), "{:?}", p.errors().len());
+        let todo = p
+            .with_host(|host| host.packages().get("todo").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!todo.removed, "the old record is never marked removed");
+    }
+
+    #[test]
+    fn a_renamed_plugin_replaces_its_predecessor() {
+        let root = tempfile::tempdir().unwrap();
+        let old = package(&root.path().join("old"), "todo", &[]);
+        let new = package(root.path(), "tasks", &["todo"]);
+        let p = plugins(root.path(), &[("todo", old), ("tasks", new)]);
+        assert_eq!(desired(&p), ["tasks"]);
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn removal_under_a_former_id_applies_until_the_new_id_has_its_own_record() {
+        let root = tempfile::tempdir().unwrap();
+        let tasks = package(root.path(), "tasks", &["todo"]);
+        let p = plugins(root.path(), &[("tasks", tasks)]);
+        // An older device removed To-do.
+        record(&p, "todo", true);
+        assert!(desired(&p).is_empty());
+        // Added back on this device: the `tasks` record decides.
+        record(&p, "tasks", false);
+        assert_eq!(desired(&p), ["tasks"]);
+        record(&p, "tasks", true);
+        assert!(desired(&p).is_empty());
     }
 }

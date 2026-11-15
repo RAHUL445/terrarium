@@ -75,6 +75,10 @@ pub struct CommandInfo {
     pub owner: Owner,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin: Option<String>,
+    /// Ids the plugin had before a rename; `<former>.<name>` still runs
+    /// this command, as a deprecated alias.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_plugins: Vec<String>,
     /// The first sentence of `description`.
     pub summary: String,
     pub description: String,
@@ -210,8 +214,7 @@ fn history_target(
     let table = text(args, "table")?;
     let id = text(args, "id")?;
     let manifest = host
-        .manifests()
-        .find(|m| m.id == plugin)
+        .manifest(plugin)
         .ok_or_else(|| CommandError::new("not-found", format!("no plugin `{plugin}`")))?;
     if !manifest.history.iter().any(|t| t == table) {
         return Err(CommandError::new(
@@ -419,6 +422,7 @@ fn place(
             h: h.unwrap_or(dh),
             config,
             focus: None,
+            flow_order: None,
         });
         Ok(())
     })
@@ -488,6 +492,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
                 .manifests()
                 .map(|m| json!({
                     "id": m.id,
+                    "former_ids": m.former_ids,
                     "name": m.name,
                     "version": m.version,
                     "description": m.description,
@@ -506,7 +511,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
         description: "Run one plugin action on many items, at most 500. Give the items as `ids`, or as `where`: a query of the same plugin whose rows' ids are used. The action must be marked bulk; each item gets the same arguments plus its id. Returns how many were done and what failed for each item.",
         confirm: None,
         params: &[
-            ("plugin", ParamType::String, true, "Plugin id, e.g. todo"),
+            ("plugin", ParamType::String, true, "Plugin id, e.g. tasks"),
             ("op", ParamType::String, true, "A bulk action of that plugin, e.g. toggle"),
             ("ids", ParamType::Json, false, "Item ids, a list of at most 500"),
             ("where", ParamType::Json, false, "Instead of ids: {\"query\": name, \"params\": {...}} — a query of the same plugin whose rows' ids are used"),
@@ -657,6 +662,65 @@ const HOST_COMMANDS: &[HostCommand] = &[
         run: |host, space, args, d| service(host, "pages_list", Some(space), args, d),
     },
     HostCommand {
+        id: "folder.list", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Folders in a space, in stable position order.", confirm: None,
+        params: &[("include_archived", ParamType::Boolean, false, "Include folders in the trash")],
+        run: |host, space, args, d| service(host, "folders_list", Some(space), args, d),
+    },
+    HostCommand {
+        id: "folder.create", kind: Kind::Action, effect: Effect::Write, space: true,
+        description: "Create a folder in this space.", confirm: None,
+        params: &[("title", ParamType::String, true, "Folder title"), ("parent_id", ParamType::Id, false, "Parent folder id")],
+        run: |host, space, args, d| service(host, "folder_create", Some(space), args, d),
+    },
+    HostCommand {
+        id: "folder.update", kind: Kind::Action, effect: Effect::Write, space: false,
+        description: "Rename or move a folder.", confirm: None,
+        params: &[("id", ParamType::Id, true, "Folder id"), ("title", ParamType::String, false, "New title"), ("parent_id", ParamType::Id, false, "New parent folder id; null moves to root"), ("position", ParamType::Integer, false, "Position among siblings")],
+        run: |host, _, args, d| service(host, "folder_update", None, args, d),
+    },
+    HostCommand {
+        id: "folder.remove", kind: Kind::Action, effect: Effect::Destructive, space: false,
+        description: "Move a folder to the trash, optionally with its known descendants and pages.", confirm: Some("Move this folder to the trash?"),
+        params: &[("id", ParamType::Id, true, "Folder id"), ("subtree", ParamType::Boolean, false, "Also archive known descendants and their pages")],
+        run: |host, _, args, d| service(host, "folder_remove", None, args, d),
+    },
+    HostCommand {
+        id: "folder.restore", kind: Kind::Action, effect: Effect::Write, space: false,
+        description: "Restore a folder trash batch.", confirm: None,
+        params: &[("id", ParamType::Id, true, "Archived folder id")],
+        run: |host, _, args, d| service(host, "folder_restore", None, args, d),
+    },
+    HostCommand {
+        id: "page.folder_move", kind: Kind::Action, effect: Effect::Write, space: false,
+        description: "Move a page into a folder or to the space root.", confirm: None,
+        params: &[("page", ParamType::Id, true, "Page id"), ("folder_id", ParamType::Id, false, "Target folder id; null moves to root"), ("position", ParamType::Integer, false, "Position in the folder")],
+        run: |host, _, args, d| service(host, "page_move", None, args, d),
+    },
+    HostCommand {
+        id: "page.trash", kind: Kind::Action, effect: Effect::Destructive, space: false,
+        description: "Move a page to the trash.", confirm: Some("Move this page to the trash?"),
+        params: &[("page", ParamType::Id, true, "Page id")],
+        run: |host, _, args, d| service(host, "page_trash", None, args, d),
+    },
+    HostCommand {
+        id: "page.restore", kind: Kind::Action, effect: Effect::Write, space: false,
+        description: "Restore a page from the trash.", confirm: None,
+        params: &[("page", ParamType::Id, true, "Archived page id")],
+        run: |host, _, args, d| service(host, "page_restore", None, args, d),
+    },
+    HostCommand {
+        id: "pages.trash", kind: Kind::Query, effect: Effect::Read, space: true,
+        description: "Pages in a space's trash.", confirm: None, params: &[],
+        run: |host, space, args, d| service(host, "pages_trash", Some(space), args, d),
+    },
+    HostCommand {
+        id: "page.layout", kind: Kind::Action, effect: Effect::Write, space: false,
+        description: "Set a page layout to grid or flow.", confirm: None,
+        params: &[("page", ParamType::Id, true, "Page id"), ("mode", ParamType::Enum, true, "Layout: grid or flow")],
+        run: |host, _, args, d| service(host, "page_layout", None, args, d),
+    },
+    HostCommand {
         id: "view.list",
         kind: Kind::Query,
         effect: Effect::Read,
@@ -731,6 +795,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
             ("title", ParamType::String, true, "Page title, at most 40 characters"),
             ("icon", ParamType::String, false, "Icon name from the host's set"),
             ("focus", ParamType::String, false, "Project or tag the page's widgets focus on"),
+            ("period", ParamType::Json, false, "Page date period: {mode, timezone, start?, end?}"),
         ],
         run: |host, space, args, d| service(host, "page_create", Some(space), args, d),
     },
@@ -747,6 +812,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
             ("icon", ParamType::String, false, "Icon name; null removes it"),
             ("position", ParamType::Integer, false, "Position in the page list"),
             ("focus", ParamType::String, false, "Project or tag to focus on"),
+            ("period", ParamType::Json, false, "Page date period; null clears it"),
         ],
         run: |host, _, args, d| service(host, "page_update", None, args, d),
     },
@@ -772,7 +838,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
         confirm: None,
         params: &[
             ("page", ParamType::Id, true, "Page id"),
-            ("widget", ParamType::String, true, "`plugin/widget`, e.g. `todo/today`, or `_host/text` for the host's own"),
+            ("widget", ParamType::String, true, "`plugin/widget`, e.g. `tasks/today`, or `_host/text` for the host's own"),
             ("x", ParamType::Integer, false, "Column, 0 to 11"),
             ("y", ParamType::Integer, false, "Row"),
             ("w", ParamType::Integer, false, "Width in columns, 1 to 12"),
@@ -882,8 +948,20 @@ const HOST_COMMANDS: &[HostCommand] = &[
         params: &[("ref", ParamType::String, true, "Item ref")],
         run: |host, space, args, _| {
             let item = text(args, "ref")?;
-            let links: Vec<_> = host.links().list(space, item)?.into_iter().map(|link| {
-                let out = link.source == item;
+            // Links may name a renamed plugin by any of its ids.
+            let forms = host.ref_forms(item);
+            let mut seen = std::collections::BTreeSet::new();
+            let mut found = Vec::new();
+            for form in &forms {
+                for link in host.links().list(space, form)? {
+                    if seen.insert(link.id.clone()) {
+                        found.push(link);
+                    }
+                }
+            }
+            found.sort_by_key(|link| std::cmp::Reverse(link.created_ms));
+            let links: Vec<_> = found.into_iter().map(|link| {
+                let out = forms.contains(&link.source);
                 json!({"id":link.id,"source":link.source,"target":link.target,"kind":link.kind,"created_ms":link.created_ms,
                     "other":if out { &link.target } else { &link.source },"direction":if out { "out" } else { "in" }})
             }).collect();
@@ -894,7 +972,7 @@ const HOST_COMMANDS: &[HostCommand] = &[
         id: "ref.backlinks", kind: Kind::Query, effect: Effect::Read, space: true,
         description: "Items that mention a ref in their text, most recent first.",
         confirm: None,
-        params: &[("ref", ParamType::String, true, "Ref like `todo/tasks/<id>`")],
+        params: &[("ref", ParamType::String, true, "Ref like `tasks/tasks/<id>`")],
         run: |host, space, args, _| {
             let to = args.get("ref").and_then(Value::as_str)
                 .filter(|text| crate::ItemRef::parse(text).is_some())
@@ -908,7 +986,21 @@ const HOST_COMMANDS: &[HostCommand] = &[
                     _ => indexing.push(plugin),
                 }
             }
-            let refs = host.with_index(|index, _| index.mentioning(space, to))?;
+            // Text may name a renamed plugin by any of its ids.
+            let forms = host.ref_forms(to);
+            let mut refs: Vec<String> = Vec::new();
+            for form in &forms {
+                for found in host.with_index(|index, _| index.mentioning(space, form))? {
+                    // Like search, hand out refs under the storage id.
+                    let found = match found.split_once('/') {
+                        Some((plugin, rest)) => format!("{}/{rest}", host.storage_plugin_id(plugin)),
+                        None => found,
+                    };
+                    if !refs.contains(&found) {
+                        refs.push(found);
+                    }
+                }
+            }
             Ok(json!({"mentions":refs,"indexing":indexing}))
         },
     },
@@ -1043,6 +1135,7 @@ impl HostCommand {
             kind: self.kind,
             owner: Owner::Host,
             plugin: None,
+            former_plugins: Vec::new(),
             summary: summary(self.description),
             description: self.description.into(),
             params: Some(params),
@@ -1075,6 +1168,7 @@ fn operation_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
         kind: Kind::Action,
         owner: Owner::Plugin,
         plugin: Some(m.id.clone()),
+        former_plugins: m.former_ids.clone(),
         summary: summary(&op.description),
         description: op.description.clone(),
         params: op.params.clone(),
@@ -1116,6 +1210,7 @@ pub(crate) fn query_info(m: &Manifest, name: &str) -> Option<CommandInfo> {
         kind: Kind::Query,
         owner: Owner::Plugin,
         plugin: Some(m.id.clone()),
+        former_plugins: m.former_ids.clone(),
         summary: summary(&q.description),
         description: q.description.clone(),
         params: Some(params),
@@ -1159,7 +1254,7 @@ fn find(host: &PluginHost, kind: Kind, id: &str) -> Option<CommandInfo> {
         return Some(c.info());
     }
     let (plugin, name) = id.split_once('.')?;
-    let m = host.manifests().find(|m| m.id == plugin)?;
+    let m = host.manifest(plugin)?;
     match kind {
         Kind::Action => operation_info(m, name),
         Kind::Query => query_info(m, name),
@@ -1393,13 +1488,14 @@ pub fn invoke_with(
         (Owner::Plugin, Kind::Query) => {
             let mut values = args;
             fill_context(host, &info.context, &mut values);
+            // The id may name the plugin by a former id; `info` has the current one.
             let plugin = info.plugin.as_deref().unwrap_or_default();
-            let name = &id[plugin.len() + 1..];
+            let name = id.split_once('.').map_or("", |(_, name)| name);
             Ok(plain(json!(host.query_in(space, plugin, name, &values)?)))
         }
         (Owner::Plugin, Kind::Action) => {
             let plugin = info.plugin.as_deref().unwrap_or_default();
-            let op = &id[plugin.len() + 1..];
+            let op = id.split_once('.').map_or("", |(_, op)| op);
             let args = Value::Object(args);
             if caller == Caller::App && !options.dry_run {
                 return Ok(plain(host.call_in(space, plugin, op, &args)?));
@@ -1466,7 +1562,9 @@ pub fn search(
 ) -> Value {
     let indexed_plugins: Vec<_> = host
         .manifests()
-        .filter(|m| !m.index.is_empty() && plugins.is_none_or(|only| only.contains(&m.id)))
+        .filter(|m| {
+            !m.index.is_empty() && plugins.is_none_or(|only| only.iter().any(|id| m.answers_to(id)))
+        })
         .map(|m| m.id.clone())
         .collect();
     let mut catch_up_errors = Vec::new();
@@ -1492,7 +1590,7 @@ pub fn search(
     host.with_index(|index, host| {
         let manifests: Vec<_> = host
             .manifests()
-            .filter(|m| plugins.is_none_or(|only| only.contains(&m.id)))
+            .filter(|m| plugins.is_none_or(|only| only.iter().any(|id| m.answers_to(id))))
             .collect();
         let mut errors = catch_up_errors;
         let mut fallback: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -1594,7 +1692,8 @@ pub fn search(
             results.push(json!({
                 "space":space,"plugin":hit.plugin,"id":hit.item,"title":hit.title,
                 "subtitle":hit.subtitle,"kind":hit.kind,"snippet":snippet,
-                "ref":format!("{}/{}/{}",hit.plugin,hit.table,hit.item),
+                // Refs keep the storage id so devices on older builds resolve them.
+                "ref":format!("{}/{}/{}",m.storage_id(),hit.table,hit.item),
                 "open":search_open(m, &json!(hit.item)),
             }));
         }
@@ -1806,7 +1905,12 @@ mod tests {
 
     #[test]
     fn saved_view_commands_have_the_requested_scope_and_arguments() {
-        let command = |id| HOST_COMMANDS.iter().find(|command| command.id == id).unwrap();
+        let command = |id| {
+            HOST_COMMANDS
+                .iter()
+                .find(|command| command.id == id)
+                .unwrap()
+        };
         assert_eq!(command("view.list").kind, Kind::Query);
         assert!(command("view.list").space);
         assert_eq!(command("view.get").kind, Kind::Query);

@@ -60,6 +60,7 @@ function rendererHarness(environment = {}) {
       if (selector.includes('.pp-recorder')) return nodes.filter(node => node.className?.includes('pp-recorder') && ['recording', 'saving'].includes(node.dataset.state));
       if (/^\.[A-Za-z0-9_-]+$/.test(selector)) return nodes.filter(node => String(node.className || '').split(/\s+/).includes(selector.slice(1)));
       if (selector === '[data-pp-name]') return nodes.filter(node => node.dataset.ppName);
+      if (selector === '[data-pp-select]') return nodes.filter(node => node.dataset.ppSelect !== undefined);
       if (selector === 'form[data-pp-draft]') return nodes.filter(node => node.tag === 'form' && node.attrs['data-pp-draft']);
       if (selector === 'input' || selector === 'select') return nodes.filter(node => node.tag === selector);
       if (selector === 'form') return nodes.filter(node => node.tag === 'form');

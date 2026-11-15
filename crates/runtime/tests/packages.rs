@@ -18,7 +18,10 @@ fn todo_dir() -> PathBuf {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT
         .get_or_init(|| {
-            let dir = support::package_root().join("todo").canonicalize().unwrap();
+            let dir = support::package_root()
+                .join("tasks")
+                .canonicalize()
+                .unwrap();
             build_plugin(&dir).unwrap();
             dir
         })
@@ -155,7 +158,7 @@ fn install_update_and_roll_back_across_a_schema_change() {
     assert_eq!(host.load(&dir).unwrap().version, "9.0.0");
 
     // Back to v1: the database keeps the newer schema and the data.
-    let rolled = host.packages_mut().rollback("todo").unwrap();
+    let rolled = host.packages_mut().rollback("tasks").unwrap();
     assert_eq!(rolled.version, v1.manifest().version);
     assert_eq!(rolled.previous_version.as_deref(), Some("9.0.0"));
     let dir = host.packages().materialize(&rolled).unwrap().unwrap();
@@ -190,7 +193,7 @@ fn the_installed_set_and_package_files_sync_to_other_devices() {
     let (batch, _) = laptop.packages().store().export_since(0).unwrap();
     phone.packages_mut().store_mut().import(&batch).unwrap();
 
-    let installed = phone.packages().get("todo").unwrap().unwrap();
+    let installed = phone.packages().get("tasks").unwrap().unwrap();
     assert_eq!(installed.digest, package.digest());
     let dir = phone.packages().materialize(&installed).unwrap().unwrap();
     phone.load(&dir).unwrap();
@@ -202,11 +205,11 @@ fn the_installed_set_and_package_files_sync_to_other_devices() {
     // Removing on one device removes everywhere; the data stays.
     phone
         .packages_mut()
-        .set_removed("todo", true, None)
+        .set_removed("tasks", true, None)
         .unwrap();
     let (batch, _) = phone.packages().store().export_since(0).unwrap();
     laptop.packages_mut().store_mut().import(&batch).unwrap();
-    assert!(laptop.packages().get("todo").unwrap().unwrap().removed);
+    assert!(laptop.packages().get("tasks").unwrap().unwrap().removed);
 }
 
 #[test]

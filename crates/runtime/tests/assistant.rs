@@ -129,7 +129,7 @@ fn assistant_rejects_unavailable_ai_invalid_messages_and_unknown_spaces() {
 fn task_context_is_explicit_private_filtered_and_contains_no_notes() {
     let data = TempDir::new().unwrap();
     let mut host = host(&data, true);
-    let dir = support::package_root().join("todo");
+    let dir = support::package_root().join("tasks");
     terrarium_runtime::build_plugin(&dir).unwrap();
     host.load(&dir).unwrap();
     let task = host

@@ -44,6 +44,12 @@
 
   function resolve(input, scope) {
     if (typeof input === "string") {
+      // `{{a && b}}` / `{{a || b}}`: each term is a plain condition; `&&` binds tighter.
+      const combined = input.match(/^\{\{(.*(?:&&|\|\|).*)\}\}$/);
+      if (combined && !combined[1].includes("{{")) {
+        const term = (text) => truthy(resolve(`{{${text.trim()}}}`, scope));
+        return combined[1].split("||").some((or) => or.split("&&").every(term));
+      }
       const whole = input.match(WHOLE);
       if (whole) {
         const [, not, path, op, word] = whole;
@@ -72,11 +78,24 @@
     if (value == null || value === "") return "";
     if (format === "date") return Number(value) ? new Date(Number(value)).toLocaleDateString() : "";
     if (format === "datetime") return Number(value) ? new Date(Number(value)).toLocaleString() : "";
+    if (format === "tags") return String(value).split(",").map((tag) => tag.trim().replace(/^#+/, "")).filter(Boolean).map((tag) => `#${tag}`).join(" ");
+    if (format === "short-time") return shortTimes(value);
     if (format === "local-time") return String(value).replace(/\b([01]\d|2[0-3]):([0-5]\d)\b/g, (_, hour, minute) => {
       const date = new Date(2000, 0, 1, Number(hour), Number(minute));
       return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     });
     return value;
+  }
+
+  // "14:00" → "2pm", "14:30" → "2:30pm"; a time after a date reads
+  // "10 Dec · 2pm". Other text is left as it is.
+  function shortTime(hour, minute) {
+    const h = Number(hour) % 12 || 12;
+    return `${h}${Number(minute) ? `:${minute}` : ""}${Number(hour) < 12 ? "am" : "pm"}`;
+  }
+  function shortTimes(value) {
+    return String(value).replace(/(\S)?(\s*)\b([01]?\d|2[0-3]):([0-5]\d)\b/g,
+      (_, before, space, hour, minute) => before ? `${before}${space ? " · " : space}${shortTime(hour, minute)}` : `${space}${shortTime(hour, minute)}`);
   }
 
   // Adds `$ref` ("plugin/table/id") to a row when the node names its table.
@@ -282,6 +301,48 @@
   let uid = 0;
   const nextId = (prefix) => `${prefix}-${++uid}`;
 
+  // Small per-device preferences (e.g. a remembered disclosure). Storage may
+  // be missing or blocked; then the choice lasts for this view only.
+  function deviceStorage() {
+    try { return window.terrariumStorage || globalThis.localStorage || null; } catch (_) { return null; }
+  }
+  function deviceGet(key) {
+    try { return deviceStorage()?.getItem(key) ?? null; } catch (_) { return null; }
+  }
+  function deviceSet(key, value) {
+    try { deviceStorage()?.setItem(key, value); } catch (_) {}
+  }
+
+  // Workspace sidebars: ⌘\ on macOS, Ctrl+\ elsewhere, desktop widths only.
+  function isMac() {
+    return typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent || "");
+  }
+  function sidebarShortcutLabel() { return isMac() ? "⌘\\" : "Ctrl+\\"; }
+  function wideViewport() {
+    try { return globalThis.matchMedia ? globalThis.matchMedia("(min-width: 900px)").matches : true; } catch (_) { return true; }
+  }
+  function typingTarget(target) {
+    const tag = String(target?.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || Boolean(target?.isContentEditable);
+  }
+  /** Handles the sidebar shortcut for `view`; true when it toggled one. */
+  function sidebarShortcut(event, view) {
+    if (!event || !view || view.disposed || event.defaultPrevented || event.altKey || event.shiftKey) return false;
+    if (event.key !== "\\" && event.code !== "Backslash") return false;
+    if (isMac() ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) return false;
+    if (typingTarget(event.target) || !wideViewport()) return false;
+    return view.toggleSidebar();
+  }
+  // Collapsed, a nav entry's label is hidden: its tooltip names it instead.
+  function railTip(button, collapsed) {
+    const tip = collapsed ? button.dataset.ppRailTip : button.dataset.ppTip;
+    if (tip) button.title = tip;
+    else button.removeAttribute("title");
+  }
+  function railTips(nav, collapsed) {
+    for (const button of nav.querySelectorAll(".pp-nav-item")) railTip(button, collapsed);
+  }
+
   // Host-owned labels stay on DOM nodes, never in plugin template scope.
   class RefChips {
     constructor(view) {
@@ -469,6 +530,41 @@
     return { node, search, move, choose, close, isOpen: () => !node.hidden, bind };
   }
 
+  // A panel anchored to its trigger. Escape and an outside press close it;
+  // closing with the keyboard returns focus to the trigger.
+  function popover(view, wrap, trigger, panel, build) {
+    let open = false;
+    const outside = (event) => { if (!wrap.contains(event.target)) hide(false); };
+    const hide = (focus) => {
+      if (!open) return;
+      open = false;
+      panel.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      wrap.dataset.open = "false";
+      document.removeEventListener?.("pointerdown", outside, true);
+      if (focus) trigger.focus();
+    };
+    const show = () => {
+      if (open || build() === false) return;
+      open = true;
+      panel.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      wrap.dataset.open = "true";
+      document.addEventListener?.("pointerdown", outside, true);
+    };
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.addEventListener("click", () => (open ? hide(true) : show()));
+    panel.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault?.();
+      event.stopPropagation?.();
+      hide(true);
+    });
+    view.cleanups.push(() => document.removeEventListener?.("pointerdown", outside, true));
+    return { show, hide, isOpen: () => open };
+  }
+
   // One mounted template: its state, its lists, and its host bridge.
   class View {
     constructor(root, template, bridge, options = {}) {
@@ -502,9 +598,25 @@
       this.cleanups = [];
       this.librarySnapshots = new Map(Object.entries(options.snapshot?.libraries || {}));
       this.libraries = new Map();
+      this.dataViewSnapshots = new Map(Object.entries(options.snapshot?.dataViews || {}));
+      this.dataViews = new Map();
+      this.dataViewSequence = 0;
+      // Collapsible workspaces on this page, for the sidebar shortcut.
+      this.workspaces = [];
+      this.workspaceSpecs = [];
       this.timers = new Map();
+      // Item sheets currently shown in the host's dock (see `sheet`).
+      this.docked = new Set();
       this.disposed = false;
       lifecycle.activeViews++; lifecycle.mountedTotal++;
+    }
+
+    /** Toggles the first shown collapsible workspace; false when none. */
+    toggleSidebar() {
+      const target = this.workspaces.find((item) => item.node.isConnected !== false);
+      if (!target) return false;
+      target.toggle();
+      return true;
     }
 
     schedule(run, delay, repeat = false, onCancel = null) {
@@ -548,6 +660,7 @@
       this.root.replaceChildren();
       this.lists = [];
       this.watchers = [];
+      this.workspaces = [];
       profile.measureSync("render/mount", () => {
         const body = this.node(this.template.body, this.scope());
         if (body) this.root.append(body);
@@ -578,7 +691,7 @@
       return { state: structuredClone(this.state), libraries: Object.fromEntries(this.librarySnapshots), forms: [...this.root.querySelectorAll("form[data-pp-draft]")].map(form => {
         const fields = [...form.querySelectorAll("[data-pp-name]")];
         return { names: fields.map(input => input.dataset.ppName).join("|"), values: fields.map(input => ({ value: input.value, checked: input.checked })) };
-      }) };
+      }), dataViews: Object.fromEntries([...this.dataViewSnapshots, ...[...this.dataViews].map(([key, view]) => [key, view.snapshot?.()])]) };
     }
 
     scope(extra = {}) {
@@ -589,16 +702,23 @@
       const offset = -new Date().getTimezoneOffset() * 60000;
       const touch = typeof matchMedia === "function" && matchMedia("(pointer: coarse)").matches;
       const phone = typeof navigator !== "undefined" ? /Android|iPhone|iPad/.test(navigator.userAgent || "") : touch;
-      return { state: this.state, $gesture: touch ? "Tap" : "Click", $remind_on: phone ? "phone" : "desktop", $today: today, $weekday: weekday, $utc_offset_ms: offset, $config: this.config, $size: this.options.size || "regular", $page: this.page, ...extra };
+      return { state: this.state, $gesture: touch ? "Tap" : "Click", $remind_on: phone ? "phone" : "desktop", $today: today, $weekday: weekday, $utc_offset_ms: offset, $now: Date.now(), $config: this.config, $size: this.options.size || "regular", $page: this.page, ...extra };
     }
 
     setState(path, value) {
+      this.setStates([[path, value]]);
+    }
+
+    // Several keys change together with one watcher pass and one refresh.
+    setStates(entries) {
       if (this.disposed) return;
-      const key = path.replace(/^state\./, "");
-      if (this.state[key] === value) return;
+      const changes = entries
+        .map(([path, value]) => [String(path).replace(/^state\./, ""), value])
+        .filter(([key, value]) => this.state[key] !== value);
+      if (!changes.length) return;
       const active = document.activeElement;
       const focusKey = this.root.contains(active) ? active?.dataset?.ppFocus : null;
-      this.state[key] = value;
+      for (const [key, value] of changes) this.state[key] = value;
       for (const watch of this.watchers) watch();
       this.refresh().then(() => {
         if (!focusKey || this.disposed) return;
@@ -623,12 +743,16 @@
       // A user may keep typing while a save is in flight. Drain those edits
       // too before allowing the host to replace this view. Only autosave
       // forms can drain dirty edits here; manual drafts travel in snapshot().
-      const forms = [...this.root.querySelectorAll("form")];
+      // A docked item sheet lives in the host's dock, outside the root.
+      const forms = [...this.root.querySelectorAll("form"), ...[...this.docked].flatMap((dialog) => [...dialog.querySelectorAll("form")])];
       do {
         const detail = { waits: [] };
         for (const form of forms) form.dispatchEvent(new CustomEvent("pp-flush", { detail }));
         if ((await Promise.all(detail.waits)).some((ok) => ok === false)) return false;
       } while (forms.some((form) => form.dataset?.ppAutosave === "true" && form.dataset.ppUnsaved === "true"));
+      for (const view of [...this.libraries.values(), ...this.dataViews.values()]) {
+        if (await view.flush?.({ unmount }) === false) return false;
+      }
       return true;
     }
 
@@ -648,7 +772,7 @@
       }
       // Local state changes, e.g. {"set": {"state.selected": "{{row.id}}"}}.
       if (action.set) {
-        for (const [path, value] of Object.entries(action.set)) this.setState(path, resolve(value, scope));
+        this.setStates(Object.entries(action.set).map(([path, value]) => [path, resolve(value, scope)]));
         if (!action.op && !action.open && !action.link) return true;
       }
       // Copies text, e.g. {"copy": "{{row.copy_text}}", "success": "Copied"}.
@@ -690,7 +814,7 @@
           label: resolve(followup.label, after), run: () => this.act(resolve(followup.action, after), after),
         } : null);
         // State changes once the operation succeeded, e.g. closing a sheet.
-        for (const [path, value] of Object.entries(action.then || {})) this.setState(path, resolve(value, after));
+        this.setStates(Object.entries(action.then || {}).map(([path, value]) => [path, resolve(value, after)]));
         this.bridge.changed();
         return true;
       } catch (e) {
@@ -698,6 +822,17 @@
         this.bridge.toast(String(e), "error");
         return false;
       }
+    }
+
+    async confirmed(action, scope, label, danger) {
+      if (action?.confirm) {
+        const question = resolve(action.confirm, scope);
+        const ok = window.terrariumConfirm
+          ? await window.terrariumConfirm(question, { confirm: label || "OK", danger: Boolean(danger) })
+          : window.confirm(question);
+        if (!ok) return false;
+      }
+      return this.act(action, scope);
     }
 
     async undoSelected(undo, ids, scope) {
@@ -793,11 +928,26 @@
   }
 
   const COMPONENTS = {
-    "view-library"(spec) {
+    "view-library"(spec, scope) {
       const node = el("div", "pp-view-library");
       if (!this.bridge.mountViewLibrary) { node.textContent = "Saved views are unavailable in this host."; return node; }
       const key = spec.id || spec.query || "default";
-      const library = this.bridge.mountViewLibrary(node, spec, { snapshot: this.librarySnapshots.get(key) });
+      const live = () => ({ ...scope, state: this.state });
+      // `selected` opens one saved view; `draft` starts a new view from page state.
+      const resolved = { ...spec };
+      if (spec.selected !== undefined) resolved.selected = String(resolve(spec.selected, live()) ?? "");
+      if (spec.draft !== undefined) resolved.draft = resolve(spec.draft, live());
+      const onSaved = spec.on_save ? (record) => this.act(spec.on_save, { ...live(), value: record }) : undefined;
+      const library = this.bridge.mountViewLibrary(node, resolved, { snapshot: this.librarySnapshots.get(key), onSaved });
+      if (spec.selected !== undefined) {
+        let current = resolved.selected;
+        this.watchers.push(() => {
+          const next = String(resolve(spec.selected, live()) ?? "");
+          if (next === current) return;
+          current = next;
+          library?.select?.(next);
+        });
+      }
       this.libraries.set(key, library);
       this.cleanups.push(() => {
         this.librarySnapshots.set(key, library?.snapshot?.());
@@ -807,17 +957,656 @@
       this.lists.push(() => library?.refresh());
       return node;
     },
-    /** Host-themed navigation and content, stacked on narrow screens. */
+    "data-view"(spec, scope) {
+      const node = el("div", "pp-data-view-host");
+      if (!this.bridge.mountDataView) { node.textContent = "Data views are unavailable in this host."; return node; }
+      const explicitId = spec.id == null ? "" : String(resolve(spec.id, scope) ?? "");
+      const key = explicitId || `data-view-${++this.dataViewSequence}`;
+      const resolveSpec = () => ({ ...spec, query: resolve(spec.query, scope), config: resolve(spec.config || {}, scope) });
+      let resolved = resolveSpec();
+      let signature = JSON.stringify(resolved);
+      let dataView = this.bridge.mountDataView(node, resolved, { snapshot: this.dataViewSnapshots.get(key) });
+      this.dataViews.set(key, dataView);
+      this.cleanups.push(() => {
+        this.dataViewSnapshots.set(key, dataView?.snapshot?.());
+        if (this.dataViews.get(key) === dataView) this.dataViews.delete(key);
+        dataView?.dispose();
+      });
+      let initialized = false;
+      this.lists.push(() => {
+        const next = resolveSpec();
+        const nextSignature = JSON.stringify(next);
+        if (!initialized) { initialized = true; return dataView?.ready; }
+        if (nextSignature !== signature) {
+          this.dataViewSnapshots.set(key, dataView?.snapshot?.());
+          dataView?.dispose();
+          resolved = next;
+          signature = nextSignature;
+          dataView = this.bridge.mountDataView(node, resolved, { snapshot: this.dataViewSnapshots.get(key) });
+          this.dataViews.set(key, dataView);
+          return dataView?.ready;
+        }
+        return dataView?.refresh();
+      });
+      return node;
+    },
+    /**
+     * Host-themed navigation beside content. Below 900px the navigation opens
+     * from a "View ▾" button above the content. `collapsible` adds a sidebar
+     * toggle at the start of the content's head row (⌘\ / Ctrl+\); collapsed
+     * on desktop, the navigation becomes an icon rail. The choice is kept per
+     * device and page; `collapsed` binds it to state (its default applies
+     * until the person chooses).
+     * {navigation, content, label?, menu_label?, collapsible?, collapsed?: "state.key", id?}
+     */
     workspace(spec, scope) {
       const node = el("div", "pp-workspace");
       const nav = el("nav", "pp-workspace-nav");
+      nav.id = nextId("pp-workspace-nav");
       nav.setAttribute("aria-label", resolve(spec.label || "Collections", scope));
       const content = el("div", "pp-workspace-content");
+      const live = () => ({ ...scope, state: this.state });
+      const toggle = el("button", "pp-button pp-workspace-toggle");
+      toggle.type = "button";
+      toggle.setAttribute("aria-controls", nav.id);
+      toggle.setAttribute("aria-expanded", "false");
+      const paintToggle = () => {
+        const label = String(resolve(spec.menu_label || "View", live()) ?? "") || "View";
+        toggle.replaceChildren(el("span", "pp-workspace-toggle-label", label), icon("chevron-down"));
+        toggle.setAttribute("aria-label", `${resolve(spec.label || "Collections", scope)}: ${label}`);
+      };
+      paintToggle();
+      if (/state\./.test(String(spec.menu_label || ""))) this.watchers.push(paintToggle);
+      let open = false;
+      const outside = (event) => { if (!node.contains(event.target)) setOpen(false); };
+      const setOpen = (on, focus = false) => {
+        if (open === on) return;
+        open = on;
+        node.dataset.navOpen = String(on);
+        toggle.setAttribute("aria-expanded", String(on));
+        if (on) document.addEventListener?.("pointerdown", outside, true);
+        else document.removeEventListener?.("pointerdown", outside, true);
+        if (on) (nav.querySelector("[aria-current]") || nav.querySelector("button"))?.focus?.();
+        else if (focus) toggle.focus();
+      };
+      this.cleanups.push(() => document.removeEventListener?.("pointerdown", outside, true));
+      toggle.addEventListener("click", () => setOpen(!open));
+      nav.addEventListener("click", (event) => {
+        if (open && event.target?.closest?.(".pp-nav-item")) setOpen(false);
+      });
+      nav.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || !open) return;
+        event.preventDefault?.();
+        setOpen(false, true);
+      });
+      node.dataset.navOpen = "false";
+      let collapse = null;
+      if (spec.collapsible) {
+        const bind = typeof spec.collapsed === "string" && /^state\.[a-zA-Z_]\w*$/.test(spec.collapsed) ? spec.collapsed : null;
+        if (!this.workspaceSpecs.includes(spec)) this.workspaceSpecs.push(spec);
+        const index = this.workspaceSpecs.indexOf(spec);
+        const key = `terrarium.workspace.${this.options.location || this.bridge.plugin || "page"}.${spec.id ? String(resolve(spec.id, scope)) : index}`;
+        const stored = deviceGet(key);
+        let collapsed = stored === "collapsed" || stored === "expanded" ? stored === "collapsed"
+          : bind ? truthy(lookup(this.scope(), bind)) : false;
+        // The device's choice wins over the template default; state follows.
+        if (bind) this.state[bind.slice(6)] = collapsed;
+        collapse = el("button", "pp-button pp-ghost pp-icon-button pp-workspace-collapse");
+        collapse.type = "button";
+        collapse.setAttribute("aria-controls", nav.id);
+        collapse.append(icon("panel-left"));
+        const paint = () => {
+          node.dataset.collapsed = String(collapsed);
+          const label = collapsed ? "Show sidebar" : "Hide sidebar";
+          collapse.setAttribute("aria-label", label);
+          collapse.setAttribute("aria-expanded", String(!collapsed));
+          collapse.setAttribute("aria-keyshortcuts", isMac() ? "Meta+\\" : "Control+\\");
+          collapse.title = `${label} (${sidebarShortcutLabel()})`;
+          railTips(nav, collapsed);
+        };
+        const set = (next) => {
+          if (next === collapsed) return;
+          collapsed = next;
+          setOpen(false);
+          paint();
+          deviceSet(key, collapsed ? "collapsed" : "expanded");
+          if (bind) this.setState(bind, collapsed);
+        };
+        collapse.addEventListener("click", () => { set(!collapsed); collapse.focus(); });
+        // Rail entries name themselves on hover/focus (their labels are hidden).
+        const tip = (event) => {
+          const button = event.target?.closest?.(".pp-nav-item");
+          if (button) railTip(button, collapsed);
+        };
+        nav.addEventListener("pointerover", tip);
+        nav.addEventListener("focusin", tip);
+        if (bind) this.watchers.push(() => {
+          const next = truthy(lookup(this.scope(), bind));
+          if (next !== collapsed) { collapsed = next; paint(); deviceSet(key, collapsed ? "collapsed" : "expanded"); }
+        });
+        const handle = { node, toggle: () => set(!collapsed), isCollapsed: () => collapsed };
+        this.workspaces.push(handle);
+        this.cleanups.push(() => { this.workspaces = this.workspaces.filter((item) => item !== handle); });
+        paint();
+      }
       const navigation = this.node(spec.navigation, scope);
       const main = this.node(spec.content, scope);
       if (navigation) nav.append(navigation);
+      content.append(toggle);
       if (main) content.append(main);
+      if (collapse) {
+        // At the start of the content's head row (a row stack, first), or
+        // floating in the content's top-left padding when there is none.
+        const isRow = (n) => n && typeof n !== "string" && String(n.className || "").split(/\s+/).includes("pp-stack") && n.style?.flexDirection === "row";
+        const first = main && typeof main !== "string" ? (main.children || [])[0] : null;
+        const head = isRow(main) ? main : isRow(first) ? first : null;
+        if (head) { head.prepend(collapse); node.dataset.collapsePlace = "head"; }
+        else { content.append(collapse); node.dataset.collapsePlace = "float"; }
+      }
       node.append(nav, content);
+      return node;
+    },
+
+    /**
+     * A sidebar group of views: {title?, add?: {label, action}, items: [...]}
+     * or {query, params, item} (one entry per row), or `source: "saved-views"`
+     * (the host's saved views for this plugin as rows {id, title, icon}).
+     * Static items see the query's first row as `row` (e.g. counts).
+     * Entry: {label, icon, color, count, tooltip, key, selected, action, menu}.
+     */
+    nav(spec, scope) {
+      const node = el("div", "pp-nav");
+      let foldHeading = null;
+      const title = spec.title ? String(resolve(spec.title, scope) ?? "") : "";
+      if (title) {
+        const head = el("div", "pp-nav-head");
+        // `collapsible: true`: the title is a disclosure button that hides the
+        // group's entries; `collapsed: true` starts it closed. The device
+        // remembers the choice per plugin and title.
+        const foldable = spec.collapsible === true;
+        const heading = foldable ? el("button", "pp-nav-title pp-nav-fold") : el("span", "pp-nav-title");
+        if (foldable) {
+          foldHeading = heading;
+          heading.type = "button";
+          heading.append(el("span", "pp-nav-title-text", title), icon("chevron-down"));
+        } else heading.textContent = title;
+        heading.id = nextId("pp-nav");
+        node.setAttribute("role", "group");
+        node.setAttribute("aria-labelledby", heading.id);
+        head.append(heading);
+        if (spec.add) {
+          const label = String(resolve(spec.add.label || `Add to ${title}`, scope));
+          const add = el("button", "pp-button pp-ghost pp-icon-button pp-nav-add");
+          add.type = "button";
+          add.append(icon("plus"));
+          add.setAttribute("aria-label", label);
+          add.title = label;
+          add.addEventListener("click", () => this.act(spec.add.action, scope));
+          head.append(add);
+        }
+        node.append(head);
+      } else if (spec.label) {
+        node.setAttribute("role", "group");
+        node.setAttribute("aria-label", resolve(spec.label, scope));
+      }
+      const items = el("ul", "pp-nav-items");
+      node.append(items);
+      if (foldHeading) {
+        const heading = foldHeading;
+        const key = `terrarium.nav.${this.bridge.plugin || "page"}.${title}`;
+        const stored = deviceGet(key);
+        let folded = stored === "closed" || stored === "open" ? stored === "closed" : spec.collapsed === true;
+        const paintFold = () => {
+          node.dataset.folded = String(folded);
+          heading.setAttribute("aria-expanded", String(!folded));
+        };
+        heading.addEventListener("click", () => { folded = !folded; paintFold(); deviceSet(key, folded ? "closed" : "open"); });
+        heading.setAttribute("aria-controls", items.id = nextId("pp-nav-items"));
+        paintFold();
+      }
+      const live = (s) => ({ ...s, state: this.state });
+      let rows = [];
+      let entries = [];
+      let region = { lists: [], watchers: [], cleanups: [] };
+      this.cleanups.push(() => this.release(region));
+      const sync = () => {
+        for (const entry of entries) {
+          if (truthy(resolve(entry.spec.selected, live(entry.scope)))) entry.button.setAttribute("aria-current", "page");
+          else entry.button.removeAttribute("aria-current");
+        }
+      };
+      const draw = () => {
+        const focused = node.contains(document.activeElement) ? document.activeElement?.dataset?.ppNavKey : null;
+        const list = spec.item ? rows.map((row) => [spec.item, { ...scope, row }]) : (spec.items || []).map((item) => [item, { ...scope, row: rows[0] || {} }]);
+        entries = [];
+        this.release(region);
+        items.replaceChildren();
+        region = this.region(() => { for (const [item, s] of list) {
+          if ("if" in item && !truthy(resolve(item.if, live(s)))) continue;
+          const label = String(resolve(item.label, s) ?? "");
+          const li = el("li", "pp-nav-row");
+          const button = el("button", "pp-nav-item");
+          button.type = "button";
+          button.dataset.ppNavKey = `${title}/${resolve(item.key ?? item.label, s)}`;
+          const glyph = resolve(item.icon, s);
+          const color = String(resolve(item.color, s) ?? "");
+          // Glyph: the icon, else a dot in `color`; with neither, a muted dot
+          // that a collapsed rail shows as the label's first letter.
+          if (glyph && ICONS[glyph]) { button.append(icon(glyph)); button.dataset.ppGlyph = "icon"; }
+          else {
+            const dot = el("span", "pp-nav-dot");
+            dot.setAttribute("aria-hidden", "true");
+            const colored = /^#[0-9a-f]{3,8}$/i.test(color);
+            if (colored) dot.style.setProperty("--pp-dot", color);
+            button.append(dot);
+            button.dataset.ppGlyph = colored ? "dot" : "letter";
+            if (!colored) {
+              const letter = el("span", "pp-nav-letter", (Array.from(label.trim())[0] || "•").toUpperCase());
+              letter.setAttribute("aria-hidden", "true");
+              button.append(letter);
+            }
+          }
+          button.append(el("span", "pp-nav-label", label));
+          const count = resolve(item.count, s);
+          const counted = count != null && count !== "" && Number(count) !== 0;
+          if (counted) {
+            // `count_tone: "danger"` (or any tone) colours the count, e.g. overdue.
+            const tone = item.count_tone ? String(resolve(item.count_tone, s) ?? "") : "";
+            button.append(el("span", `pp-nav-count${/^(danger|accent|ok|warn)$/.test(tone) ? ` pp-tone-${tone}` : ""}`, count));
+          }
+          const tooltip = item.tooltip ? String(resolve(item.tooltip, s) ?? "") : "";
+          button.dataset.ppTip = tooltip;
+          button.dataset.ppRailTip = counted ? `${label} (${count})` : label;
+          if (tooltip) button.title = tooltip;
+          button.addEventListener("click", () => this.act(item.action, s));
+          li.append(button);
+          // A menu with no entry that applies to this row (all `if`s false) shows no button.
+          const menuItems = Array.isArray(item.menu) ? item.menu.filter((m) => !("if" in m) || truthy(resolve(m.if, live(s)))) : [];
+          if (menuItems.length) {
+            const menu = this.node({ type: "menu", label: `More for ${label}`, icon: "more", align: "end", items: item.menu }, s);
+            if (menu) { menu.className += " pp-nav-menu"; li.append(menu); }
+          }
+          entries.push({ spec: item, scope: s, button });
+          items.append(li);
+        } });
+        if (!entries.length && spec.empty) items.append(el("li", "pp-nav-empty", resolve(spec.empty, scope)));
+        if (node.closest?.('.pp-workspace[data-collapsed="true"] > .pp-workspace-nav')) railTips(node, true);
+        sync();
+        if (focused) entries.find((entry) => entry.button.dataset.ppNavKey === focused)?.button.focus();
+      };
+      const savedViews = spec.source === "saved-views";
+      if (savedViews && !this.bridge.listViews) { node.hidden = true; return node; }
+      const source = savedViews ? () => this.bridge.listViews()
+        : spec.query ? () => this.bridge.query(spec.query, resolve(spec.params || {}, this.scope())) : null;
+      let signature = null;
+      let sequence = 0;
+      this.cleanups.push(() => { sequence++; });
+      draw();
+      if (source) this.lists.push(async () => {
+        const seq = ++sequence;
+        let next;
+        try { next = await source(); } catch (_) { return; }
+        if (this.disposed || seq !== sequence) return;
+        const text = JSON.stringify(next ?? []);
+        if (text === signature) return;
+        signature = text;
+        rows = Array.isArray(next) ? next : [];
+        draw();
+      });
+      this.watchers.push(sync);
+      return node;
+    },
+
+    /**
+     * A button with a menu: actions {label, text?, icon?, items: [{label,
+     * icon, variant, if, action}]} or one choice {label, bind, options,
+     * prefix?}. Items run through the usual action path, with `confirm`.
+     */
+    menu(spec, scope) {
+      const wrap = el("div", `pp-menu${spec.align === "start" ? " pp-menu-start" : ""}`);
+      const button = el("button", "pp-button pp-menu-button");
+      button.type = "button";
+      button.setAttribute("aria-haspopup", "menu");
+      // `focus_key`: after a menu action re-renders the row, focus returns to this button.
+      if (spec.focus_key) button.dataset.ppFocus = String(resolve(spec.focus_key, scope));
+      const panel = el("div", "pp-menu-panel");
+      panel.id = nextId("pp-menu");
+      panel.setAttribute("role", "menu");
+      button.setAttribute("aria-controls", panel.id);
+      const label = String(resolve(spec.label || "More actions", scope));
+      panel.setAttribute("aria-label", label);
+      const live = () => ({ ...scope, state: this.state });
+      const choices = typeof spec.bind === "string" && Array.isArray(spec.options);
+      const currentChoice = () => {
+        const current = String(lookup(live(), spec.bind) ?? "");
+        return spec.options.find((option) => String(resolve(option.value, live())) === current);
+      };
+      const paint = () => {
+        button.replaceChildren();
+        if (spec.icon && ICONS[spec.icon]) button.append(icon(spec.icon));
+        let text = spec.text != null ? String(resolve(spec.text, live()) ?? "") : "";
+        let spoken = label;
+        if (choices) {
+          const option = currentChoice();
+          const chosen = option ? String(resolve(option.label, live())) : "";
+          const changed = option && option !== spec.options[0];
+          if (spec.prefix) text = changed ? `${resolve(spec.prefix, live())}: ${chosen}` : String(resolve(spec.prefix, live()));
+          else if (spec.text == null) text = chosen;
+          spoken = chosen ? `${label}: ${chosen}` : label;
+          wrap.dataset.active = String(Boolean(changed));
+        }
+        button.className = `pp-button pp-menu-button${text ? "" : " pp-icon-button"}`;
+        if (text) {
+          button.append(el("span", "pp-menu-text", text));
+          if (spec.caret !== false) button.append(icon("chevron-down"));
+        }
+        button.setAttribute("aria-label", spoken);
+        button.title = label;
+      };
+      const itemsOf = () => [...panel.querySelectorAll(".pp-menu-item")];
+      const pop = popover(this, wrap, button, panel, () => {
+        panel.replaceChildren();
+        const made = [];
+        if (choices) {
+          const current = currentChoice();
+          for (const option of spec.options) {
+            const item = el("button", "pp-menu-item", resolve(option.label, live()));
+            item.type = "button";
+            item.setAttribute("role", "menuitemradio");
+            item.setAttribute("aria-checked", String(option === current));
+            item.addEventListener("click", () => {
+              pop.hide(true);
+              this.setState(spec.bind, resolve(option.value, live()));
+            });
+            panel.append(item);
+            made.push(item);
+          }
+        }
+        for (const entry of spec.items || []) {
+          if (entry.type === "divider") { if (made.length) panel.append(el("hr", "pp-menu-divider")); continue; }
+          if ("if" in entry && !truthy(resolve(entry.if, live()))) continue;
+          const text = String(resolve(entry.label, live()) ?? "");
+          const item = el("button", `pp-menu-item${entry.variant === "danger" ? " pp-tone-danger" : ""}`);
+          item.type = "button";
+          item.setAttribute("role", "menuitem");
+          if (entry.icon && ICONS[entry.icon]) item.append(icon(entry.icon));
+          item.append(el("span", "", text));
+          item.addEventListener("click", async () => {
+            const at = live();
+            pop.hide(true);
+            // In a sheet's ⋯ menu, let its autosaving forms finish first.
+            const sheet = wrap.closest?.(".pp-sheet");
+            if (sheet) {
+              const flush = { waits: [] };
+              for (const f of sheet.querySelectorAll("form")) f.dispatchEvent(new CustomEvent("pp-flush", { detail: flush }));
+              await Promise.all(flush.waits);
+            }
+            await this.confirmed(entry.action, at, text, entry.variant === "danger");
+          });
+          panel.append(item);
+          made.push(item);
+        }
+        if (!made.length) return false;
+        queueMicrotask(() => (made.find((item) => item.getAttribute?.("aria-checked") === "true") || made[0]).focus());
+        return true;
+      });
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowDown" || pop.isOpen()) return;
+        event.preventDefault?.();
+        pop.show();
+      });
+      panel.addEventListener("keydown", (event) => {
+        const items = itemsOf();
+        const at = items.indexOf(document.activeElement);
+        let next = null;
+        if (event.key === "ArrowDown") next = items[(at + 1) % items.length];
+        else if (event.key === "ArrowUp") next = items[(at - 1 + items.length) % items.length];
+        else if (event.key === "Home") next = items[0];
+        else if (event.key === "End") next = items[items.length - 1];
+        else if (event.key === "Tab") pop.hide(false);
+        if (next) { event.preventDefault?.(); next.focus(); }
+      });
+      paint();
+      if (choices || /state\./.test(String(spec.text ?? ""))) this.watchers.push(paint);
+      wrap.append(button, panel);
+      return wrap;
+    },
+
+    /**
+     * One toolbar for a list: {label, search: {bind, label, placeholder},
+     * filters: [{label, bind, multiple?, options?, options_query?, default?,
+     * placeholder?}], sort, group, layout: {label, bind, options}, display:
+     * [{label, bind, multiple?, options}], save?: {label, action}}.
+     * Filter changes are temporary page state; active ones show as removable
+     * chips with "Temporary · Save view · Reset".
+     */
+    "view-toolbar"(spec, scope) {
+      const node = el("div", "pp-toolbar-wrap");
+      const bar = el("div", "pp-toolbar");
+      bar.setAttribute("role", "toolbar");
+      bar.setAttribute("aria-label", resolve(spec.label || "View options", scope));
+      const chips = el("div", "pp-toolbar-chips");
+      node.append(bar, chips);
+      const live = () => ({ ...scope, state: this.state });
+      const read = (bind) => String(lookup(live(), bind) ?? "");
+      const filters = Array.isArray(spec.filters) ? spec.filters : [];
+      const fallback = (filter) => String(filter.default ?? "");
+      const loaded = new Map();
+      const optionsOf = (filter) => [
+        ...(filter.options || []).map((option) => ({ value: String(resolve(option.value, live()) ?? ""), label: String(resolve(option.label, live()) ?? "") })),
+        ...(loaded.get(filter) || []),
+      ];
+      const labelOf = (filter, value) => optionsOf(filter).find((option) => option.value === value)?.label ?? `Unavailable choice · ${value}`;
+      const valuesOf = (filter) => read(filter.bind).split(",").map((value) => value.trim()).filter(Boolean);
+      const active = () => filters.filter((filter) => read(filter.bind) !== fallback(filter));
+      // Choices as checkboxes (multiple) or radios, changing state at once.
+      const choiceGroup = (entry, options, onChange) => {
+        const group = el("fieldset", "pp-toolbar-group");
+        group.append(el("legend", "pp-label", resolve(entry.label, live())));
+        const multiple = Boolean(entry.multiple);
+        const chosen = new Set(multiple ? valuesOf(entry) : [read(entry.bind) || fallback(entry)]);
+        const name = nextId("pp-choice");
+        const known = new Set(options.map((option) => option.value));
+        const shown = [...options, ...[...chosen].filter((value) => value && !known.has(value)).map((value) => ({ value, label: `Unavailable choice · ${value}` }))];
+        for (const option of shown) {
+          const row = el("label", "pp-choice-option");
+          const input = el("input");
+          input.type = multiple ? "checkbox" : "radio";
+          input.name = name;
+          input.value = option.value;
+          input.checked = chosen.has(option.value);
+          input.addEventListener("change", () => {
+            if (multiple) {
+              if (input.checked) chosen.add(option.value); else chosen.delete(option.value);
+              onChange(shown.map((o) => o.value).filter((value) => chosen.has(value)).join(","));
+            } else if (input.checked) onChange(option.value);
+          });
+          row.append(input, el("span", "", option.label));
+          group.append(row);
+        }
+        if (!shown.length) group.append(el("p", "pp-muted", "No choices yet."));
+        return group;
+      };
+      const textField = (entry) => {
+        const field = el("label", "pp-field");
+        field.append(el("span", "pp-label", resolve(entry.label, live())));
+        const input = el("input", "pp-input");
+        input.type = "search";
+        input.value = read(entry.bind);
+        if (entry.placeholder) input.placeholder = resolve(entry.placeholder, live());
+        let timer;
+        this.cleanups.push(() => this.cancel(timer));
+        input.addEventListener("input", () => {
+          this.cancel(timer);
+          timer = this.schedule(() => this.setState(entry.bind, input.value), 250);
+        });
+        field.append(input);
+        return field;
+      };
+      const panelFor = (entries, panel, extra) => {
+        panel.replaceChildren();
+        for (const entry of entries) {
+          const options = optionsOf(entry);
+          if (entry.options || entry.options_query) panel.append(choiceGroup(entry, options, (value) => this.setState(entry.bind, value)));
+          else panel.append(textField(entry));
+        }
+        if (extra) panel.append(extra);
+        return true;
+      };
+      const popButton = (className, text) => {
+        const wrap = el("div", `pp-menu ${className}`);
+        const button = el("button", "pp-button pp-menu-button");
+        button.type = "button";
+        button.setAttribute("aria-haspopup", "dialog");
+        const panel = el("div", "pp-menu-panel pp-toolbar-panel");
+        panel.id = nextId("pp-panel");
+        button.setAttribute("aria-controls", panel.id);
+        if (text) button.append(el("span", "pp-menu-text", text));
+        wrap.append(button, panel);
+        return { wrap, button, panel };
+      };
+      const reset = () => this.setStates(filters.map((filter) => [filter.bind, fallback(filter)]));
+
+      if (spec.search?.bind) {
+        const search = el("div", "pp-toolbar-search");
+        const open = el("button", "pp-button pp-menu-button pp-icon-button");
+        open.type = "button";
+        const label = String(resolve(spec.search.label || "Search", scope));
+        open.setAttribute("aria-label", label);
+        open.title = label;
+        open.append(icon("search"));
+        const input = el("input", "pp-input");
+        input.type = "search";
+        input.setAttribute("aria-label", label);
+        input.placeholder = resolve(spec.search.placeholder || label, scope);
+        input.value = read(spec.search.bind);
+        const expand = (on) => {
+          search.dataset.expanded = String(on);
+          input.hidden = !on;
+          open.setAttribute("aria-expanded", String(on));
+        };
+        expand(Boolean(input.value));
+        let timer;
+        this.cleanups.push(() => this.cancel(timer));
+        open.addEventListener("click", () => { expand(true); input.focus(); });
+        input.addEventListener("input", () => {
+          this.cancel(timer);
+          timer = this.schedule(() => this.setState(spec.search.bind, input.value), 150);
+        });
+        input.addEventListener("keydown", (event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault?.();
+          this.cancel(timer);
+          input.value = "";
+          this.setState(spec.search.bind, "");
+          expand(false);
+          open.focus();
+        });
+        input.addEventListener("blur", () => { if (!input.value) expand(false); });
+        this.watchers.push(() => {
+          const value = read(spec.search.bind);
+          if (document.activeElement !== input && input.value !== value) { input.value = value; expand(Boolean(value) || !input.hidden); }
+        });
+        search.append(open, input);
+        bar.append(search);
+      }
+
+      let filterButton = null;
+      if (filters.length) {
+        const parts = popButton("pp-toolbar-filter", "");
+        filterButton = parts;
+        const clear = el("button", "pp-button pp-ghost", "Clear filters");
+        clear.type = "button";
+        clear.addEventListener("click", () => { reset(); pop.hide(true); });
+        const pop = popover(this, parts.wrap, parts.button, parts.panel, () => panelFor(filters, parts.panel, clear));
+        bar.append(parts.wrap);
+      }
+      for (const key of ["sort", "group"]) {
+        const entry = spec[key];
+        if (!entry?.bind) continue;
+        const menu = this.node({ type: "menu", label: entry.aria_label || entry.label, prefix: entry.label, bind: entry.bind, options: entry.options, align: "start" }, scope);
+        if (menu) bar.append(menu);
+      }
+      bar.append(el("span", "pp-toolbar-spacer"));
+      if (spec.layout?.bind) {
+        const menu = this.node({ type: "menu", label: spec.layout.label || "Layout", bind: spec.layout.bind, options: spec.layout.options, align: "end" }, scope);
+        if (menu) bar.append(menu);
+      }
+      if (Array.isArray(spec.display) && spec.display.length) {
+        const parts = popButton("pp-toolbar-display", "Display");
+        parts.button.setAttribute("aria-label", "Display options");
+        popover(this, parts.wrap, parts.button, parts.panel, () => panelFor(spec.display, parts.panel));
+        bar.append(parts.wrap);
+      }
+
+      const paint = () => {
+        const on = active();
+        if (filterButton) {
+          filterButton.button.replaceChildren(el("span", "pp-menu-text", on.length ? `Filter · ${on.length}` : "Filter"));
+          filterButton.button.setAttribute("aria-label", on.length ? `Filter, ${on.length} active` : "Filter");
+          filterButton.wrap.dataset.active = String(on.length > 0);
+        }
+        chips.replaceChildren();
+        chips.hidden = !on.length;
+        for (const filter of on) {
+          const name = String(resolve(filter.label, live()) ?? "");
+          const values = filter.multiple ? valuesOf(filter) : [read(filter.bind)];
+          for (const value of values) {
+            const text = filter.options || filter.options_query
+              ? (filter.multiple ? `${name}: ${labelOf(filter, value)}` : labelOf(filter, value))
+              : `${name}: ${value}`;
+            const chip = el("span", "pp-toolbar-chip");
+            chip.append(el("span", "", text));
+            const remove = el("button", "pp-toolbar-chip-remove");
+            remove.type = "button";
+            remove.setAttribute("aria-label", `Remove filter ${text}`);
+            remove.append(icon("close"));
+            remove.addEventListener("click", () => {
+              const next = filter.multiple ? values.filter((other) => other !== value).join(",") : fallback(filter);
+              this.setState(filter.bind, next);
+            });
+            chip.append(remove);
+            chips.append(chip);
+          }
+        }
+        if (on.length) {
+          const temp = el("span", "pp-toolbar-temp");
+          temp.title = "These filters are not saved. Save them as a view to keep them.";
+          temp.append(el("span", "", "Temporary"));
+          if (spec.save?.action) {
+            const save = el("button", "pp-toolbar-link", resolve(spec.save.label || "Save view", scope));
+            save.type = "button";
+            save.addEventListener("click", () => this.act(spec.save.action, live()));
+            temp.append(save);
+          }
+          const undo = el("button", "pp-toolbar-link", "Reset");
+          undo.type = "button";
+          undo.setAttribute("aria-label", "Reset filters");
+          undo.addEventListener("click", reset);
+          temp.append(undo);
+          chips.append(temp);
+        }
+      };
+      let optionsKey = null;
+      this.lists.push(async () => {
+        const wanted = filters.filter((filter) => filter.options_query?.query);
+        if (!wanted.length) return;
+        const results = await Promise.all(wanted.map((filter) => this.bridge
+          .query(filter.options_query.query, resolve(filter.options_query.params || {}, this.scope()))
+          .then((rows) => (rows || []).map((row) => ({
+            value: String(row[filter.options_query.value || "value"] ?? ""),
+            label: String(row[filter.options_query.label || "label"] ?? ""),
+          })))
+          .catch(() => null)));
+        if (this.disposed) return;
+        const key = JSON.stringify(results);
+        if (key === optionsKey) return;
+        optionsKey = key;
+        wanted.forEach((filter, index) => { if (results[index]) loaded.set(filter, results[index]); });
+        paint();
+      });
+      this.watchers.push(paint);
+      paint();
       return node;
     },
     /** An item from any plugin; incomplete refs draw nothing. */
@@ -971,8 +1760,14 @@
     section(spec, scope) {
       if (spec.collapsible) {
         const node = el("details", "pp-section pp-collapsible");
+        // "remember": a key under which this device keeps the section open
+        // or closed for this plugin, e.g. "task-more".
+        const key = spec.remember ? `terrarium.section.${this.bridge.plugin || "page"}.${String(resolve(spec.remember, scope))}` : "";
+        const stored = key ? deviceGet(key) : null;
         // "open": starts expanded, e.g. "{{row.needs_check}}".
-        if (spec.open !== undefined && truthy(resolve(spec.open, scope))) node.open = true;
+        if (stored === "open" || stored === "closed") node.open = stored === "open";
+        else if (spec.open !== undefined && truthy(resolve(spec.open, scope))) node.open = true;
+        if (key) node.addEventListener("toggle", () => deviceSet(key, node.open ? "open" : "closed"));
         node.append(el("summary", "pp-section-title", resolve(spec.title, scope)));
         return this.children(node, spec, scope);
       }
@@ -987,7 +1782,18 @@
         this.titleHidden = true;
         return null;
       }
-      return el(`h${level}`, `pp-heading pp-h${level}`, resolve(spec.text, scope));
+      // `style: "title"` is the 22px page title; `tooltip` explains the view.
+      const node = el(`h${level}`, `pp-heading pp-h${level}${spec.style === "title" ? " pp-heading-title" : ""}`);
+      const sync = () => {
+        const live = { ...scope, state: this.state };
+        node.textContent = String(resolve(spec.text, live) ?? "");
+        const tip = spec.tooltip ? String(resolve(spec.tooltip, live) ?? "") : "";
+        if (tip) node.title = tip;
+        else node.removeAttribute("title");
+      };
+      sync();
+      if (/state\./.test(`${spec.text ?? ""} ${spec.tooltip ?? ""}`)) this.watchers.push(sync);
+      return node;
     },
 
     text(spec, scope) {
@@ -1057,11 +1863,12 @@
     },
 
     checkbox(spec, scope) {
-      const node = el("label", "pp-checkbox");
-      const input = el("input");
+      const node = el("label", `pp-checkbox${spec.style === "round" ? " pp-checkbox-round" : ""}`);
+      const input = el("input", spec.style === "round" ? "pp-item-check" : "");
       input.type = "checkbox";
+      if (spec.aria_label) input.setAttribute("aria-label", resolve(spec.aria_label, scope));
       input.checked = truthy(resolve(spec.checked, scope));
-      const text = el("span", "", resolve(spec.label, scope));
+      const text = el("span", "", resolve(spec.label ?? "", scope));
       if (input.checked) text.classList.add("pp-done");
       input.addEventListener("change", async () => {
         const ok = await this.act(spec.action, { ...scope, value: input.checked });
@@ -1113,18 +1920,25 @@
       input.id = id;
       input.placeholder = resolve(spec.placeholder || "Search", scope);
       input.value = lookup({ state: this.state }, spec.bind) ?? "";
-      let timer;
+      let timer, pending = false;
       this.cleanups.push(() => this.cancel(timer));
       input.addEventListener("input", () => {
         this.cancel(timer);
-        timer = this.schedule(() => this.setState(spec.bind, input.value), 150);
+        pending = true;
+        timer = this.schedule(() => { pending = false; this.setState(spec.bind, input.value); }, 150);
+      });
+      // An action can reset the bound state (e.g. `then: {"state.q": ""}`);
+      // show that, unless the user is mid-keystroke.
+      this.watchers.push(() => {
+        const value = lookup({ state: this.state }, spec.bind) ?? "";
+        if (!pending && input.value !== String(value)) input.value = value;
       });
       node.append(label, input);
       return node;
     },
 
     form(spec, scope) {
-      const form = el("form", `pp-form${spec.inline ? " pp-form-inline" : ""}`);
+      const form = el("form", `pp-form${spec.inline ? " pp-form-inline" : ""}${spec.style === "capture" ? " pp-form-capture" : ""}`);
       if (!spec.autosave) form.setAttribute("data-pp-draft", "true");
       form.addEventListener("input", () => { form.dataset.ppEdited = "true"; });
       scope = { ...scope, form: {} };
@@ -1213,6 +2027,22 @@
         retry.type = "button";
         retry.hidden = true;
         form.append(retry);
+        // In a sheet, the status shows in its header (see `sheet`); the
+        // form's own line only appears for an error, so stacked autosave
+        // forms keep normal field spacing.
+        // The slot is remembered: a form inside a list that reloads after the
+        // save is detached by the time "Saved" is shown.
+        let sheetSlot = null;
+        const show = (text, error = false) => {
+          status.textContent = text;
+          status.classList.toggle("pp-tone-danger", error);
+          if (foot) return;
+          sheetSlot = form.closest?.(".pp-sheet")?.querySelector?.(".pp-sheet-status") || sheetSlot;
+          const slot = sheetSlot;
+          if (!slot || slot.isConnected === false) return;
+          slot.textContent = text;
+          slot.classList.toggle("pp-tone-danger", error);
+        };
         const delay = Number(spec.autosave) > 1 ? Number(spec.autosave) : 800;
         const read = () => {
           const values = {};
@@ -1224,25 +2054,37 @@
         let saved = JSON.stringify(read());
         let timer = null;
         let running = Promise.resolve(true);
+        let pending = 0;
         const save = () => {
           this.cancel(timer);
           timer = null;
           const values = read();
           const text = JSON.stringify(values);
-          if (text === saved) return running;
+          if (text === saved) {
+            // A late `change` (a blur after the delay already saved) marks
+            // the form unsaved again with nothing new to save; clear it, or a
+            // sheet waiting for the form to settle would never close.
+            if (!pending) form.dataset.ppUnsaved = "false";
+            return running;
+          }
           saved = text;
-          status.textContent = "Saving…";
+          show("Saving…");
+          pending++;
           running = running.then(async () => {
-            if (this.disposed) return true;
-            const ok = await this.act({ op: spec.submit.op, args: spec.submit.args }, { ...scope, form: values });
-            if (this.disposed) return ok;
-            if (!ok) saved = "";
-            if (JSON.stringify(read()) === text) {
-              form.dataset.ppUnsaved = String(!ok);
-              status.textContent = ok ? "Saved on this device" : "Not saved — keep this editor open and try again";
+            try {
+              if (this.disposed) return true;
+              const ok = await this.act({ op: spec.submit.op, args: spec.submit.args }, { ...scope, form: values });
+              if (this.disposed) return ok;
+              if (!ok) saved = "";
+              if (JSON.stringify(read()) === text) {
+                form.dataset.ppUnsaved = String(!ok);
+                show(ok ? "Saved on this device" : "Not saved — keep this editor open and try again", !ok);
+              }
+              retry.hidden = ok;
+              return ok;
+            } finally {
+              pending--;
             }
-            retry.hidden = ok;
-            return ok;
           });
           return running;
         };
@@ -1250,12 +2092,14 @@
         const later = () => {
           this.cancel(timer);
           form.dataset.ppUnsaved = "true";
-          status.textContent = "Changes waiting to save…";
+          show("Changes waiting to save…");
           timer = this.schedule(save, delay);
         };
         this.cleanups.push(() => this.cancel(timer));
         form.addEventListener("input", later);
         form.addEventListener("change", later);
+        // Leaving a field saves at once instead of waiting for the delay.
+        form.addEventListener("focusout", () => { if (timer != null) save(); });
         form.addEventListener("pp-flush", (e) => e.detail?.waits.push(save()));
         form.addEventListener("submit", (e) => (e.preventDefault(), save()));
         return form;
@@ -1292,7 +2136,8 @@
         const reset = () => {
           for (const input of inputs) {
             if (input.dataset.ppKind === "toggle") input.checked = input.defaultChecked;
-            else if (input.dataset.ppKind !== "choice") input.value = input.defaultValue;
+            else if (input.dataset.ppReset !== undefined) input.value = input.dataset.ppReset;
+            else if (input.dataset.ppKind !== "choice" && !input.dataset.ppBound) input.value = input.defaultValue;
           }
           for (const choice of form.querySelectorAll(".pp-choice")) choice.dispatchEvent(new Event("pp-reset"));
           syncForm();
@@ -1614,8 +2459,8 @@
 
     select(spec, scope) {
       const id = nextId("pp-field");
-      const node = el("div", "pp-field");
-      const label = el("label", "pp-label", resolve(spec.label || spec.name, scope));
+      const node = el("div", `pp-field${styleClass(spec)}`);
+      const label = el("label", `pp-label${spec.label_hidden ? " pp-sr" : ""}`, resolve(spec.label || spec.name, scope));
       label.htmlFor = id;
       const select = el("select", "pp-input");
       select.id = id;
@@ -1640,6 +2485,9 @@
         if (select.selectedIndex < 0 && select.options.length) select.selectedIndex = 0;
       };
       showSelection(wanted ?? "", fixedOptions(), true);
+      // Form resets return a bound select to its state, others to their first value.
+      if (spec.bind) select.dataset.ppBound = "true";
+      else select.dataset.ppReset = wanted ?? select.value;
       if (spec.bind) {
         select.addEventListener("change", () => {
           const option = (spec.options || []).find(option => String(resolve(option.value, paramsScope())) === select.value);
@@ -1707,7 +2555,7 @@
 
     /** One of a few options as chips, e.g. priority: {name, label, options, value, multiple?}. Multiple holds "0,2,4". */
     choice(spec, scope) {
-      const node = el("fieldset", "pp-field pp-choice");
+      const node = el("fieldset", `pp-field pp-choice${styleClass(spec)}`);
       node.append(el("legend", "pp-label", resolve(spec.label || spec.name, scope)));
       const hidden = el("input");
       hidden.type = "hidden";
@@ -1759,7 +2607,10 @@
     item(spec, scope) {
       const flag = Number(resolve(spec.flag, scope)) || 0;
       const done = spec.strike_done !== false && truthy(resolve(spec.done, scope));
-      const node = el("div", `pp-item${flag ? ` pp-flag-${Math.min(flag, 3)}` : ""}${done ? " pp-item-done" : ""}`);
+      // `layout: "line"`: one row with an inline `note`, right-hand meta
+      // chips, and `actions` that replace the meta on hover or focus.
+      const line = spec.layout === "line";
+      const node = el("div", `pp-item${line ? " pp-item-line" : ""}${flag ? ` pp-flag-${Math.min(flag, 3)}` : ""}${done ? " pp-item-done" : ""}`);
       if (spec.read !== undefined) node.className += truthy(resolve(spec.read, scope)) ? " pp-item-read" : " pp-item-unread";
       const title = String(resolve(spec.title, scope) ?? "");
       if (spec.check) {
@@ -1792,32 +2643,129 @@
         main.type = "button";
         main.addEventListener("click", () => this.act(spec.action, scope));
       }
-      main.append(el("span", "pp-item-title", title));
-      if (flag) main.append(el("span", "pp-meta", `${["", "Low", "Medium", "High"][Math.min(flag, 3)]} priority`));
-      const subtitle = displayValue(resolve(spec.subtitle, scope), spec.subtitle_format);
-      // Snippets may end inside a blob reference after query truncation.
-      // Only display text is cleaned; markdown bodies retain their images.
-      const preview = typeof subtitle === "string" ? subtitle
-        .replace(/!?\[([^\]]*)\]\(terrarium:blob\/[^)]*(?:\)|$)/g, (_, name) => `📎 ${name || "Attachment"}`)
-        .replace(/!\[([^\]]*)\]\([^)]+\)/g, (_, name) => `[image: ${name || "Image"}]`) : subtitle;
-      if (truthy(preview)) main.append(el("span", "pp-item-subtitle", preview));
-      const chips = (spec.chips || [])
-        .map((c) => ({ text: displayValue(resolve(c.text, scope), c.format), tone: resolve(c.tone, scope), icon: resolve(c.icon, scope) }))
-        .filter((c) => truthy(c.text));
-      if (chips.length) {
-        const row = el("span", "pp-item-chips");
-        for (const c of chips) {
-          const chip = el("span", `pp-meta${c.tone ? ` pp-tone-${c.tone}` : ""}`);
-          if (c.icon && ICONS[c.icon]) chip.append(icon(c.icon));
-          chip.append(String(c.text));
-          row.append(chip);
-        }
-        main.append(row);
+      // A row that opens the page's item sheet is marked while its item is
+      // open, and J/K can step through such rows when the sheet is docked.
+      const entry = this.template.entry?.bind;
+      const set = spec.action?.set;
+      const opens = entry && set && typeof set === "object" && Object.hasOwn(set, entry)
+        ? String(resolve(set[entry], scope) ?? "") : "";
+      if (opens) {
+        main.dataset.ppSelect = opens;
+        main.dataset.ppSelectBind = entry;
+        main.dataset.ppFocus = `select:${entry}:${opens}`;
+        const mark = () => {
+          const on = String(lookup({ state: this.state }, entry) ?? "") === opens;
+          node.classList.toggle("pp-item-selected", on);
+          if (on) main.setAttribute("aria-current", "true");
+          else main.removeAttribute("aria-current");
+        };
+        this.watchers.push(mark);
+        mark();
       }
+      const priority = flag ? `${["", "Low", "Medium", "High"][Math.min(flag, 3)]} priority` : "";
+      if (line) {
+        const text = el("span", "pp-item-line-text");
+        text.append(el("span", "pp-item-title", title));
+        const note = displayValue(resolve(spec.note, scope));
+        if (truthy(note)) {
+          const small = el("span", "pp-item-note");
+          if (spec.note_icon && ICONS[spec.note_icon]) small.append(icon(spec.note_icon));
+          small.append(String(note));
+          text.append(small);
+        }
+        main.append(text);
+        main.title = priority ? `${title} · ${priority}` : title;
+      } else {
+        main.append(el("span", "pp-item-title", title));
+        if (flag) main.append(el("span", "pp-meta", priority));
+        const subtitle = displayValue(resolve(spec.subtitle, scope), spec.subtitle_format);
+        // Snippets may end inside a blob reference after query truncation.
+        // Only display text is cleaned; markdown bodies retain their images.
+        const preview = typeof subtitle === "string" ? subtitle
+          .replace(/!?\[([^\]]*)\]\(terrarium:blob\/[^)]*(?:\)|$)/g, (_, name) => `📎 ${name || "Attachment"}`)
+          .replace(/!\[([^\]]*)\]\([^)]+\)/g, (_, name) => `[image: ${name || "Image"}]`) : subtitle;
+        if (truthy(preview)) main.append(el("span", "pp-item-subtitle", preview));
+      }
+      // `fields` (a comma list) shows only chips whose `field` it names.
+      const fields = spec.fields === undefined ? null
+        : new Set(String(resolve(spec.fields, scope) ?? "").split(",").map((name) => name.trim()).filter(Boolean));
+      const chipStyles = new Set(["tag", "time", "source", "parent"]);
+      const group = scope.$group;
+      // A chip's `if` hides it, and `field` ties it to the `fields` list.
+      const chipEntries = (list) => (list || [])
+        .filter((c) => !fields || !c.field || fields.has(String(c.field)))
+        .filter((c) => c.if === undefined || truthy(resolve(c.if, scope)))
+        .map((c) => ({ text: displayValue(resolve(c.text, scope), c.format), tone: resolve(c.tone, scope), icon: resolve(c.icon, scope), style: c.style, slot: c.slot,
+          iconOnly: truthy(resolve(c.icon_only, scope)), label: resolve(c.label, scope) }))
+        .filter((c) => truthy(c.text) && (group == null || String(c.text) !== group));
+      const chipNode = (c) => {
+        // `icon_only`: just the icon, with `label` (or the text) as its name.
+        const bare = c.iconOnly && c.icon && ICONS[c.icon];
+        const chip = el("span", `pp-meta${chipStyles.has(c.style) ? ` pp-meta-${c.style}` : ""}${bare ? " pp-meta-icon" : ""}${c.tone ? ` pp-tone-${c.tone}` : ""}`);
+        if (c.icon && ICONS[c.icon]) chip.append(icon(c.icon));
+        if (bare) {
+          const name = String(truthy(c.label) ? c.label : c.text);
+          chip.title = name;
+          chip.setAttribute("role", "img");
+          chip.setAttribute("aria-label", name);
+        } else {
+          chip.append(String(c.text));
+          // `label` on a text chip is its tooltip, e.g. what blocks a task.
+          if (truthy(c.label)) chip.title = String(c.label);
+        }
+        return chip;
+      };
+      // `meta`: muted chips on a second line under the title (line layout).
+      const metaChips = line ? chipEntries(spec.meta) : [];
+      if (metaChips.length) {
+        const meta = el("span", "pp-item-meta");
+        for (const c of metaChips) meta.append(chipNode(c));
+        const text = main.children[0];
+        const body = el("span", "pp-item-line-body");
+        main.replaceChildren(body);
+        body.append(text, meta);
+      }
+      const chips = chipEntries(spec.chips);
+      // `slots: [{name, width, field?, if?}]` gives chips with a matching
+      // `slot` a fixed-width column, so dates and tags line up between rows.
+      const slotSpecs = line && Array.isArray(spec.slots)
+        ? spec.slots.filter((slot) => (slot.if === undefined || truthy(resolve(slot.if, scope)))
+          && (!fields || !slot.field || String(slot.field).split(",").some((name) => fields.has(name.trim())))) : [];
+      if (chips.length || slotSpecs.length) {
+        const row = el("span", "pp-item-chips");
+        if (slotSpecs.length) {
+          row.className += " pp-item-slots";
+          for (const slot of slotSpecs) {
+            const cell = el("span", `pp-slot pp-slot-${slot.name}`);
+            if (slot.width) cell.style.setProperty("--pp-slot-width", `${Number(slot.width)}px`);
+            for (const c of chips) if (c.slot === slot.name) cell.append(chipNode(c));
+            row.append(cell);
+          }
+        }
+        // Chips for a hidden slot are dropped with it.
+        for (const c of chips) if (!c.slot || !Array.isArray(spec.slots)) row.append(chipNode(c));
+        if (row.children.length) main.append(row);
+      }
+      if (spec.calm) node.className += " pp-item-calm";
       node.append(main);
+      if (spec.actions?.length) {
+        const actions = el("span", "pp-item-actions");
+        for (const child of spec.actions) {
+          const n = this.node(child, scope);
+          if (n) actions.append(n);
+        }
+        if (actions.children.length) node.append(actions);
+      }
       for (const child of spec.trailing || []) {
         const n = this.node(child, scope);
         if (n) node.append(n);
+      }
+      if (spec.row_action && !(spec.trailing || []).length) {
+        const { label, ...action } = spec.row_action;
+        const button = el("button", "pp-button pp-ghost pp-row-action", resolve(label, scope) || "Run");
+        button.type = "button";
+        button.addEventListener("click", () => this.act(action, scope));
+        node.append(button);
       }
       return node;
     },
@@ -1828,7 +2776,7 @@
      * query, its first row is `row` for the children.
      */
     sheet(spec, scope) {
-      const dialog = el("dialog", `pp-sheet${spec.size === "large" ? " pp-sheet-large" : ""}${spec.presentation === "modal" ? " pp-sheet-modal" : ""}`);
+      const dialog = el("dialog", `pp-sheet${spec.size === "large" ? " pp-sheet-large" : ""}${spec.size === "panel" ? " pp-sheet-panel" : ""}${spec.presentation === "modal" ? " pp-sheet-modal" : ""}`);
       const head = el("div", "pp-sheet-head");
       const heading = el("h2", "pp-sheet-title", resolve(spec.title, scope));
       heading.id = nextId("pp-sheet-title");
@@ -1837,7 +2785,13 @@
       close.type = "button";
       close.setAttribute("aria-label", "Close");
       close.append(icon("close"));
-      head.append(heading, close);
+      // `menu`: {label?, items} — the sheet's ⋯ actions (e.g. Delete), with row scope.
+      const menuHolder = el("div", "pp-sheet-menu");
+      // Autosave forms in the sheet report here (one line for the panel)
+      // instead of each keeping a status row under its fields.
+      const saveStatus = el("span", "pp-sheet-status");
+      saveStatus.setAttribute("aria-live", "polite");
+      head.append(heading, saveStatus, menuHolder, close);
       const body = el("div", "pp-sheet-body");
       dialog.append(head, body);
       let openKey = null;
@@ -1846,28 +2800,96 @@
       let closing = null;
       let internalCloses = 0;
       let dead = false;
+      // The page's item sheet (the template's `entry`, or `dock: true`) docks
+      // beside the page when the host offers a dock and the window is wide.
+      const dock = this.options.dock;
+      const dockable = Boolean(dock) && spec.dock !== false
+        && (spec.dock === true || (typeof spec.bind === "string" && spec.bind === this.template.entry?.bind));
+      let docked = false;
+      let home = null;
+      const current = () => lookup({ state: this.state }, spec.bind);
+      const flushBody = async () => {
+        const forms = [...body.querySelectorAll("form")];
+        do {
+          const flush = { waits: [] };
+          for (const form of forms) form.dispatchEvent(new CustomEvent("pp-flush", { detail: flush }));
+          if ((await Promise.all(flush.waits)).some(ok => ok === false)) return false;
+        } while (forms.some(form => form.dataset.ppUnsaved === "true"));
+        return true;
+      };
+      // J/K step through the rows that open this sheet; Escape closes it.
+      const keys = (event) => {
+        if (!docked || !dialog.open || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+        if (dock.active && !dock.active(dialog)) return;
+        if (document.querySelector?.("dialog[open]:not(.pp-sheet-docked)")) return;
+        const target = event.target;
+        const typing = Boolean(target) && (/^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName || "") || target.isContentEditable);
+        if (event.key === "Escape") {
+          if (typing && !dialog.contains(target)) return;
+          event.preventDefault?.();
+          shut();
+          return;
+        }
+        if (typing || !["j", "J", "k", "K"].includes(event.key)) return;
+        const rows = [...this.root.querySelectorAll("[data-pp-select]")]
+          .filter((node) => node.dataset.ppSelectBind === spec.bind && node.offsetParent !== null);
+        if (!rows.length) return;
+        const at = rows.findIndex((node) => node.dataset.ppSelect === String(current() ?? ""));
+        const step = event.key.toLowerCase() === "j" ? 1 : -1;
+        const next = rows[at < 0 ? 0 : Math.max(0, Math.min(rows.length - 1, at + step))];
+        event.preventDefault?.();
+        if (next.dataset.ppSelect === String(current() ?? "")) return;
+        next.focus?.({ preventScroll: true });
+        next.scrollIntoView?.({ block: "nearest" });
+        this.setState(spec.bind, next.dataset.ppSelect);
+      };
+      const undock = () => {
+        if (!docked) return;
+        docked = false;
+        this.docked.delete(dialog);
+        dialog.classList.remove("pp-sheet-docked");
+        document.removeEventListener?.("keydown", keys);
+        dock.detach(dialog);
+        if (home) { home.replaceWith?.(dialog); home = null; }
+      };
+      // Shows the sheet docked or as the usual panel, moving it if the
+      // window crossed the dock width while open.
+      const present = () => {
+        if (dead) return;
+        const wanted = dockable && Boolean(dock.available(dialog));
+        if (wanted !== docked && dialog.open) { internalCloses++; dialog.close(); }
+        if (wanted && !docked) {
+          docked = true;
+          this.docked.add(dialog);
+          home = el("span", "pp-sheet-home");
+          home.hidden = true;
+          dialog.replaceWith?.(home);
+          dialog.classList.add("pp-sheet-docked");
+          dock.attach(dialog, { close: () => shut(), reflow: () => { if (dialog.open) present(); } });
+          document.addEventListener?.("keydown", keys);
+        } else if (!wanted && docked) undock();
+        if (dialog.open) return;
+        if (!docked) dialog.showModal();
+        else if (dialog.show) dialog.show();
+        else dialog.open = true;
+      };
       this.cleanups.push(() => {
         dead = true; revision++; openKey = null;
         this.release(region);
         if (dialog.open) { internalCloses++; dialog.close(); }
+        undock();
       });
-      const current = () => lookup({ state: this.state }, spec.bind);
       let closeScope = null;
       const shut = () => {
         if (dead) return Promise.resolve(true);
         if (closing) return closing;
         if (openKey == null) return Promise.resolve(true);
         const key = openKey, version = revision, scope = closeScope;
-        const forms = [...body.querySelectorAll("form")];
         close.disabled = true;
         closing = (async () => {
           // Keep the modal open/inert until autosave has drained. An old close
           // must never clear a newer sheet opened while a request was pending.
-          do {
-            const flush = { waits: [] };
-            for (const form of forms) form.dispatchEvent(new CustomEvent("pp-flush", { detail: flush }));
-            if ((await Promise.all(flush.waits)).some(ok => ok === false)) return false;
-          } while (forms.some(form => form.dataset.ppUnsaved === "true"));
+          if (!await flushBody()) return false;
           if (dead || version !== revision) return false;
           if (spec.on_close && scope && !await this.act(spec.on_close, scope)) return false;
           if (dead || version !== revision) return false;
@@ -1875,23 +2897,46 @@
           revision++;
           if (current() === key) this.setState(spec.bind, "");
           if (dialog.open) { internalCloses++; dialog.close(); }
+          undock();
           return true;
         })().finally(() => { closing = null; close.disabled = false; });
         return closing;
       };
       close.addEventListener("click", shut);
-      dialog.addEventListener("click", e => { if (e.target === dialog) shut(); });
+      dialog.addEventListener("click", e => { if (e.target === dialog && !docked) shut(); });
       dialog.addEventListener("cancel", e => { e.preventDefault(); shut(); });
       dialog.addEventListener("close", () => {
         if (internalCloses) { internalCloses--; return; }
-        if (!dead && truthy(current()) && dialog.isConnected) { dialog.showModal(); shut(); }
+        if (!dead && truthy(current()) && dialog.isConnected) { present(); shut(); }
       });
-      const build = async (key, version) => {
+      const fill = (target, inner) => {
+        this.children(target, spec, inner);
+        menuHolder.replaceChildren();
+        if (spec.menu?.items?.length) {
+          const menu = this.node({ type: "menu", icon: "more", align: "end", label: spec.menu.label || "More actions", items: spec.menu.items }, inner);
+          if (menu) menuHolder.append(menu);
+        }
+      };
+      const build = async (key, version, previous) => {
+        // Docked, the list beside stays usable: picking another row saves
+        // (and closes) the item on show before the next one replaces it.
+        if (docked && dialog.open && previous != null && previous !== key) {
+          const before = closeScope;
+          const saved = await flushBody() && (!spec.on_close || !before || await this.act(spec.on_close, before));
+          if (dead || version !== revision) return;
+          if (!saved) {
+            openKey = previous;
+            this.setState(spec.bind, previous);
+            // Say why the panel did not switch instead of staying put silently.
+            this.bridge.toast("Couldn’t save this item, so it stays open. Fix it or press Escape, then pick another.", "error");
+            return;
+          }
+        }
         let row;
         if (spec.query) {
           const rows = await this.bridge.query(spec.query, resolve(spec.params || {}, this.scope())).catch(() => []);
           if (dead || version !== revision) return;
-          row = withRef(rows[0], spec.table, this.bridge.plugin);
+          row = withRef(rows[0], spec.table, this.bridge.refPlugin || this.bridge.plugin);
           if (!row) return this.setState(spec.bind, "");
         }
         if (dead || key !== openKey || version !== revision) return;
@@ -1899,19 +2944,24 @@
         closeScope = inner;
         this.release(region);
         body.replaceChildren();
-        region = this.region(() => this.children(body, spec, inner));
+        saveStatus.textContent = "";
+        saveStatus.classList.remove("pp-tone-danger");
+        region = this.region(() => fill(body, inner));
         heading.textContent = resolve(spec.title, inner);
         await Promise.all(region.lists.map((list) => list()));
         if (dead || key !== openKey || version !== revision) return;
-        if (!dialog.open) dialog.showModal();
-        // Focus the first field with a keyboard and mouse; on a phone that would pop the keyboard up.
-        if (matchMedia("(hover: hover)").matches) body.querySelector("input:not([type=hidden]), textarea")?.focus({ preventScroll: true });
+        present();
+        body.scrollTop = 0;
+        // Focus the first field with a keyboard and mouse; on a phone that
+        // would pop the keyboard up. Docked, keep the keyboard on the list.
+        if (!docked && matchMedia("(hover: hover)").matches) body.querySelector("input:not([type=hidden]), textarea")?.focus({ preventScroll: true });
       };
       this.watchers.push(() => {
         const key = current();
         if (truthy(key) && key !== openKey) {
+          const previous = openKey;
           openKey = key;
-          build(key, ++revision);
+          build(key, ++revision, previous);
         } else if (!truthy(key)) shut();
         for (const watch of region.watchers) watch();
       });
@@ -1923,14 +2973,14 @@
           const rows = await this.bridge.query(spec.query, resolve(spec.params || {}, this.scope())).catch(() => []);
           if (dead) return;
           const typing = body.contains(document.activeElement) && document.activeElement.matches("input, textarea, select, [contenteditable]");
-          const row = withRef(rows[0], spec.table, this.bridge.plugin);
+          const row = withRef(rows[0], spec.table, this.bridge.refPlugin || this.bridge.plugin);
           if (row && JSON.stringify(row) !== JSON.stringify(closeScope?.row) && !typing) {
             const inner = this.scope({ row });
             closeScope = inner;
             const top = body.scrollTop;
             const fresh = el("div");
             this.release(region);
-            region = this.region(() => this.children(fresh, spec, inner));
+            region = this.region(() => fill(fresh, inner));
             body.replaceChildren(...fresh.childNodes);
             heading.textContent = resolve(spec.title, inner);
             await Promise.all(region.lists.map((list) => list()));
@@ -2192,6 +3242,11 @@
       const countLabel = (count) => (count === 0 ? "no items" : count === 1 ? "1 item" : `${count} items`);
       const entryLabel = (row) => String(row?.[spec.title] ?? "");
       const runAction = (row) => spec.action && this.act(spec.action, { ...scope, row });
+      const runRowAction = (row) => {
+        if (!spec.row_action) return;
+        const { label, ...action } = spec.row_action;
+        return this.act(action, { ...scope, row });
+      };
 
       const render = () => {
         const grid = monthGrid(monthState().year, monthState().month);
@@ -2248,6 +3303,13 @@
               button.type = "button";
               button.addEventListener("click", () => runAction(item));
               td.append(button);
+              if (spec.row_action) {
+                const { label } = spec.row_action;
+                const actionButton = el("button", "pp-cal-entry pp-cal-row-action", resolve(label, { ...scope, row: item }) || "Run");
+                actionButton.type = "button";
+                actionButton.addEventListener("click", () => runRowAction(item));
+                td.append(actionButton);
+              }
             }
             if (items.length > maxEntries) {
               const more = el("button", "pp-cal-more", `+${items.length - maxEntries} more`);
@@ -2284,6 +3346,13 @@
           if (spec.action) content.addEventListener("click", () => runAction(row));
           content.append(el("span", "pp-item-title", entryLabel(row)));
           item.append(content);
+          if (spec.row_action) {
+            const { label } = spec.row_action;
+            const actionButton = el("button", "pp-button pp-ghost pp-row-action", resolve(label, { ...scope, row }) || "Run");
+            actionButton.type = "button";
+            actionButton.addEventListener("click", () => runRowAction(row));
+            item.append(actionButton);
+          }
           listRows.append(item);
         }
         list.append(listRows);
@@ -2520,6 +3589,17 @@
       const board = ["board", "matrix"].includes(spec.layout);
       const node = el("ul", `pp-list${board ? ` pp-board pp-board-${spec.layout}` : ""}${spec.layout === "chips" ? " pp-list-chips" : spec.layout === "plain" ? " pp-list-plain" : ""}`);
       if (spec.layout === "board") node.style.setProperty("--pp-lanes", String((spec.columns || []).length));
+      // `tree: {depth, remember?}`: rows with a higher `depth` than the row
+      // before are indented under it; the parent gets a disclosure arrow.
+      // Collapsed parents are kept for this view and, with `remember`, on this device.
+      const tree = !board && spec.tree && typeof spec.tree === "object" ? spec.tree : null;
+      const treeDepth = (row) => (tree ? Math.max(0, Math.min(2, Number(row?.[tree.depth || "depth"]) || 0)) : 0);
+      const treeKey = tree && tree.remember ? `terrarium.tree.${this.bridge.plugin || "page"}.${String(resolve(tree.remember, scope))}` : "";
+      const collapsedRows = new Set();
+      if (treeKey) {
+        try { for (const id of JSON.parse(deviceGet(treeKey) || "[]")) collapsedRows.add(String(id)); } catch (_) {}
+      }
+      if (tree) node.className += " pp-list-tree";
       const selectable = !!(spec.select && Array.isArray(spec.select.actions) && this.bridge.bulk);
       const wrap = selectable ? el("div", "pp-select-list") : null;
       const bar = selectable ? el("div", "pp-select-bar") : null;
@@ -2583,6 +3663,9 @@
         if (on) selected.add(id);
         else selected.delete(id);
       };
+      // `select.bind` starts selection from elsewhere (say a page menu)
+      // instead of drawing an idle Select button above the rows.
+      const selectBind = selectable && typeof spec.select.bind === "string" ? spec.select.bind : null;
       const setSelecting = (on) => {
         selecting = !!on;
         wrap.dataset.selecting = String(selecting);
@@ -2592,7 +3675,12 @@
         }
         syncRows();
         drawBar();
+        if (selectBind && truthy(lookup(this.scope(), selectBind)) !== selecting) this.setState(selectBind, selecting ? "yes" : "");
       };
+      if (selectBind) this.watchers.push(() => {
+        const want = truthy(lookup(this.scope(), selectBind));
+        if (want !== selecting) setSelecting(want);
+      });
       const syncRows = () => {
         for (const [id, refs] of rowNodes) {
           const on = selected.has(id);
@@ -2607,7 +3695,7 @@
         bar.setAttribute("role", "toolbar");
         bar.setAttribute("aria-label", "Selection");
         if (!selecting) {
-          if (!currentRows.length) return;
+          if (!currentRows.length || selectBind) return;
           const select = el("button", "pp-button pp-ghost", "Select");
           select.type = "button";
           select.setAttribute("aria-label", resolve(spec.select.label || "Select items", scope));
@@ -2691,7 +3779,13 @@
       }
       node.setAttribute("aria-busy", "true");
       if (board) node.setAttribute("aria-label", resolve(spec.label || "Board", scope));
-      node.append(el("li", "pp-empty", "Loading…"));
+      // Row height: "compact" (36px) or "comfortable" (44px).
+      if (spec.density !== undefined) {
+        const paintDensity = () => { node.dataset.density = resolve(spec.density, this.scope()) === "compact" ? "compact" : "comfortable"; };
+        paintDensity();
+        this.watchers.push(paintDensity);
+      }
+      node.append(el("li", "pp-empty pp-loading", "Loading…"));
       let region = { lists: [], watchers: [] };
       let rendered = null;
       let sequence = 0;
@@ -2784,7 +3878,19 @@
         node.replaceChildren();
         region = { lists: [], watchers: [] };
         rowNodes = new Map();
-        if (rows.length === 0 && emptyText(spec, scope)) node.append(el("li", "pp-empty", resolve(emptyText(spec, scope), scope)));
+        if (rows.length === 0 && emptyText(spec, scope)) {
+          const empty = el("li", "pp-empty", resolve(emptyText(spec, scope), scope));
+          // `empty_action: {label, action, if?}`: one friendly next step.
+          const next = spec.empty_action;
+          if (next && (next.if === undefined || truthy(resolve(next.if, scope)))) {
+            const { label, if: _if, ...action } = next;
+            const button = el("button", "pp-button pp-ghost pp-empty-action", resolve(label, scope) || "Add");
+            button.type = "button";
+            button.addEventListener("click", () => this.act(action, scope));
+            empty.append(button);
+          }
+          node.append(empty);
+        }
         // All lanes share one result set, so filters and row limits are
         // identical to the list. Empty lanes remain visible for orientation.
         const lanes = new Map();
@@ -2870,6 +3976,7 @@
           }
         };
         let group;
+        let treeParent = "";
         const collapse = spec.collapse_group;
         const collapseActive = collapse && truthy(resolve(collapse.when, this.scope()));
         const expanded = collapse && truthy(lookup(this.scope(), collapse.bind));
@@ -2882,12 +3989,16 @@
             const started = Date.now();
             let count = 0;
             do {
-              const row = withRef(rows[index++], spec.table, this.bridge.plugin);
+              const row = withRef(rows[index++], spec.table, this.bridge.refPlugin || this.bridge.plugin);
               if (!board && spec.group && row[spec.group] !== group) {
                 group = row[spec.group];
                 const tone = spec.group_tone ? row[spec.group_tone] : null;
                 if (group != null) {
                   const heading = el("li", `pp-group${tone ? ` pp-tone-${tone}` : ""}`, collapseActive && group === collapse.value ? "" : group);
+                  // `group_count: true` adds the group's row count after its name.
+                  if (spec.group_count && !(collapseActive && group === collapse.value)) {
+                    heading.append(el("span", "pp-group-count", String(rows.filter(r => r[spec.group] === group).length)));
+                  }
                   if (collapseActive && group === collapse.value) {
                     const toggle = el("button", "pp-button pp-ghost", `${group} (${rows.filter(r => r[spec.group] === group).length})`);
                     toggle.type = "button";
@@ -3087,7 +4198,44 @@
                 item.prepend(check);
                 rowNodes.set(id, { item, check });
               }
-              const child = this.node(spec.item, { ...scope, row });
+              // Rows under a group heading know its value, so a chip that
+              // repeats it (an "Inbox" list chip in the Inbox group) is hidden.
+              if (tree) {
+                const depth = treeDepth(row);
+                addClass(item, "pp-tree-row");
+                if (depth > 0) {
+                  addClass(item, `pp-tree-child${depth > 1 ? " pp-tree-child-2" : ""}`);
+                  item.dataset.ppTreeParent = treeParent;
+                  if (collapsedRows.has(treeParent)) item.hidden = true;
+                } else {
+                  treeParent = validId(row) ? String(row.id) : "";
+                }
+                const next = rows[index];
+                if (next && treeDepth(next) > depth && validId(row)) {
+                  const parentId = String(row.id);
+                  const open = !collapsedRows.has(parentId);
+                  const toggle = el("button", "pp-tree-toggle");
+                  toggle.type = "button";
+                  toggle.setAttribute("aria-expanded", String(open));
+                  toggle.setAttribute("aria-label", `${open ? "Collapse" : "Expand"} subtasks of ${row.title ?? parentId}`);
+                  toggle.append(icon("chevron-down"));
+                  toggle.addEventListener("click", (event) => {
+                    event.preventDefault?.();
+                    event.stopPropagation?.();
+                    const nowOpen = collapsedRows.has(parentId);
+                    if (nowOpen) collapsedRows.delete(parentId);
+                    else collapsedRows.add(parentId);
+                    toggle.setAttribute("aria-expanded", String(nowOpen));
+                    toggle.setAttribute("aria-label", `${nowOpen ? "Collapse" : "Expand"} subtasks of ${row.title ?? parentId}`);
+                    for (const sibling of node.children) {
+                      if (sibling.dataset?.ppTreeParent === parentId) sibling.hidden = !nowOpen;
+                    }
+                    if (treeKey) deviceSet(treeKey, JSON.stringify([...collapsedRows]));
+                  });
+                  item.prepend(toggle);
+                }
+              }
+              const child = this.node(spec.item, { ...scope, row, $group: !board && spec.group && group != null ? String(group) : undefined });
               if (child) item.append(child);
               if (board) lanes.get(String(row[spec.column]))?.items.append(item);
               else fragment.append(item);
@@ -3131,7 +4279,7 @@
       orderSelect.append(asc, desc);
       orderLabel.append(orderSelect);
       sortbar.append(sortSelect, orderLabel);
-      wrap.append(sortbar);
+      if (!spec.server_sorted) wrap.append(sortbar);
 
       const table = el("table", "pp-table");
       table.setAttribute("aria-label", resolve(spec.label || "Table", scope));
@@ -3144,7 +4292,7 @@
       wrap.append(table);
 
       const columns = (spec.columns || []).map((column) => ({ ...column, type: column.type || "string" }));
-      let sort = columns.some((column) => column.key === spec.sort) ? spec.sort : (columns[0]?.key || "");
+      let sort = !spec.server_sorted && columns.some((column) => column.key === spec.sort) ? spec.sort : (spec.server_sorted ? "" : (columns[0]?.key || ""));
       let dir = spec.dir === "desc" ? "desc" : "asc";
       let rows = [];
       let region = { lists: [], watchers: [], cleanups: [] };
@@ -3174,12 +4322,16 @@
         headRow.replaceChildren();
         sortSelect.replaceChildren();
         for (const column of columns) {
+          const th = el("th");
+          th.setAttribute("scope", "col");
+          if (spec.server_sorted) {
+            th.textContent = String(column.label || column.key || "");
+            headRow.append(th);
+            continue;
+          }
           const opt = el("option", "", String(column.label || column.key || ""));
           opt.value = String(column.key || "");
           sortSelect.append(opt);
-
-          const th = el("th");
-          th.setAttribute("scope", "col");
           const current = column.key === sort;
           th.setAttribute("aria-sort", current ? (dir === "desc" ? "descending" : "ascending") : "none");
           const button = el("button", "pp-table-sort", String(column.label || column.key || ""));
@@ -3198,6 +4350,11 @@
           th.append(button);
           headRow.append(th);
         }
+        if (spec.row_action) {
+          const th = el("th", "pp-table-row-action-head", "Action");
+          th.setAttribute("scope", "col");
+          headRow.append(th);
+        }
         syncControls();
       };
 
@@ -3205,11 +4362,11 @@
         this.release(region);
         region = { lists: [], watchers: [], cleanups: [] };
         body.replaceChildren();
-        const sorted = sort ? sortRows(rows, sort, columns.find((c) => c.key === sort)?.type || "string", dir) : [...rows];
+        const sorted = !spec.server_sorted && sort ? sortRows(rows, sort, columns.find((c) => c.key === sort)?.type || "string", dir) : [...rows];
         if (sorted.length === 0 && emptyText(spec, scope)) {
           const tr = el("tr");
           const td = el("td", "pp-empty", resolve(emptyText(spec, scope), scope));
-          td.setAttribute("colspan", String(Math.max(1, columns.length)));
+          td.setAttribute("colspan", String(Math.max(1, columns.length + (spec.row_action ? 1 : 0))));
           tr.append(td);
           body.append(tr);
           return;
@@ -3226,6 +4383,15 @@
               open.addEventListener("click", () => this.act(spec.action, { ...scope, row }));
               td.append(open);
             } else td.textContent = value;
+            tr.append(td);
+          }
+          if (spec.row_action) {
+            const { label, ...action } = spec.row_action;
+            const td = el("td", "pp-table-row-action-cell");
+            const button = el("button", "pp-button pp-ghost pp-row-action", resolve(label, { ...scope, row }) || "Run");
+            button.type = "button";
+            button.addEventListener("click", () => this.act(action, { ...scope, row }));
+            td.append(button);
             tr.append(td);
           }
           body.append(tr);
@@ -3246,7 +4412,7 @@
       drawHead();
       const loadingRow = el("tr");
       const loadingCell = el("td", "pp-empty", "Loading…");
-      loadingCell.setAttribute("colspan", String(Math.max(1, columns.length)));
+      loadingCell.setAttribute("colspan", String(Math.max(1, columns.length + (spec.row_action ? 1 : 0))));
       loadingRow.append(loadingCell);
       body.append(loadingRow);
       const load = async () => {
@@ -3314,9 +4480,20 @@
     external: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
     folder: "M3 6h6l2 2h10v11H3z",
     eye: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z",
+    lock: "M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4",
     link: "M10 14a4 4 0 0 0 6 0l3-3a4 4 0 0 0-6-6l-1 1M14 10a4 4 0 0 0-6 0l-3 3a4 4 0 0 0 6 6l1-1",
     sparkle: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z",
     grip: "M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01",
+    more: "M5 12h.01M12 12h.01M19 12h.01",
+    search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4",
+    "chevron-down": "m6 9 6 6 6-6",
+    "panel-left": "M4 5h16v14H4zM9 5v14",
+    sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+    inbox: "M4 13l2-8h12l2 8M4 13v6h16v-6M4 13h5l1 2h4l1-2h5",
+    list: "M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01",
+    ready: "M12 3l8 9-8 9-8-9z",
+    board: "M4 4h4v16H4zM10 4h4v10h-4zM16 4h4v13h-4z",
+    table: "M4 5h16v14H4zM4 10h16M4 15h16M10 5v14",
   };
 
   function icon(name) {
@@ -3330,9 +4507,14 @@
     return svg;
   }
 
+  /** `style: "title" | "bare" | "compact"` on a field adds `pp-field-<style>` (calm, borderless or small inputs). */
+  function styleClass(spec) {
+    return typeof spec.style === "string" && /^[a-z-]+$/.test(spec.style) ? ` pp-field-${spec.style}` : "";
+  }
+
   function field(spec, scope, tag, type) {
     const id = nextId("pp-field");
-    const node = el("div", "pp-field");
+    const node = el("div", `pp-field${styleClass(spec)}`);
     const label = el("label", `pp-label${spec.label_hidden ? " pp-sr" : ""}`, resolve(spec.label || spec.name, scope));
     label.htmlFor = id;
     if (spec.required) label.append(el("span", "pp-required", " (required)"));
@@ -3352,6 +4534,13 @@
       if (input.disabled) input.value = "";
     });
     if (tag === "textarea" && spec.rows) input.rows = Number(spec.rows);
+    if (tag === "textarea" && spec.style === "bare") {
+      // A bare notes box grows with its text instead of scrolling.
+      const grow = () => { input.style.height = "auto"; if (input.scrollHeight) input.style.height = `${input.scrollHeight}px`; };
+      input.addEventListener("input", grow);
+      input.addEventListener("pp-value", grow);
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(grow);
+    }
     node.append(label, input);
     return node;
   }
@@ -3477,6 +4666,7 @@
       view.ready = view.mount();
       return view;
     },
+    sidebarShortcut,
     resolve,
     markdown,
     compareValues,
